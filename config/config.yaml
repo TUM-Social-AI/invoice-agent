@@ -1,0 +1,92 @@
+ollama:
+  base_url: "http://localhost:11434"
+
+  # Vision model — used for page classification, field extraction, and visual compliance checks.
+  # qwen2.5vl:32b  → ~24 GB RAM  | strong invoice/OCR accuracy, fits with reasoning model  ← RECOMMENDED
+  # qwen2.5vl:72b  → ~57 GB RAM  | best accuracy, run alone or with a tiny reasoning model
+  # qwen2.5vl:7b   → ~6 GB RAM   | current default, weakest on dense tables
+  vision_model: "qwen2.5vl:32b"         # ollama pull qwen2.5vl:32b
+
+  # Reasoning model — used only for the agentic loop (tool selection, JSON routing).
+  # Speed and JSON reliability matter more than raw intelligence here.
+  # qwen3:1.7b     → ~2 GB RAM   | #1 tool-calling accuracy in class (score 0.960)  ← RECOMMENDED
+  # qwen3:4b       → ~2.5 GB RAM | slightly higher accuracy ceiling, more headroom
+  # qwen2.5:7b     → ~5 GB RAM   | current default, older generation
+  reasoning_model: "qwen3:1.7b"         # ollama pull qwen3:1.7b
+
+  # Total RAM with both loaded: ~26 GB (fits easily in 96 GB)
+  #
+  # Request timeouts (seconds). Increase if your local models are slow under load.
+  timeout_chat_s: 240
+  timeout_generate_s: 420
+
+config_dir: "config/csv"
+
+learnings_path: "learnings/learnings.md"
+
+agent:
+  max_turns: 30
+  max_field_retries: 4
+  confidence_threshold: 0.65      # below this → blocking human-review flag
+  batch_review_threshold: 0.85    # between confidence_threshold and this → non-blocking batch review
+  planning_enabled: true          # generate an execution plan before the main loop
+  fallback_reasoning_model: null  # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
+  # Processing orchestration:
+  # - "loop":     primary agentic mode (LLM chooses next tool call)
+  # - "pipeline": deterministic debug fallback
+  orchestration: "loop"
+  # Agentic profile:
+  # - "patterned": macro/composite behavior (default for stable runs)
+  # - "detailed":  finer-grained tool usage (OCR/crop/localization-heavy)
+  loop_profile: "patterned"
+
+  # Tool exposure for the LLM (loop mode only).
+  # Defaults for patterned profile:
+  # - pipeline group ON (stable composite tool surface)
+  # - granular group OFF (unless you explicitly want detailed micro-tools)
+  # - learnings CRUD tools hidden (agent reads hydrated learnings context)
+  tool_groups_enabled: ["pipeline"]
+  tools_extra_allow: []
+  tools_extra_deny: ["install_package"]
+  learnings_tools_enabled: false
+
+  # Learnings injection + sizing.
+  learnings_inject_enabled: true
+  learnings_max_chars: 8000
+  planning_learnings_max_chars: 800
+
+  # Logging preview caps (0 = unlimited for console logs).
+  log_line_max_chars: 120
+  history_preview_chars: 300
+  # Multi-page visual compliance: max page images sent in one visual call.
+  visual_max_evidence_pages: 8
+
+  # Optional: CSV ground truth loader (used in --learn mode when _truth.json is missing).
+  # ground_truth_csv_path: "config/csv/ground_truth.csv"
+  ground_truth_csv_path: null
+  ground_truth_source_column: "Source file"
+  ground_truth_column_map: {}
+
+  # Optional phase 2 hooks (advanced recovery / more granular extraction).
+  # Keep OFF for patterned profile.
+  micro_tools_phase2: false
+
+  # Hybrid extraction/visual: try medium-res page images first, promote to full-res on weak/null/error.
+  hybrid_extraction: true
+
+  page_dpi: 150                          # lower = faster + less memory; 150 is good default
+  planning_timeout_s: 180
+  reflection_timeout_s: 120
+
+ocr:
+  # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
+  # Uses BCP-47 codes. Add languages that appear in your invoices.
+  # Install surya: pip install surya-ocr  (models ~300MB, downloaded on first run)
+  langs: ["es", "en", "fr"]
+
+output:
+  base_dir: "output"
+  include_page_crops: true               # save region crops for debugging
+
+logging:
+  level: "DEBUG"                          # DEBUG for verbose tool traces

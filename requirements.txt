@@ -1,0 +1,8 @@
+Pillow>=10.0.0
+PyYAML>=6.0
+pypdfium2>=4.30.0
+requests>=2.31.0
+surya-ocr
+
+# Dev / test
+pytest>=7.0
