@@ -9,6 +9,11 @@ from typing import Any
 from src.agent.state import AgentState
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
+from src.llm.config_resolve import (
+    fallback_reasoning_model_for_config,
+    prompt_limits_for_config,
+    reasoning_model_for_config,
+)
 from src.agent.prompts import build_system_prompt
 from src.agent.action_contract import (
     validate_action_contract as _validate_action_contract,
@@ -28,7 +33,8 @@ def agent_turn(
     chat_timeout_s: int = 120,
 ) -> dict:
     allowed = set(tool_names) if tool_names is not None else None
-    history_preview_chars = int(config.get("agent", {}).get("history_preview_chars", 300))
+    _plim = prompt_limits_for_config(config)
+    history_preview_chars = _plim["history_preview_chars"]
     system_prompt = build_system_prompt(
         state,
         store,
@@ -265,8 +271,9 @@ def agent_turn(
 
     # Adaptive model routing: switch to fallback if the agent has been struggling.
     # Falls back to primary model if no fallback is configured.
-    primary_model = config["ollama"]["reasoning_model"]
-    fallback_model = config.get("agent", {}).get("fallback_reasoning_model") or primary_model
+    primary_model = reasoning_model_for_config(config)
+    fb = fallback_reasoning_model_for_config(config)
+    fallback_model = fb or primary_model
     chosen_model = fallback_model if getattr(state, "use_fallback_model", False) else primary_model
 
     payload = {

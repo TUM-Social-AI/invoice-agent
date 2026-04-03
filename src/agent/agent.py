@@ -8,7 +8,8 @@ from pathlib import Path
 from src.agent.state import AgentState, AgentStatus
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
-from src.llm.ollama_provider import OllamaProvider
+from src.llm.config_resolve import prompt_limits_for_config, reasoning_model_for_config
+from src.llm.factory import build_llm_provider
 
 from src.agent.action_contract import validate_action_contract as _validate_action_contract
 from src.agent.phases import phase_tool_names
@@ -54,7 +55,8 @@ class InvoiceAgent:
         self.batch_review_threshold = cfg["batch_review_threshold"]
         self.planning_enabled = bool(config.get("agent", {}).get("planning_enabled", True))
         self.fallback_reasoning_model = config.get("agent", {}).get("fallback_reasoning_model") or None
-        self.planning_learnings_max_chars = int(config.get("agent", {}).get("planning_learnings_max_chars", 800))
+        _plim = prompt_limits_for_config(config)
+        self.planning_learnings_max_chars = _plim["planning_learnings_max_chars"]
         self.orchestration = str(config.get("agent", {}).get("orchestration", "loop")).strip().lower()
         self.log_line_max_chars = int(config.get("agent", {}).get("log_line_max_chars", 120))
         timeouts = _timeout_cfg(config)
@@ -62,7 +64,7 @@ class InvoiceAgent:
         self.generate_timeout_s = timeouts["generate_timeout_s"]
         self.planning_timeout_s = cfg["planning_timeout_s"]
         self.reflection_timeout_s = cfg["reflection_timeout_s"]
-        self.provider: LLMProvider = OllamaProvider(config["ollama"]["base_url"])
+        self.provider: LLMProvider = build_llm_provider(config)
         # Load surya OCR models once here — shared across all runs in this session.
         # Takes ~5-15s on first call; subsequent calls use cached weights.
         # If surya-ocr is not installed, this returns None and OCR is silently skipped.
@@ -152,7 +154,7 @@ Combine pages with the same role into a single extract_fields_vision call where 
 Adapt the plan based on the actual page inventory and prior learnings. Return ONLY valid JSON."""
 
         payload = {
-            "model": self.config["ollama"]["reasoning_model"],
+            "model": reasoning_model_for_config(self.config),
             "messages": [
                 {"role": "system", "content": "You are a planning assistant. Return only valid JSON."},
                 {"role": "user", "content": planning_prompt},
@@ -229,6 +231,9 @@ Adapt the plan based on the actual page inventory and prior learnings. Return ON
             f"Agent starting | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
             f"| log={log_path}"
         )
+
+        if hasattr(self.provider, "reset_meters"):
+            self.provider.reset_meters()  # type: ignore[attr-defined]
 
         # Pipeline orchestration (deterministic fixed sequence; no LLM tool routing).
         if self.orchestration == "pipeline":

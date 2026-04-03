@@ -9,16 +9,13 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.agent_settings import clip_for_log
+from src.llm.config_resolve import llm_timeouts
 
 logger = logging.getLogger(__name__)
 
 
 def timeout_cfg(config: dict) -> dict:
-    o = config.get("ollama", {})
-    return {
-        "chat_timeout_s": int(o.get("timeout_chat_s", 240)),
-        "generate_timeout_s": int(o.get("timeout_generate_s", 420)),
-    }
+    return llm_timeouts(config)
 
 
 def open_run_log(output_dir: str) -> tuple[str, Any]:

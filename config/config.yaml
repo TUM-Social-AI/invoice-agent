@@ -1,3 +1,26 @@
+# LLM backend: ollama (local) or gemini (Google AI API key).
+llm:
+  provider: ollama
+  # Optional shared HTTP timeouts (seconds); provider blocks can override (see ollama / gemini).
+  # timeout_chat_s: 300
+  # timeout_generate_s: 600
+  # Optional per-run caps for remote providers (Gemini); see docs/README.
+  # remote_guard:
+  #   max_llm_requests_per_run: 120
+  #   max_chat_requests_per_run: 60
+  #   max_generate_requests_per_run: 80
+  #   max_total_token_count_per_run: 500000
+  #   warn_token_threshold: 100000
+
+# Uncomment to use Gemini instead of Ollama (set GOOGLE_API_KEY or gemini.api_key_env).
+# gemini:
+#   api_key_env: GOOGLE_API_KEY
+#   reasoning_model: gemini-2.0-flash
+#   vision_model: gemini-2.0-flash
+#   timeout_generate_s: 600
+#   remote_guard:
+#     max_llm_requests_per_run: 80
+
 ollama:
   base_url: "http://localhost:11434"
 
@@ -50,14 +73,16 @@ agent:
   tools_extra_deny: ["install_package"]
   learnings_tools_enabled: false
 
-  # Learnings injection + sizing.
+  # Prompt sizing: auto uses larger caps for remote LLM (e.g. Gemini), smaller for Ollama.
+  # Omit or set learnings/history keys to null to use profile defaults; explicit integers override.
+  prompt_profile: auto
   learnings_inject_enabled: true
-  learnings_max_chars: 8000
-  planning_learnings_max_chars: 800
+  learnings_max_chars: null
+  planning_learnings_max_chars: null
 
   # Logging preview caps (0 = unlimited for console logs).
   log_line_max_chars: 120
-  history_preview_chars: 300
+  history_preview_chars: null
   # Multi-page visual compliance: max page images sent in one visual call.
   visual_max_evidence_pages: 8
 

@@ -193,6 +193,28 @@ Several mechanisms prevent the agent from getting stuck:
 
 ## Setup
 
+### Environment (Conda)
+
+If you use a Conda env named `invoice-agent`:
+
+```bash
+conda activate invoice-agent
+pip install -r requirements.txt
+```
+
+Or run one-off commands without activating:
+
+```bash
+conda run -n invoice-agent pip install -r requirements.txt
+conda run -n invoice-agent python main.py --pdf invoices/
+```
+
+### Optional: `.env` for API keys
+
+On startup, `main.py` loads a **`.env`** file from the **project root** (next to `main.py`), then from the **current working directory** (only variables not already set are filled in from the second file).
+
+For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). `.env` is gitignored.
+
 ### 1. Install Ollama
 ```
 https://ollama.com
@@ -215,6 +237,8 @@ Then update `config/config.yaml` to use the larger model names.
 ```bash
 pip install -r requirements.txt
 ```
+
+Includes `google-genai` for optional / future SDK use; the built-in **Gemini** backend calls the REST API via `requests` (no extra runtime wiring required beyond the API key).
 
 ### 4. Install surya OCR (optional but recommended)
 ```bash
@@ -299,9 +323,29 @@ Tool catalog and mode/group exposure details are documented in [`docs/tools.md`]
 ### `config/config.yaml`
 
 ```yaml
+llm:
+  provider: ollama   # or gemini (Google AI — set GOOGLE_API_KEY and gemini.* below)
+  # Shared timeouts (optional): gemini also reads gemini.timeout_* with higher precedence.
+  # timeout_chat_s: 300
+  # timeout_generate_s: 600
+  # Optional caps for remote APIs (Gemini): max_llm_requests_per_run, token warnings, etc.
+  # remote_guard:
+  #   max_llm_requests_per_run: 120
+  #   max_total_token_count_per_run: 500000
+  #   warn_token_threshold: 100000
+
 ollama:
+  base_url: "http://localhost:11434"
   vision_model: "qwen2.5vl:32b"    # used for extraction, inventory, visual checks
   reasoning_model: "qwen3:1.7b"    # used for the agent reasoning loop only
+
+# gemini:
+#   api_key_env: GOOGLE_API_KEY
+#   reasoning_model: gemini-2.0-flash
+#   vision_model: gemini-2.0-flash
+#   timeout_generate_s: 600
+#   remote_guard:
+#     max_llm_requests_per_run: 80
 
 agent:
   # Orchestration mode:
@@ -318,14 +362,15 @@ agent:
   tool_groups_enabled: ["pipeline"]
   learnings_tools_enabled: false
 
-  # Learnings auto-load + prompt sizing.
-  learnings_inject_enabled: true   # include loaded learnings in the system prompt
-  learnings_max_chars: 8000        # cap learnings loaded into state
-  planning_learnings_max_chars: 800
+  # Prompt sizing: auto → smaller caps for Ollama, larger for Gemini. Use null to take profile defaults.
+  prompt_profile: auto
+  learnings_inject_enabled: true
+  learnings_max_chars: null
+  planning_learnings_max_chars: null
 
   # Human-facing log preview sizing.
   log_line_max_chars: 120          # 0 = unlimited (console logs)
-  history_preview_chars: 300      # tool-output preview injected into the LLM
+  history_preview_chars: null      # tool-output preview injected into the LLM
   visual_max_evidence_pages: 6     # max pages included in one visual compliance call
   hybrid_extraction: true          # medium-res first, auto full-res on weak/null/error (vision extract + visual compliance)
 

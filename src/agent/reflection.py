@@ -9,6 +9,7 @@ from typing import Any
 from src.agent.state import AgentState
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
+from src.llm.config_resolve import reasoning_model_for_config
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +33,7 @@ def reflect(
 
     for turn in range(MAX_REFLECTION_TURNS):
         payload = {
-            "model": config["ollama"]["reasoning_model"],
+            "model": reasoning_model_for_config(config),
             "messages": [
                 {"role": "system", "content": build_reflection_prompt(state, diff_text, store)},
                 {"role": "user", "content": f"Reflection turn {turn + 1}. Write your next learning or finish."},

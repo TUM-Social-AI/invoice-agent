@@ -2,6 +2,15 @@
 
 This file lists the agent tools, their intent, key params, and how exposure is configured.
 
+## LLM backend
+
+- `llm.provider` in `config/config.yaml` selects the HTTP backend for all agent reasoning and vision LLM calls (`ollama` or `gemini`).
+- **Ollama**: uses `ollama.base_url`, `ollama.reasoning_model`, `ollama.vision_model`.
+- **Gemini**: uses the Generative Language API; set `gemini.api_key_env` (default `GOOGLE_API_KEY`) and `gemini.reasoning_model` / `gemini.vision_model` (Flash models are a good default for cost/latency). Implementation lives under `src/llm/` (`build_llm_provider`, `GeminiProvider`).
+- **Timeouts** (`timeout_cfg` / `llm_timeouts`): for Gemini, precedence is `gemini.timeout_*` → `llm.timeout_*` → `ollama.timeout_*` → defaults. For Ollama: `ollama.timeout_*` → `llm.timeout_*` → defaults.
+- **Remote guardrails** (`llm.remote_guard` and optional `gemini.remote_guard` merge, Gemini wins): optional `max_llm_requests_per_run`, `max_chat_requests_per_run`, `max_generate_requests_per_run`, `max_total_token_count_per_run`, `warn_token_threshold`. When any limit is set, Gemini calls go through `MeteredLLMProvider` (counters reset at each `InvoiceAgent.run()`).
+- **Prompt caps** (`agent.prompt_profile`: `auto` | `local` | `remote`): `auto` uses larger history/learnings caps for non-Ollama providers. Set `learnings_max_chars`, `planning_learnings_max_chars`, or `history_preview_chars` to an integer to override; use YAML `null` to use the profile default for that field.
+
 ## Mode Matrix
 
 - `agent.orchestration: loop`

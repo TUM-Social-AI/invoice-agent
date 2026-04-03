@@ -10,6 +10,7 @@ from typing import Any
 from src.agent.state import AgentState, AgentStatus
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
+from src.llm.config_resolve import ollama_base_url, prompt_limits_for_config, vision_model_for_config
 from src.agent.loop_utils import timeout_cfg as _timeout_cfg
 from src.tools.tools import (
     inspect_file,
@@ -43,11 +44,12 @@ def build_tool_registry(
     surya_models: "Optional[SuryaModels]" = None,
     provider: "LLMProvider | None" = None,
 ):
-    ollama_url = config["ollama"]["base_url"]
-    vision_model = config["ollama"]["vision_model"]
+    ollama_url = ollama_base_url(config)
+    vision_model = vision_model_for_config(config)
     learnings_path = config.get("learnings_path", "learnings/learnings.md")
     agent_cfg = config.get("agent", {})
-    learnings_max_chars = int(agent_cfg.get("learnings_max_chars", 8000))
+    _plim = prompt_limits_for_config(config)
+    learnings_max_chars = _plim["learnings_max_chars"]
     visual_max_evidence_pages = int(agent_cfg.get("visual_max_evidence_pages", 6))
     ocr_langs: list[str] = config.get("ocr", {}).get("langs", ["es", "en"])
     timeouts = _timeout_cfg(config)

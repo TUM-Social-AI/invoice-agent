@@ -22,6 +22,7 @@ import sys
 from pathlib import Path
 
 import yaml
+from dotenv import load_dotenv
 
 from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
@@ -64,6 +65,13 @@ def apply_configured_log_level(app_config: dict) -> None:
             h.setLevel(lvl)
         except Exception:
             pass
+
+
+def _load_dotenv_files() -> None:
+    """Load `.env` from repo root, then current working directory (later wins for duplicate keys)."""
+    root = Path(__file__).resolve().parent
+    load_dotenv(root / ".env")
+    load_dotenv()
 
 
 def load_app_config(path: str = "config/config.yaml") -> dict:
@@ -139,6 +147,7 @@ def main():
     parser.add_argument("--yes", "-y", action="store_true",
                         help="Skip confirmation prompt (use with --reset-learnings)")
     args = parser.parse_args()
+    _load_dotenv_files()
 
     # --reset-learnings handling (runs before anything else, no agent needed)
     if args.reset_learnings is not None:
