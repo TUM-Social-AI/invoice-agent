@@ -61,7 +61,12 @@ def fallback_action_after_llm_failure(state: AgentState, error_message: str = ""
     if next_step.startswith("classify_document_type"):
         return {"tool": "classify_document_type", "params": {}, "reasoning": "fallback: required scan step"}
     if next_step.startswith("convert_pdf_to_images"):
-        return {"tool": "convert_pdf_to_images", "params": {"dpi": 150}, "reasoning": "fallback: required extraction step"}
+        dpi = int(getattr(state, "page_render_dpi", 150) or 150)
+        return {
+            "tool": "convert_pdf_to_images",
+            "params": {"dpi": dpi},
+            "reasoning": "fallback: required extraction step",
+        }
 
     if state.action_history:
         last = state.action_history[-1]

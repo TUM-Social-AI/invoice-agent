@@ -24,19 +24,24 @@ Format:
 }
 """
 
+from __future__ import annotations
+
 import csv
 import json
 import logging
 import re
 from pathlib import Path
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional
 
 from src.agent.state import AgentState
+
+if TYPE_CHECKING:
+    from src.config.loader import ConfigStore
 
 logger = logging.getLogger(__name__)
 
 NUMERIC_TOLERANCE = 0.02      # for amounts
-RATE_TOLERANCE    = 0.001     # for percentages/rates
+RATE_TOLERANCE = 0.001     # for percentages/rates
 
 
 def _normalize_number_for_eval(v) -> Optional[float]:
@@ -101,86 +106,130 @@ def _normalize_number_for_eval(v) -> Optional[float]:
         return None
 
 
-def load_ground_truth(pdf_path: str, config: dict | None = None) -> Optional[dict]:
+def _ground_truth_match_key(label: str) -> str:
+    """
+    Normalise a PDF filename or CSV Source cell for fuzzy matching.
+
+    Pathlib's `.stem` must not be used on strings like ``A.5.d.- foo`` that lack ``.pdf``:
+    it treats the first ``.`` as the extension, producing a useless short stem (e.g. ``A.5.d``).
+    """
+    s = str(label).strip()
+    if s.lower().endswith(".pdf"):
+        base = Path(s).stem
+    else:
+        base = s
+    return re.sub(r"[^a-z0-9]+", "", base.lower())
+
+
+def _resolve_ground_truth_csv_path(cfg: dict | None, invoice_type_id: str | None) -> Optional[str]:
+    if not cfg:
+        return None
+    by_type = cfg.get("ground_truth_csv_by_invoice_type")
+    if isinstance(by_type, dict) and invoice_type_id and str(invoice_type_id).strip():
+        p = by_type.get(str(invoice_type_id).strip())
+        if p:
+            return str(p)
+    p = cfg.get("ground_truth_csv_path")
+    return str(p) if p else None
+
+
+def _truth_dict_from_csv_row(matched_row: dict, cfg: dict) -> dict:
+    col_map: dict = cfg.get("ground_truth_column_map") or {}
+    invoice_type_col = cfg.get("ground_truth_invoice_type_column")
+
+    fields: dict = {}
+    for csv_col, field_name in col_map.items():
+        if csv_col not in matched_row:
+            continue
+        raw = matched_row.get(csv_col)
+        if raw is None:
+            continue
+        raw_s = str(raw).strip()
+        if not raw_s:
+            continue
+        fields[str(field_name).strip()] = raw_s
+
+    truth: dict = {"fields": fields}
+    if invoice_type_col and invoice_type_col in matched_row:
+        truth["invoice_type_id"] = (matched_row.get(invoice_type_col) or "").strip() or None
+    return truth
+
+
+def load_ground_truth(
+    pdf_path: str,
+    config: dict | None = None,
+    invoice_type_id: str | None = None,
+) -> Optional[dict]:
     """
     Find and load the ground truth.
 
     1) Prefer `<pdf_stem>_truth.json` next to the PDF (existing behavior).
-    2) If missing and `agent.ground_truth_csv_path` is configured, load a matching
-       row from the CSV and convert it into the expected JSON shape.
+    2) If missing, resolve CSV path from `ground_truth_csv_by_invoice_type[invoice_type_id]`
+       or `ground_truth_csv_path`, then load a matching row.
     """
     truth_path = Path(pdf_path).with_name(Path(pdf_path).stem + "_truth.json")
-    if not truth_path.exists():
-        cfg = config.get("agent", {}) if config else {}
-        csv_path = cfg.get("ground_truth_csv_path")
-        if not csv_path:
-            return None
-
-        csv_path = str(csv_path)
-        csv_file = Path(csv_path)
-        if not csv_file.exists():
-            logger.warning(f"Ground truth CSV configured but not found: {csv_file}")
-            return None
-
-        source_col = str(cfg.get("ground_truth_source_column", "Source file"))
-        col_map: dict = cfg.get("ground_truth_column_map") or {}
-        invoice_type_col = cfg.get("ground_truth_invoice_type_column")
-
-        pdf_stem = Path(pdf_path).stem
-        pdf_key = re.sub(r"[^a-z0-9]+", "", pdf_stem.lower())
-
-        def _norm_source_key(s: str) -> str:
-            stem = Path(str(s).strip()).stem
-            return re.sub(r"[^a-z0-9]+", "", stem.lower())
-
-        matched_row = None
+    if truth_path.exists():
         try:
-            with open(csv_file, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                if not reader.fieldnames or source_col not in reader.fieldnames:
-                    logger.warning(
-                        f"Ground truth CSV missing source column '{source_col}'. "
-                        f"Found columns: {reader.fieldnames}"
-                    )
-                    return None
-                for row in reader:
-                    v = row.get(source_col, "")
-                    if not v:
-                        continue
-                    sk = _norm_source_key(v)
-                    if sk == pdf_key or pdf_key in sk or sk in pdf_key:
-                        matched_row = row
-                        break
+            return json.loads(truth_path.read_text(encoding="utf-8"))
         except Exception as e:
-            logger.warning(f"Could not read ground truth CSV {csv_file}: {e}")
+            logger.warning(f"Could not load ground truth {truth_path}: {e}")
             return None
 
-        if not matched_row:
-            return None
-
-        fields: dict = {}
-        for csv_col, field_name in col_map.items():
-            if csv_col not in matched_row:
-                continue
-            raw = matched_row.get(csv_col)
-            if raw is None:
-                continue
-            raw_s = str(raw).strip()
-            if not raw_s:
-                continue
-            # Keep raw strings/numbers; evaluator can normalise numerics/dates.
-            fields[str(field_name).strip()] = raw_s
-
-        truth: dict = {"fields": fields}
-        if invoice_type_col and invoice_type_col in matched_row:
-            truth["invoice_type_id"] = (matched_row.get(invoice_type_col) or "").strip() or None
-        return truth
-
-    try:
-        return json.loads(truth_path.read_text(encoding="utf-8"))
-    except Exception as e:
-        logger.warning(f"Could not load ground truth {truth_path}: {e}")
+    cfg = (config or {}).get("agent", {}) if config else {}
+    csv_path = _resolve_ground_truth_csv_path(cfg, invoice_type_id)
+    if not csv_path:
         return None
+
+    csv_file = Path(csv_path)
+    if not csv_file.exists():
+        logger.warning(f"Ground truth CSV configured but not found: {csv_file}")
+        return None
+
+    source_col = str(cfg.get("ground_truth_source_column", "Source file"))
+
+    pdf_key = _ground_truth_match_key(Path(pdf_path).name)
+
+    matched_row = None
+    try:
+        with open(csv_file, newline="", encoding="utf-8") as f:
+            reader = csv.DictReader(f)
+            if not reader.fieldnames or source_col not in reader.fieldnames:
+                logger.warning(
+                    f"Ground truth CSV missing source column '{source_col}'. "
+                    f"Found columns: {reader.fieldnames}"
+                )
+                return None
+            for row in reader:
+                v = row.get(source_col, "")
+                if not v:
+                    continue
+                sk = _ground_truth_match_key(v)
+                if sk == pdf_key or pdf_key in sk or sk in pdf_key:
+                    matched_row = row
+                    break
+    except Exception as e:
+        logger.warning(f"Could not read ground truth CSV {csv_file}: {e}")
+        return None
+
+    if not matched_row:
+        logger.info(
+            "Ground truth: no CSV row matched PDF '%s' (source column '%s' in %s).",
+            Path(pdf_path).name,
+            source_col,
+            csv_file,
+        )
+        return None
+
+    return _truth_dict_from_csv_row(matched_row, cfg)
+
+
+def ground_truth_csv_configured(config: dict | None) -> bool:
+    """True if any CSV-based ground truth path is set in config."""
+    cfg = (config or {}).get("agent", {}) if config else {}
+    if cfg.get("ground_truth_csv_path"):
+        return True
+    bt = cfg.get("ground_truth_csv_by_invoice_type")
+    return isinstance(bt, dict) and bool(bt)
 
 
 # ---------------------------------------------------------------------------
@@ -188,29 +237,73 @@ def load_ground_truth(pdf_path: str, config: dict | None = None) -> Optional[dic
 # ---------------------------------------------------------------------------
 
 def _normalize_number(v) -> Optional[float]:
-    # Kept for backward-compatible internal use by compare helpers.
-    # Delegates to the more robust normaliser.
     try:
-        # Avoid infinite recursion: reuse a slightly different implementation above.
-        return float(_normalize_number_for_eval(v)) if _normalize_number_for_eval(v) is not None else None
+        n = _normalize_number_for_eval(v)
+        return float(n) if n is not None else None
     except Exception:
         return None
 
 
-def _normalize_date(v) -> Optional[str]:
-    """Try to normalise a date string to YYYY-MM-DD."""
+def _normalize_date_value(
+    v: Any,
+    slash_order: str = "DMY",
+    *,
+    log: Optional[logging.Logger] = None,
+    field_name: str = "",
+) -> Optional[str]:
+    """
+    Normalise a date string to YYYY-MM-DD.
+
+    - ISO YYYY-MM-DD / YYYY/MM/DD (single-digit month/day allowed in regex below).
+    - Slash/dot/dash numeric: unambiguous when first token > 12 (DMY day-first) or
+      second token > 12 (MDY month-first). When both tokens are ≤ 12, use `slash_order`.
+    """
     if v is None:
         return None
     s = str(v).strip()
-    # DD/MM/YYYY or DD.MM.YYYY or DD-MM-YYYY
+    if not s:
+        return None
+
+    # YYYY-MM-DD or YYYY/MM/DD / YYYY.MM.DD
+    m = re.match(r"^(\d{4})[/.\-](\d{1,2})[/.\-](\d{1,2})$", s)
+    if m:
+        return f"{m.group(1)}-{m.group(2).zfill(2)}-{m.group(3).zfill(2)}"
+
+    # DD/MM/YYYY style (two 1–2 digit groups + 4 digit year)
     m = re.match(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{4})$", s)
-    if m:
-        return f"{m.group(3)}-{m.group(2).zfill(2)}-{m.group(1).zfill(2)}"
-    # YYYY-MM-DD already
-    m = re.match(r"^(\d{4})[/.\-](\d{2})[/.\-](\d{2})$", s)
-    if m:
-        return s
-    return s.lower()
+    if not m:
+        return s.lower()
+
+    a, b = int(m.group(1)), int(m.group(2))
+    y = int(m.group(3))
+    order = (slash_order or "DMY").strip().upper()
+    if order not in ("DMY", "MDY", "YMD"):
+        order = "DMY"
+
+    if a > 12:
+        day, month = a, b
+    elif b > 12:
+        month, day = a, b
+    else:
+        if order == "MDY":
+            month, day = a, b
+        else:
+            day, month = a, b
+        if log is not None:
+            log.debug(
+                "Ambiguous slash date for field %r: %r — interpreted as %s (month=%02d day=%02d). "
+                "Prefer ISO YYYY-MM-DD in ground truth CSV.",
+                field_name or "?",
+                s,
+                order,
+                month,
+                day,
+            )
+
+    if not (1 <= month <= 12 and 1 <= day <= 31):
+        return s.lower()
+
+    return f"{y}-{month:02d}-{day:02d}"
 
 
 def _normalize_string(v) -> str:
@@ -219,39 +312,61 @@ def _normalize_string(v) -> str:
     return str(v).strip().lower()
 
 
-def _compare_value(extracted, truth_val, field_name: str) -> dict:
+def _compare_pay_period(extracted, truth_val, *, date_parse: str, log: Optional[logging.Logger]) -> dict:
     """
-    Compare one extracted value against the ground truth.
-    Returns {"match": bool, "partial": bool, "extracted": ..., "truth": ...}
+    Pay periods are not scalars: bare month (8) must not be compared to year (2025) as numbers.
+    Prefer year overlap when truth is year-only; otherwise string/date normalization.
     """
-    if truth_val is None:
-        # No truth provided for this field — skip
-        return {"match": None, "partial": False, "extracted": extracted, "truth": truth_val,
-                "note": "no ground truth provided for this field"}
-
-    # Null extracted
-    if extracted is None or str(extracted).lower() in ("null", "none", ""):
-        return {"match": False, "partial": False, "extracted": None, "truth": truth_val,
-                "note": "field not extracted"}
-
-    # Try numeric comparison
+    ext_s_raw = str(extracted).strip()
+    tru_s_raw = str(truth_val).strip()
     ext_num = _normalize_number(extracted)
     tru_num = _normalize_number(truth_val)
+
     if ext_num is not None and tru_num is not None:
-        tol = RATE_TOLERANCE if "rate" in field_name or "pct" in field_name else NUMERIC_TOLERANCE
-        ok = abs(ext_num - tru_num) <= tol
-        return {"match": ok, "partial": False, "extracted": ext_num, "truth": tru_num,
-                "note": f"numeric diff: {abs(ext_num - tru_num):.4f}"}
+        # Month-only (1–12) vs year (e.g. 2025) — invalid numeric comparison
+        if 1 <= ext_num <= 12 and 1900 <= tru_num <= 2100:
+            return {
+                "match": False,
+                "partial": False,
+                "extracted": ext_num,
+                "truth": tru_num,
+                "note": "extracted looks like month number only; truth is a year — use MM/YYYY or text (e.g. Août 2025) in extraction and CSV",
+            }
+        if 1 <= tru_num <= 12 and 1900 <= ext_num <= 2100:
+            return {
+                "match": False,
+                "partial": False,
+                "extracted": ext_num,
+                "truth": tru_num,
+                "note": "truth looks like month-only; extracted is year-like — align period formats",
+            }
+        # Two year-like values (e.g. 2025 vs 2025)
+        if 1900 <= ext_num <= 2100 and 1900 <= tru_num <= 2100:
+            ok = abs(ext_num - tru_num) <= NUMERIC_TOLERANCE
+            return {
+                "match": ok,
+                "partial": False,
+                "extracted": ext_num,
+                "truth": tru_num,
+                "note": "" if ok else f"year diff: {abs(ext_num - tru_num):.4f}",
+            }
 
-    # Try date comparison
-    if any(kw in field_name for kw in ("date", "fecha", "period", "periodo")):
-        ext_d = _normalize_date(extracted)
-        tru_d = _normalize_date(truth_val)
-        ok = ext_d == tru_d
-        return {"match": ok, "partial": False, "extracted": ext_d, "truth": tru_d,
-                "note": "" if ok else f"date mismatch: '{ext_d}' vs '{tru_d}'"}
+    ext_d = _normalize_date_value(extracted, slash_order=date_parse, log=log, field_name="pay_period")
+    tru_d = _normalize_date_value(truth_val, slash_order=date_parse, log=log, field_name="pay_period")
+    if ext_d == tru_d:
+        return {"match": True, "partial": False, "extracted": ext_d, "truth": tru_d, "note": ""}
 
-    # String comparison
+    years_e = set(re.findall(r"\b(19\d{2}|20\d{2})\b", ext_s_raw))
+    years_t = set(re.findall(r"\b(19\d{2}|20\d{2})\b", tru_s_raw))
+    if years_e and years_t and years_e & years_t:
+        return {
+            "match": True,
+            "partial": False,
+            "extracted": ext_s_raw,
+            "truth": tru_s_raw,
+            "note": "same calendar year in both values",
+        }
+
     ext_s = _normalize_string(extracted)
     tru_s = _normalize_string(truth_val)
     exact = ext_s == tru_s
@@ -265,16 +380,99 @@ def _compare_value(extracted, truth_val, field_name: str) -> dict:
     }
 
 
+def _looks_like_short_date_fragment(s: str) -> bool:
+    t = str(s).strip()
+    return bool(re.match(r"^\d{1,2}[/.\-]\d{1,2}([/.\-]\d{2,4})?$", t))
+
+
+def _compare_value(
+    extracted,
+    truth_val,
+    field_name: str,
+    *,
+    date_parse: str = "DMY",
+    log: Optional[logging.Logger] = None,
+) -> dict:
+    """
+    Compare one extracted value against the ground truth.
+    Returns {"match": bool|None, "partial": bool, "extracted": ..., "truth": ...}
+    """
+    if truth_val is None:
+        return {"match": None, "partial": False, "extracted": extracted, "truth": truth_val,
+                "note": "no ground truth provided for this field"}
+
+    # Null extracted
+    if extracted is None or str(extracted).lower() in ("null", "none", ""):
+        return {"match": False, "partial": False, "extracted": None, "truth": truth_val,
+                "note": "field not extracted"}
+
+    if field_name == "pay_period":
+        return _compare_pay_period(extracted, truth_val, date_parse=date_parse, log=log)
+
+    # Try numeric comparison
+    ext_num = _normalize_number(extracted)
+    tru_num = _normalize_number(truth_val)
+    if ext_num is not None and tru_num is not None:
+        tol = RATE_TOLERANCE if "rate" in field_name or "pct" in field_name else NUMERIC_TOLERANCE
+        ok = abs(ext_num - tru_num) <= tol
+        return {"match": ok, "partial": False, "extracted": ext_num, "truth": tru_num,
+                "note": f"numeric diff: {abs(ext_num - tru_num):.4f}"}
+
+    # Try date comparison
+    if any(kw in field_name for kw in ("date", "fecha", "period", "periodo")):
+        ext_d = _normalize_date_value(extracted, slash_order=date_parse, log=log, field_name=field_name)
+        tru_d = _normalize_date_value(truth_val, slash_order=date_parse, log=log, field_name=field_name)
+        ok = ext_d == tru_d
+        return {"match": ok, "partial": False, "extracted": ext_d, "truth": tru_d,
+                "note": "" if ok else f"date mismatch: '{ext_d}' vs '{tru_d}'"}
+
+    # String comparison
+    if field_name == "payment_method" and _looks_like_short_date_fragment(str(extracted)):
+        return {
+            "match": False,
+            "partial": False,
+            "extracted": str(extracted),
+            "truth": str(truth_val),
+            "note": "extracted looks like a date fragment — use payer line or bank/cash wording",
+        }
+
+    ext_s = _normalize_string(extracted)
+    tru_s = _normalize_string(truth_val)
+    exact = ext_s == tru_s
+    partial = (not exact) and (tru_s in ext_s or ext_s in tru_s)
+    note = "partial match" if partial else ("" if exact else "mismatch")
+    if (
+        field_name == "expense_category"
+        and not exact
+        and re.match(r"^\d{1,2}\.\d{2}$", str(extracted).strip())
+    ):
+        note = f"{note} — prefer printed category label over budget code"
+
+    return {
+        "match": exact,
+        "partial": partial,
+        "extracted": str(extracted),
+        "truth": str(truth_val),
+        "note": note,
+    }
+
+
 # ---------------------------------------------------------------------------
 # Main evaluation function
 # ---------------------------------------------------------------------------
 
-def evaluate(state: AgentState, truth: dict) -> dict:
+def evaluate(
+    state: AgentState,
+    truth: dict,
+    store: Optional[ConfigStore] = None,
+    date_parse: str = "DMY",
+) -> dict:
     """
     Compare agent state against ground truth.
-    Returns a structured diff ready to be passed to the reflection loop.
+    When `store` is set, only field_names present on the classified invoice type's schema
+    are compared (wide CSV rows can include columns for other types).
     """
-    results = {
+    results: dict[str, Any] = {
         "type_match": None,
         "type_extracted": state.invoice_type_id,
         "type_truth": truth.get("invoice_type_id"),
@@ -284,31 +482,59 @@ def evaluate(state: AgentState, truth: dict) -> dict:
         "human_notes": truth.get("notes", ""),
     }
 
+    allowed: Optional[set[str]] = None
+    if store is not None and state.invoice_type_id:
+        allowed = {f.field_name for f in store.get_fields(state.invoice_type_id)}
+
+    truth_fields_raw = truth.get("fields", {})
+    if allowed is not None:
+        truth_fields = {k: v for k, v in truth_fields_raw.items() if k in allowed}
+    else:
+        truth_fields = dict(truth_fields_raw)
+
+    extracted_keys = set(state.extracted_fields.keys())
+    if allowed is not None:
+        extracted_keys = extracted_keys & allowed
+
     # --- Type ---
     if results["type_truth"]:
         results["type_match"] = (state.invoice_type_id == results["type_truth"])
 
     # --- Fields ---
-    truth_fields = truth.get("fields", {})
-    all_field_names = set(truth_fields.keys()) | set(state.extracted_fields.keys())
-    field_correct = 0
+    all_field_names = set(truth_fields.keys()) | extracted_keys
+    fields_exact = 0
+    fields_partial = 0
+    fields_wrong = 0
+    fields_not_extracted = 0
+    fields_wrong_value = 0
     field_total = 0
 
-    for fname in all_field_names:
+    for fname in sorted(all_field_names):
         truth_val = truth_fields.get(fname)
         extracted_result = state.extracted_fields.get(fname)
         extracted_val = extracted_result.extracted_value if extracted_result else None
 
-        cmp = _compare_value(extracted_val, truth_val, fname)
+        cmp = _compare_value(
+            extracted_val, truth_val, fname, date_parse=date_parse, log=logger,
+        )
         results["field_results"][fname] = {
             **cmp,
             "confidence": extracted_result.confidence if extracted_result else 0.0,
             "flagged": extracted_result.flagged_for_review if extracted_result else False,
         }
-        if cmp["match"] is not None:
-            field_total += 1
-            if cmp["match"] or cmp["partial"]:
-                field_correct += 1
+        if cmp["match"] is None:
+            continue
+        field_total += 1
+        if cmp["match"] is True:
+            fields_exact += 1
+        elif cmp.get("partial"):
+            fields_partial += 1
+        else:
+            fields_wrong += 1
+            if cmp.get("note") == "field not extracted" or cmp.get("extracted") is None:
+                fields_not_extracted += 1
+            else:
+                fields_wrong_value += 1
 
     # --- Compliance ---
     truth_compliance = truth.get("compliance", {})
@@ -332,15 +558,22 @@ def evaluate(state: AgentState, truth: dict) -> dict:
             if match:
                 rule_correct += 1
 
-    # --- Score ---
+    matched_for_accuracy = fields_exact + fields_partial
     results["score"] = {
         "type_correct": results["type_match"],
-        "fields_correct": field_correct,
+        "fields_exact": fields_exact,
+        "fields_partial": fields_partial,
+        "fields_wrong": fields_wrong,
+        "fields_not_extracted": fields_not_extracted,
+        "fields_wrong_value": fields_wrong_value,
         "fields_total": field_total,
-        "field_accuracy": round(field_correct / field_total, 2) if field_total else None,
+        "fields_correct": matched_for_accuracy,
+        # "field_accuracy" = lenient match rate (exact + partial); "exact_accuracy" = strict.
+        "field_accuracy": round(matched_for_accuracy / field_total, 4) if field_total else None,
+        "exact_accuracy": round(fields_exact / field_total, 4) if field_total else None,
         "rules_correct": rule_correct,
         "rules_total": rule_total,
-        "rule_accuracy": round(rule_correct / rule_total, 2) if rule_total else None,
+        "rule_accuracy": round(rule_correct / rule_total, 4) if rule_total else None,
     }
 
     return results
@@ -387,11 +620,24 @@ def format_diff_for_agent(diff: dict) -> str:
 
     # Score
     s = diff["score"]
-    lines.append(f"\nSCORE SUMMARY:")
-    if s["field_accuracy"] is not None:
-        lines.append(f"  Fields:     {s['fields_correct']}/{s['fields_total']} correct ({s['field_accuracy']*100:.0f}%)")
-    if s["rule_accuracy"] is not None:
-        lines.append(f"  Compliance: {s['rules_correct']}/{s['rules_total']} correct ({s['rule_accuracy']*100:.0f}%)")
+    lines.append("\nSCORE SUMMARY (fields that have ground truth only):")
+    if s.get("field_accuracy") is not None:
+        ft = s["fields_total"]
+        lines.append(
+            f"  Exact:   {s.get('fields_exact', 0)}/{ft}  |  "
+            f"Partial: {s.get('fields_partial', 0)}/{ft}  |  "
+            f"Wrong:   {s.get('fields_wrong', 0)}/{ft}  "
+            f"(missing: {s.get('fields_not_extracted', 0)}, value mismatch: {s.get('fields_wrong_value', 0)})"
+        )
+        lines.append(
+            f"  Lenient match rate (exact + partial): {s['field_accuracy']*100:.1f}%  |  "
+            f"Strict (exact only): {s.get('exact_accuracy', 0)*100:.1f}%"
+        )
+    if s.get("rule_accuracy") is not None:
+        lines.append(
+            f"  Compliance vs truth: {s['rules_correct']}/{s['rules_total']} rules "
+            f"({s['rule_accuracy']*100:.1f}%)"
+        )
 
     if diff.get("human_notes"):
         lines.append(f"\nHUMAN NOTES: {diff['human_notes']}")

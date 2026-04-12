@@ -7,10 +7,15 @@ import requests
 from pathlib import Path
 from typing import Any
 
-from src.agent.state import AgentState, AgentStatus
+from src.agent.state import AgentState, AgentStatus, rule_verdict_summary
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
-from src.llm.config_resolve import ollama_base_url, prompt_limits_for_config, vision_model_for_config
+from src.llm.config_resolve import (
+    active_rule_groups_from_config,
+    ollama_base_url,
+    prompt_limits_for_config,
+    vision_model_for_config,
+)
 from src.agent.loop_utils import timeout_cfg as _timeout_cfg
 from src.tools.tools import (
     inspect_file,
@@ -35,6 +40,13 @@ from src.tools.tools import (
     _union_bboxes,
     _save_image_crop,
 )
+from src.models.action_models import (
+    CheckVisualParams,
+    CropRegionParams,
+    ExtractFieldsParams,
+    FinishParams,
+    FlagParams,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -51,8 +63,25 @@ def build_tool_registry(
     _plim = prompt_limits_for_config(config)
     learnings_max_chars = _plim["learnings_max_chars"]
     visual_max_evidence_pages = int(agent_cfg.get("visual_max_evidence_pages", 6))
+    ocr_prompt_max_chars = int(agent_cfg.get("ocr_prompt_max_chars", 24000) or 0)
     ocr_langs: list[str] = config.get("ocr", {}).get("langs", ["es", "en"])
     timeouts = _timeout_cfg(config)
+    _active_rule_groups = active_rule_groups_from_config(config)
+
+    def _default_convert_dpi(state: AgentState, kwargs: dict) -> int:
+        if kwargs.get("dpi") is not None:
+            return int(kwargs["dpi"])
+        return int(getattr(state, "page_render_dpi", None) or agent_cfg.get("page_dpi", 150))
+
+    def _cap_ocr_prompt_text(text: str) -> str:
+        if ocr_prompt_max_chars <= 0 or len(text) <= ocr_prompt_max_chars:
+            return text
+        head = ocr_prompt_max_chars // 2
+        tail_budget = ocr_prompt_max_chars - head - 72
+        if tail_budget < 1:
+            return text[:ocr_prompt_max_chars]
+        sep = "\n...[OCR text truncated for prompt size]...\n"
+        return text[:head] + sep + text[-tail_budget:]
 
     def _cap_learnings(text: str) -> str:
         if not text:
@@ -90,7 +119,7 @@ def build_tool_registry(
         return result
 
     def _convert_pdf(state, **kwargs):
-        res = convert_pdf_to_images(state, dpi=kwargs.get("dpi", 150))
+        res = convert_pdf_to_images(state, dpi=_default_convert_dpi(state, kwargs))
         if (
             res.get("success")
             and bool(agent_cfg.get("hybrid_extraction", True))
@@ -200,6 +229,8 @@ def build_tool_registry(
         return image_path, page_num, None
 
     def _crop(state, **kwargs):
+        parsed = CropRegionParams.model_validate(kwargs)
+        kwargs = parsed.model_dump(exclude_none=True)
         image_path, page_num, res_err = _resolve_image_path(kwargs, state, label="crop_region")
         if res_err:
             return {"success": False, "error": res_err}
@@ -214,6 +245,8 @@ def build_tool_registry(
         )
 
     def _extract(state, **kwargs):
+        parsed = ExtractFieldsParams.model_validate(kwargs)
+        kwargs = parsed.model_dump(exclude_none=True)
         if not state.invoice_type_id:
             return {
                 "success": False,
@@ -234,11 +267,12 @@ def build_tool_registry(
         # Warn if we're about to run extraction on compressed thumbnails.
         # convert_pdf_to_images must be called first for accurate vision extraction.
         if state.compressed and state.page_image_paths and state.page_image_paths == state.compressed_page_paths:
+            _dpi = _default_convert_dpi(state, {})
             return {
                 "success": False,
                 "error": (
                     "Images are still 48 DPI compressed thumbnails (from compress_pages). "
-                    "Call convert_pdf_to_images(dpi=150) first, then retry extract_fields_vision. "
+                    f"Call convert_pdf_to_images(dpi={_dpi}) first, then retry extract_fields_vision. "
                     "Compressed thumbnails are only suitable for inventory_pages and classify_document_type."
                 ),
             }
@@ -389,6 +423,7 @@ def build_tool_registry(
                         and l.bbox[1] < cy2 and l.bbox[3] > cy1
                     ]
                     crop_text = "\n".join(l.text for l in crop_ocr_lines if l.text.strip())
+                    crop_text_capped = _cap_ocr_prompt_text(crop_text)
 
                     crop_result = extract_fields_vision(
                         state,
@@ -397,7 +432,7 @@ def build_tool_registry(
                         hints=hints,
                         ollama_url=ollama_url,
                         model=vision_model,
-                        text_context=crop_text,
+                        text_context=crop_text_capped,
                         provider=provider,
                         timeout_s=timeouts["generate_timeout_s"],
                     )
@@ -412,6 +447,7 @@ def build_tool_registry(
             last_result: dict = {"success": False, "error": "no fields to extract"}
             if fallback:
                 fallback_schema = {k: schema[k] for k in fallback}
+                ocr_text_capped = _cap_ocr_prompt_text(ocr.full_text or "")
                 last_result = extract_fields_vision(
                     state,
                     image_path=image_path,
@@ -419,7 +455,7 @@ def build_tool_registry(
                     hints=hints,
                     ollama_url=ollama_url,
                     model=vision_model,
-                    text_context=ocr.full_text,
+                    text_context=ocr_text_capped,
                     provider=provider,
                     timeout_s=timeouts["generate_timeout_s"],
                 )
@@ -470,7 +506,7 @@ def build_tool_registry(
 
     def _check(state, **kwargs):
         import hashlib
-        rules = store.get_rules(state.invoice_type_id)
+        rules = store.get_rules(state.invoice_type_id, _active_rule_groups)
         result = check_compliance(state, rules, store=store)
 
         # Detect redundant calls: if result is identical to the last call AND
@@ -507,6 +543,8 @@ def build_tool_registry(
         return result
 
     def _flag(state, **kwargs):
+        parsed = FlagParams.model_validate(kwargs)
+        kwargs = parsed.model_dump(exclude_none=True)
         # Accept singular or plural field name, with or without a reason
         field_names = (
             kwargs.get("fields_to_flag")
@@ -561,6 +599,8 @@ def build_tool_registry(
         )
 
     def _check_visual(state, **kwargs):
+        parsed = CheckVisualParams.model_validate(kwargs)
+        kwargs = parsed.model_dump(exclude_none=True)
         image_path, page_num, res_err = _resolve_image_path(
             kwargs, state, label="check_compliance_visual", require_page_num=True,
         )
@@ -591,15 +631,16 @@ def build_tool_registry(
                 )
         # Warn if we're about to run visual compliance on compressed thumbnails.
         if state.compressed and state.page_image_paths and state.page_image_paths == state.compressed_page_paths:
+            _dpi = _default_convert_dpi(state, {})
             return {
                 "success": False,
                 "error": (
                     "Images are still 48 DPI compressed thumbnails (from compress_pages). "
-                    "Call convert_pdf_to_images(dpi=150) first, then retry check_compliance_visual. "
+                    f"Call convert_pdf_to_images(dpi={_dpi}) first, then retry check_compliance_visual. "
                     "Visual stamp/signature checks require full-quality images."
                 ),
             }
-        rules = store.get_rules(state.invoice_type_id)
+        rules = store.get_rules(state.invoice_type_id, _active_rule_groups)
         return check_compliance_visual(
             state,
             image_path,
@@ -611,6 +652,7 @@ def build_tool_registry(
             provider=provider,
             timeout_s=timeouts["generate_timeout_s"],
             hybrid_visual=bool(agent_cfg.get("hybrid_extraction", True)),
+            store=store,
         )
 
     def _install_package(state, **kwargs):
@@ -623,6 +665,8 @@ def build_tool_registry(
         return {"noted": text}
 
     def _finish(state, **kwargs):
+        parsed = FinishParams.model_validate(kwargs)
+        kwargs = parsed.model_dump(exclude_none=True)
         # Guard 1 (highest priority): visual checks must be evaluated before finish.
         # Checked first so it always produces the correct "visual checks" error
         # regardless of how many fields were extracted.
@@ -667,9 +711,14 @@ def build_tool_registry(
             (rr.status == "skipped" and rr.severity == "error")
             for rr in state.rule_results
         )
+        # Evidence slots can be incomplete even when the rule already has a definitive
+        # PASSED verdict (e.g. visual rules whose required_slots heuristics expect
+        # cross-page linkage slots that are not filled). A pass is still final for finish.
         unresolved_error_evidence = False
         for rr in state.rule_results:
             if rr.severity != "error":
+                continue
+            if rr.status == "passed":
                 continue
             ev = state.rule_evidence.get(rr.rule_id, {})
             missing = ev.get("missing_slots", [])
@@ -684,9 +733,30 @@ def build_tool_registry(
             state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.PASSED
         else:
             state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.FAILED
+
+        rv = rule_verdict_summary(state.rule_results)
+        error_failures = rv["error_failed_rule_ids"]
+        warning_failures = rv["warning_failed_rule_ids"]
+        if not all_errors_resolved:
+            status_explanation = (
+                "Run status reflects blocking error-severity rule failures or incomplete error evidence."
+            )
+        elif warning_failures:
+            status_explanation = (
+                "No blocking error-severity failures; warning-level rules may still be non-pass "
+                "(listed in warning_failures)."
+            )
+        elif state.status == AgentStatus.NEEDS_REVIEW:
+            status_explanation = "No rule blockers; one or more fields are flagged for human review."
+        else:
+            status_explanation = "All evaluated rules passed at error severity; no flags."
+
         return {
             "finished": True,
             "status": state.status.value,
+            "error_failures": error_failures,
+            "warning_failures": warning_failures,
+            "status_explanation": status_explanation,
             "evidence_gate": {
                 "unresolved_error_evidence": unresolved_error_evidence,
                 "error_failed": error_failed,

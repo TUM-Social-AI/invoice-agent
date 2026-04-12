@@ -64,7 +64,7 @@ def write_learning(
     or deleted by the agent using edit_learning / delete_learning.
 
     Skips the write if an identical entry already exists (exact dedup).
-    Categories: approaches | extraction_patterns | common_failures | compliance_edge_cases | tool_suggestions
+    Categories: approaches | extraction_patterns | vision_model_extraction | common_failures | compliance_edge_cases | tool_suggestions
     """
     path = Path(learnings_path)
     path.parent.mkdir(parents=True, exist_ok=True)

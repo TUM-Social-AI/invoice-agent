@@ -23,6 +23,7 @@ from src.agent.reflection import reflect
 from src.agent.loop_utils import open_run_log as _open_run_log, append_log_entry as _append_log_entry, timeout_cfg as _timeout_cfg, log_tool_result
 from src.agent.tool_policy import merge_exposed_tool_names
 from src.tools.tools import load_surya_models
+from src.prompts.llm_prompts import PLANNING_SYSTEM_MESSAGE, build_planning_user_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -123,40 +124,18 @@ class InvoiceAgent:
         )
         inv_type = self.store.get_type(state.invoice_type_id)
         type_display = inv_type.display_name if inv_type else state.invoice_type_id
-        planning_prompt = f"""You are an invoice processing agent. The document has been scanned and classified. Now produce an execution plan for the EXTRACT and VALIDATE phases.
-
-File: {Path(state.pdf_path).name}
-Document type: {state.invoice_type_id} ({type_display})
-{inventory_hint}
-{learnings_hint}
-
-SCAN is already complete (compress_pages, inventory_pages, classify_document_type done).
-Plan only Phase 2 (EXTRACT) and Phase 3 (VALIDATE).
-
-Return a JSON object with a "plan" key containing an array of steps. Each step must have:
-- "step": integer (1-based)
-- "tool": the tool name to call
-- "rationale": one sentence explaining why, referencing the specific page role
-
-A complete plan has at least 6 steps:
-
-Phase 2 — EXTRACT:
-  1. convert_pdf_to_images  — render full-quality pages for extraction
-  2. extract_fields_vision  — extract fields from the INVOICE_HEADER page (reference specific page number)
-  3. extract_fields_vision  — extract fields from LINE_ITEMS or other data pages (if multi-page doc)
-
-Phase 3 — VALIDATE:
-  4. check_compliance        — evaluate all field-based compliance rules
-  5. check_compliance_visual — evaluate visual rules (stamp, signature, etc.) on SIGNATURE_STAMP page
-  6. finish                  — record results
-
-Combine pages with the same role into a single extract_fields_vision call where possible.
-Adapt the plan based on the actual page inventory and prior learnings. Return ONLY valid JSON."""
+        planning_prompt = build_planning_user_prompt(
+            file_name=Path(state.pdf_path).name,
+            invoice_type_id=state.invoice_type_id,
+            type_display=type_display,
+            inventory_hint=inventory_hint,
+            learnings_hint=learnings_hint,
+        )
 
         payload = {
             "model": reasoning_model_for_config(self.config),
             "messages": [
-                {"role": "system", "content": "You are a planning assistant. Return only valid JSON."},
+                {"role": "system", "content": PLANNING_SYSTEM_MESSAGE},
                 {"role": "user", "content": planning_prompt},
             ],
             "stream": False,
@@ -199,12 +178,14 @@ Adapt the plan based on the actual page inventory and prior learnings. Return ON
             return []
 
     def run(self, pdf_path: str, output_dir: str, invoice_type_id: str = "") -> AgentState:
+        _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
         state = AgentState(
             pdf_path=pdf_path,
             output_dir=output_dir,
             invoice_type_id=invoice_type_id,
             confidence_threshold=self.confidence_threshold,
             batch_review_threshold=self.batch_review_threshold,
+            page_render_dpi=_page_dpi,
         )
 
         # Learnings hydration: load prior insights into state BEFORE the agent
@@ -523,13 +504,13 @@ Adapt the plan based on the actual page inventory and prior learnings. Return ON
                 if self.fallback_reasoning_model:
                     total_failures = sum(consecutive_failures.values())
                     state.use_fallback_model = total_failures >= 2
-                    if state.use_fallback_model and not getattr(state, "_fallback_logged", False):
+                    if state.use_fallback_model and not state.fallback_logged:
                         logger.info(
                             f"  Switching to fallback reasoning model: {self.fallback_reasoning_model}"
                         )
-                        state._fallback_logged = True  # type: ignore[attr-defined]
+                        state.fallback_logged = True
                     elif not state.use_fallback_model:
-                        state._fallback_logged = False  # type: ignore[attr-defined]
+                        state.fallback_logged = False
 
         except KeyboardInterrupt:
             logger.warning(f"Interrupted by user after turn {state.turn} — saving partial results")

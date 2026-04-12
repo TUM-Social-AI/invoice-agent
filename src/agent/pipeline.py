@@ -110,7 +110,8 @@ def run_fixed_pipeline(
     if planning_enabled and generate_plan_fn and state.invoice_type_id and not state.execution_plan:
         state.execution_plan = generate_plan_fn(state)
 
-    r = _run("convert_pdf_to_images", {"dpi": 150}, "pipeline: full-quality render")
+    _dpi = int(getattr(state, "page_render_dpi", 150) or 150)
+    r = _run("convert_pdf_to_images", {"dpi": _dpi}, "pipeline: full-quality render")
     if isinstance(r, dict) and r.get("success") is False:
         state.status = AgentStatus.ERROR
         state.finish_reason = r.get("error", "convert_pdf_to_images failed")

@@ -46,9 +46,10 @@ class GeminiProvider:
     def _post(self, model: str, body: dict[str, Any], timeout_s: float) -> dict[str, Any]:
         mid = _normalize_model_id(model)
         url = self.GEMINI_GENERATE_URL.format(model=mid)
+        # Use x-goog-api-key so the key never appears in the URL (urllib3 DEBUG logs the URL).
         resp = requests.post(
             url,
-            params={"key": self._api_key},
+            headers={"x-goog-api-key": self._api_key},
             json=body,
             timeout=timeout_s,
         )

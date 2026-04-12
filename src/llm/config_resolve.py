@@ -14,17 +14,34 @@ def ollama_base_url(config: dict) -> str:
     return str((config.get("ollama") or {}).get("base_url", "http://localhost:11434")).rstrip("/")
 
 
+def ollama_num_ctx_chat(config: dict) -> int | None:
+    """Optional Ollama chat context cap (tokens)."""
+    raw = (config.get("ollama") or {}).get("num_ctx_chat")
+    if raw is None:
+        return None
+    return int(raw)
+
+
+def ollama_num_ctx_generate(config: dict) -> int | None:
+    """Optional Ollama generate/vision context cap (tokens)."""
+    o = config.get("ollama") or {}
+    raw = o.get("num_ctx_generate", o.get("num_ctx_vision"))
+    if raw is None:
+        return None
+    return int(raw)
+
+
 def reasoning_model_for_config(config: dict) -> str:
     if llm_provider_name(config) == "gemini":
         g = config.get("gemini") or {}
-        return str(g.get("reasoning_model") or "gemini-2.0-flash")
+        return str(g.get("reasoning_model") or "gemini-2.5-flash")
     return str((config.get("ollama") or {}).get("reasoning_model", "qwen2.5:7b"))
 
 
 def vision_model_for_config(config: dict) -> str:
     if llm_provider_name(config) == "gemini":
         g = config.get("gemini") or {}
-        return str(g.get("vision_model") or g.get("reasoning_model") or "gemini-2.0-flash")
+        return str(g.get("vision_model") or g.get("reasoning_model") or "gemini-2.5-flash")
     return str((config.get("ollama") or {}).get("vision_model", "qwen2.5-vl:7b"))
 
 
@@ -129,6 +146,22 @@ def remote_guard_config(config: dict) -> dict[str, Any]:
     out = dict(llm.get("remote_guard") or {})
     out.update(dict(gem.get("remote_guard") or {}))
     return out
+
+
+def active_rule_groups_from_config(config: dict) -> list[str]:
+    """
+    Which compliance rule_groups apply to this run.
+    Default: general + xunta_galicia (full rulebook, backward-compatible).
+    Set agent.active_rule_groups: [general] to skip Xunta-only stamp/year/PR811A rules for non-Galicia documents.
+    """
+    a = config.get("agent") or {}
+    raw = a.get("active_rule_groups")
+    if raw is None:
+        return ["general", "xunta_galicia"]
+    if isinstance(raw, str):
+        raw = [x.strip() for x in raw.split(",") if x.strip()]
+    out = [str(x).strip().lower() for x in raw if str(x).strip()]
+    return out if out else ["general", "xunta_galicia"]
 
 
 def fallback_reasoning_model_for_config(config: dict) -> str | None:

@@ -15,12 +15,24 @@ from src.llm.config_resolve import (
     reasoning_model_for_config,
 )
 from src.agent.prompts import build_system_prompt
+from src.prompts.llm_prompts import action_json_repair_user_content
 from src.agent.action_contract import (
     validate_action_contract as _validate_action_contract,
     allowed_params_for_tool as _allowed_params_for_tool,
 )
+from src.models.action_models import TOOL_PARAM_MODELS
 
 logger = logging.getLogger(__name__)
+
+
+def _state_summary_kwargs(agent_cfg: dict) -> dict:
+    """Bounds for `AgentState.summary_for_prompt` (large-PDF safety)."""
+    return {
+        "max_page_lines": int(agent_cfg.get("state_summary_max_page_lines", 28)),
+        "max_inventory_lines": int(agent_cfg.get("state_summary_max_inventory_lines", 50)),
+        "inventory_desc_chars": int(agent_cfg.get("state_summary_inventory_desc_chars", 180)),
+    }
+
 
 def agent_turn(
     state: AgentState,
@@ -35,6 +47,7 @@ def agent_turn(
     allowed = set(tool_names) if tool_names is not None else None
     _plim = prompt_limits_for_config(config)
     history_preview_chars = _plim["history_preview_chars"]
+    _ac = config.get("agent") or {}
     system_prompt = build_system_prompt(
         state,
         store,
@@ -57,7 +70,7 @@ def agent_turn(
     ]
 
     user_message = (
-        f"Current state:\n{state.summary_for_prompt()}\n\n"
+        f"Current state:\n{state.summary_for_prompt(**_state_summary_kwargs(_ac))}\n\n"
         f"Recent actions:\n{json.dumps(history_summary, indent=2)}\n\n"
         "What should you do next? Respond with JSON only."
     )
@@ -313,34 +326,32 @@ def agent_turn(
             raise ValueError(f"Reasoning model returned empty response on turn {state.turn}")
         return json.loads(raw)
 
-    def _sanitize_action_params(action: dict) -> tuple[dict, list[str]]:
+    def _normalize_action_params(action: dict) -> dict:
         if not isinstance(action, dict):
-            return action, []
+            return action
         tool = action.get("tool")
         params = action.get("params")
         if not isinstance(params, dict) or not isinstance(tool, str):
-            return action, []
+            return action
         allowed_params = _allowed_params_for_tool(tool)
         if not allowed_params:
-            return action, []
-        dropped = sorted([k for k in params.keys() if k not in allowed_params])
-        if not dropped:
-            return action, []
+            return action
+        filtered = {k: v for k, v in params.items() if k in allowed_params}
+        model = TOOL_PARAM_MODELS.get(tool)
+        if model is None:
+            action = dict(action)
+            action["params"] = filtered
+            return action
+        validated = model.model_validate(filtered)
         action = dict(action)
-        action["params"] = {k: v for k, v in params.items() if k in allowed_params}
-        return action, dropped
+        action["params"] = validated.model_dump(exclude_none=True)
+        return action
 
     last_err: Exception = RuntimeError("unreachable")
     for attempt in range(3):
         try:
             action = _parse_action_from_payload(payload)
-            action, dropped = _sanitize_action_params(action)
-            if dropped:
-                logger.warning(
-                    "Sanitized invalid params for tool '%s': dropped=%s",
-                    action.get("tool"),
-                    dropped,
-                )
+            action = _normalize_action_params(action)
             validation_err = _validate_action_contract(action)
             if validation_err:
                 # One repair retry with explicit validation feedback.
@@ -349,25 +360,12 @@ def agent_turn(
                     "messages": payload["messages"] + [
                         {
                             "role": "user",
-                            "content": (
-                                "Your previous JSON action was invalid.\n"
-                                f"Validation error: {validation_err}\n"
-                                "Return ONLY corrected JSON with valid tool and params.\n"
-                                "extract_fields_vision and check_compliance_visual require page_num (integer).\n"
-                                "Do not invent image_path strings. Retries must change at least one of: "
-                                "page_num, region, hints, or field_subset."
-                            ),
+                            "content": action_json_repair_user_content(str(validation_err)),
                         }
                     ],
                 }
                 repaired = _parse_action_from_payload(repair_payload)
-                repaired, dropped = _sanitize_action_params(repaired)
-                if dropped:
-                    logger.warning(
-                        "Sanitized invalid params after repair for tool '%s': dropped=%s",
-                        repaired.get("tool"),
-                        dropped,
-                    )
+                repaired = _normalize_action_params(repaired)
                 repaired_err = _validate_action_contract(repaired)
                 if repaired_err:
                     raise ValueError(f"Action contract invalid after repair retry: {repaired_err}")

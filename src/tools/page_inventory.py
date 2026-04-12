@@ -19,6 +19,8 @@ from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
+from src.models.tool_io_models import InventoryItemModel
+from src.prompts.llm_prompts import page_inventory_prompt
 from src.tools.pdf_pages import _image_to_base64
 from src.tools.compliance_eval import _normalize_numeric
 
@@ -106,22 +108,7 @@ def inventory_pages(
 
     # Fixed taxonomy makes the inventory machine-readable and easier for the agent
     # to use when deciding which pages to target for extraction.
-    prompt = (
-        "Look carefully at this document page. Do two things:\n\n"
-        "1. Choose EXACTLY one category:\n"
-        "   INVOICE_HEADER   — vendor info, client info, invoice number, date, reference numbers\n"
-        "   LINE_ITEMS       — table of services, products, quantities, unit prices\n"
-        "   TOTALS           — subtotals, tax amounts, grand total, payment details, IBAN\n"
-        "   SIGNATURE_STAMP  — signatures, stamps, seals, approval marks, authorisation\n"
-        "   SUPPORTING_DOC   — attached receipt, quote, contract, ticket, boarding pass, photo\n"
-        "   COVER_PAGE       — title page, cover letter, reference / transmittal letter\n"
-        "   BLANK            — empty or near-empty page with no meaningful content\n\n"
-        "2. Write a specific description (max 15 words) of what you actually see on THIS page.\n"
-        "   Mention concrete details: organisation names, document titles, visible amounts,\n"
-        "   languages, number of line items, type of stamp, etc.\n"
-        "   Do NOT write a generic description — describe what is literally visible.\n\n"
-        'Respond with ONLY valid JSON: {"category": "...", "description": "..."}'
-    )
+    prompt = page_inventory_prompt()
 
     inventory = []
     for i, path in enumerate(inventory_paths):
@@ -155,8 +142,9 @@ def inventory_pages(
                 raw = resp.json().get("response", "").strip()
                 raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
                 parsed = json.loads(raw)
-            category = parsed.get("category", "UNKNOWN").strip().upper()
-            description = parsed.get("description", "").strip()
+            inv_item = InventoryItemModel.model_validate(parsed)
+            category = inv_item.category
+            description = inv_item.description.strip()
         except json.JSONDecodeError:
             # Model didn't return JSON — fall back to treating raw response as description
             description = resp.json().get("response", "").strip()[:120]

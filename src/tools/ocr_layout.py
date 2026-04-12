@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 import requests
 from PIL import Image
+from pydantic import BaseModel, ConfigDict
 
 from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
@@ -81,17 +82,17 @@ def load_surya_models() -> "Optional[SuryaModels]":
         logger.warning(f"Failed to load surya models: {e} — OCR pre-pass disabled")
         return None
 
-@dataclass
-class OcrLine:
+class OcrLine(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     """Single text line returned by surya, with its pixel-space bounding box."""
     text: str
     confidence: float
-    bbox: tuple  # (x1, y1, x2, y2) integers
+    bbox: tuple[int, int, int, int]
 
-@dataclass
-class OcrResult:
+class OcrResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     """Full-page OCR output: structured lines with bboxes + flat text."""
-    lines: list  # list[OcrLine]
+    lines: list[OcrLine]
     image_width: int = 0
     image_height: int = 0
 
@@ -102,12 +103,12 @@ class OcrResult:
     def is_empty(self) -> bool:
         return not self.lines
 
-@dataclass
-class FieldLocalization:
+class FieldLocalization(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
     """Result of finding a field's label and value region in the OCR layout."""
     label_line: Any          # OcrLine where the label was found
     value_text: Optional[str]  # Extracted value text, None if blank/handwritten
-    value_bbox: tuple        # (x1, y1, x2, y2) crop region to send to vision
+    value_bbox: tuple[int, int, int, int]
     value_confidence: float  # OCR confidence; 0 if value not found/readable
 
 def _ocr_with_layout(

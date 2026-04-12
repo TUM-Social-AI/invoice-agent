@@ -69,13 +69,16 @@ def log_tool_result(tool_name: str, result: Any, log_line_max_chars: int) -> Non
     elif tool_name == "extract_fields_vision":
         extracted = result.get("extracted", {})
         merge = result.get("merge_result", {})
-        n_fields = sum(
+        payload_non_null = sum(
             1 for k, v in extracted.items()
             if not k.endswith("_confidence") and v is not None
         )
+        upd = merge.get("updated") if merge else []
+        merge_updates = len(upd) if isinstance(upd, list) else 0
         low_conf = [k for k, v in extracted.items() if isinstance(v, dict) and v.get("confidence", 1) < 0.6]
         logger.info(
-            f"  result [{status}]: extracted {n_fields} fields"
+            f"  result [{status}]: payload non-null={payload_non_null}, "
+            f"state merge updates={merge_updates} (hybrid OCR may merge without non-null vision payload)"
             + (f", low-confidence: {low_conf}" if low_conf else "")
         )
         if merge:
@@ -119,6 +122,9 @@ def log_tool_result(tool_name: str, result: Any, log_line_max_chars: int) -> Non
             logger.info(f"    ERROR: {clip(str(e))}")
         for w in warnings:
             logger.info(f"    WARN:  {clip(str(w))}")
+        bf = result.get("backfilled_fields") or []
+        if bf:
+            logger.info(f"    backfilled_fields: {bf}")
     elif tool_name == "note":
         logger.info(f"  noted: {clip(result.get('noted', ''))}")
     elif tool_name == "inventory_pages":
@@ -136,7 +142,13 @@ def log_tool_result(tool_name: str, result: Any, log_line_max_chars: int) -> Non
     elif tool_name == "write_learning":
         logger.info(f"  result [{status}]: learning written")
     elif tool_name == "finish":
-        logger.info(f"  result: status={result.get('status')}")
+        ex = result.get("status_explanation")
+        logger.info(
+            f"  result: status={result.get('status')} | "
+            f"errors={result.get('error_failures', [])} | "
+            f"warnings={result.get('warning_failures', [])}"
+            + (f" | {ex}" if ex else "")
+        )
     else:
         if not success:
             logger.info(f"  result [FAIL]: {clip(result.get('error', str(result)))}")

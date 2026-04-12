@@ -20,7 +20,7 @@ class FakeProvider:
         )
 
 
-def test_agent_turn_sanitizes_cross_tool_params():
+def test_agent_turn_normalizes_page_num_and_field_subset():
     state = AgentState(
         pdf_path="dummy.pdf",
         output_dir="out",
@@ -37,10 +37,8 @@ def test_agent_turn_sanitizes_cross_tool_params():
         {
             "tool": "extract_fields_vision",
             "params": {
-                "page_num": 1,
-                "category": "approaches",
-                "field_name": "employee_name",
-                "field_subset": ["employee_name"],
+                "page_num": "page 1",
+                "field_subset": "employee_name",
             },
             "reasoning": "extract field from first page",
         }
@@ -58,5 +56,3 @@ def test_agent_turn_sanitizes_cross_tool_params():
     assert action["tool"] == "extract_fields_vision"
     assert action["params"]["page_num"] == 1
     assert action["params"]["field_subset"] == ["employee_name"]
-    assert "category" not in action["params"]
-    assert "field_name" not in action["params"]

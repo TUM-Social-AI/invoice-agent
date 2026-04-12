@@ -1,25 +1,28 @@
 # LLM backend: ollama (local) or gemini (Google AI API key).
 llm:
-  provider: ollama
+  provider: gemini
   # Optional shared HTTP timeouts (seconds); provider blocks can override (see ollama / gemini).
   # timeout_chat_s: 300
   # timeout_generate_s: 600
-  # Optional per-run caps for remote providers (Gemini); see docs/README.
-  # remote_guard:
-  #   max_llm_requests_per_run: 120
-  #   max_chat_requests_per_run: 60
-  #   max_generate_requests_per_run: 80
-  #   max_total_token_count_per_run: 500000
-  #   warn_token_threshold: 100000
+  # Per-run caps for remote providers (Gemini). When any limit is set, MeteredLLMProvider wraps API calls.
+  # Raise limits if you process very large PDFs (inventory uses one vision request per page).
+  remote_guard:
+    max_chat_requests_per_run: 45
+    max_generate_requests_per_run: 150
+    max_llm_requests_per_run: 220
+    max_total_token_count_per_run: 400000
+    warn_token_threshold: 120000
 
-# Uncomment to use Gemini instead of Ollama (set GOOGLE_API_KEY or gemini.api_key_env).
-# gemini:
-#   api_key_env: GOOGLE_API_KEY
-#   reasoning_model: gemini-2.0-flash
-#   vision_model: gemini-2.0-flash
-#   timeout_generate_s: 600
-#   remote_guard:
-#     max_llm_requests_per_run: 80
+# Gemini (Google AI). Set llm.provider: gemini and GOOGLE_API_KEY (or gemini.api_key_env).
+# Use current stable model IDs (gemini-2.0-flash is deprecated and may return 404 — see AI Studio docs).
+gemini:
+  api_key_env: GOOGLE_API_KEY
+  # Reasoning loop (tool JSON): Flash keeps latency/cost low.
+  reasoning_model: gemini-2.5-flash
+  # Vision (inventory, extraction, visual compliance): stronger model → better field quality; higher cost.
+  vision_model: gemini-2.5-pro
+  timeout_generate_s: 600
+  # Optional: merge/override llm.remote_guard for Gemini-only stricter caps, e.g. max_generate_requests_per_run: 120
 
 ollama:
   base_url: "http://localhost:11434"
@@ -42,6 +45,10 @@ ollama:
   # Request timeouts (seconds). Increase if your local models are slow under load.
   timeout_chat_s: 240
   timeout_generate_s: 420
+  # Optional context caps passed to Ollama options.num_ctx.
+  # Keep vision/generate lower to avoid huge KV-cache pressure on large VL models.
+  num_ctx_chat: 8192
+  num_ctx_generate: 16384
 
 config_dir: "config/csv"
 
@@ -49,7 +56,7 @@ learnings_path: "learnings/learnings.md"
 
 agent:
   max_turns: 30
-  max_field_retries: 4
+  max_field_retries: 5
   confidence_threshold: 0.65      # below this → blocking human-review flag
   batch_review_threshold: 0.85    # between confidence_threshold and this → non-blocking batch review
   planning_enabled: true          # generate an execution plan before the main loop
@@ -77,29 +84,69 @@ agent:
   # Omit or set learnings/history keys to null to use profile defaults; explicit integers override.
   prompt_profile: auto
   learnings_inject_enabled: true
-  learnings_max_chars: null
+  # Richer learnings context for remote (Gemini) runs; raises input tokens slightly.
+  learnings_max_chars: 16000
   planning_learnings_max_chars: null
 
   # Logging preview caps (0 = unlimited for console logs).
   log_line_max_chars: 120
-  history_preview_chars: null
+  # Tool-output preview in recent-actions JSON (remote profile default ~900).
+  history_preview_chars: 900
+
+  # State summary in each agent turn: avoid huge prompts on multi-page PDFs.
+  state_summary_max_page_lines: 28
+  state_summary_max_inventory_lines: 50
+  state_summary_inventory_desc_chars: 180
+
+  # Max characters of Surya OCR text injected into vision extraction prompts (full page + crops).
+  ocr_prompt_max_chars: 24000
   # Multi-page visual compliance: max page images sent in one visual call.
   visual_max_evidence_pages: 8
 
-  # Optional: CSV ground truth loader (used in --learn mode when _truth.json is missing).
-  # ground_truth_csv_path: "config/csv/ground_truth.csv"
-  ground_truth_csv_path: null
+  # Compliance rule groups (see rule_group column in config/csv/compliance_rules.csv).
+  # Chad / non-Galicia field projects: general only (no Xunta stamp, 2023 window, PR811A, etc.).
+  # For Galicia grant paperwork, add: - xunta_galicia
+  active_rule_groups:
+    - general
+
+  # Ground truth CSV: compared after every run when a row matches the PDF (or use <stem>_truth.json).
+  # Prefer ISO dates (YYYY-MM-DD) in the CSV; slash dates use ground_truth_date_parse for ambiguous days/months.
+  #
+  # Scoring uses ONLY columns listed below AND only field_names that exist for the detected invoice_type_id
+  # (see config/csv/extraction_fields.csv). Example: "travel_purpose" is ignored for PERS_LOCAL, so payroll rows
+  # should map payroll columns to employee_name, pay_period, etc.
+  ground_truth_csv_path: "config/csv/ground_truth.csv"
+  # Optional per-invoice-type CSV (takes precedence over ground_truth_csv_path when set).
+  # ground_truth_csv_by_invoice_type:
+  #   VIAJES: "config/csv/ground_truth_viajes.csv"
+  ground_truth_csv_by_invoice_type: {}
   ground_truth_source_column: "Source file"
-  ground_truth_column_map: {}
+  # CSV column header -> extraction field_name (see config/csv/extraction_fields.csv).
+  ground_truth_column_map:
+    "Invoice Number": "invoice_number"
+    "Date": "invoice_date"
+    "Supplier/Issuer": "vendor_name"
+    "Items/Services": "item_description"
+    "Description": "travel_purpose"
+    "Total Amount": "total_amount"
+    "Currency": "currency"
+    "Payment Method": "payment_method"
+    "Expense Category": "expense_category"
+    "Client Name": "beneficiary"
+    "Employee": "employee_name"
+    "Pay period": "pay_period"
+  # Slash-delimited dates when day and month are both ≤12: DMY (EU) or MDY (US).
+  ground_truth_date_parse: "DMY"
 
   # Optional phase 2 hooks (advanced recovery / more granular extraction).
   # Keep OFF for patterned profile.
   micro_tools_phase2: false
 
-  # Hybrid extraction/visual: try medium-res page images first, promote to full-res on weak/null/error.
-  hybrid_extraction: true
+  # Hybrid: medium-res first, then full-res when needed (saves some vision cost). Off = always full-res only.
+  hybrid_extraction: false
 
-  page_dpi: 150                          # lower = faster + less memory; 150 is good default
+  # Default DPI for convert_pdf_to_images when the agent omits dpi (higher = sharper, larger images, more vision tokens).
+  page_dpi: 200
   planning_timeout_s: 180
   reflection_timeout_s: 120
 
@@ -114,4 +161,4 @@ output:
   include_page_crops: true               # save region crops for debugging
 
 logging:
-  level: "DEBUG"                          # DEBUG for verbose tool traces
+  level: "INFO"                          # DEBUG for verbose tool traces

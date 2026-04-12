@@ -131,6 +131,13 @@ def _normalize_numeric(value: Any) -> Optional[float]:
     if not s or s.lower() in ("null", "none"):
         return None
 
+    # Strip HTML/XML fragments (OCR / PDF text sometimes embeds tags).
+    s = re.sub(r"<[^>]+>", "", s)
+    s = s.replace("&nbsp;", " ").replace("&#160;", " ").replace("\xa0", " ")
+    s = s.strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+
     negative = False
     if s.startswith("(") and s.endswith(")"):
         negative = True
@@ -319,9 +326,27 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
             lo, hi = map(float, rule.check_value.split(","))
             v = _normalize_numeric(value)
             if v is None:
+                if not _field_is_required():
+                    return RuleResult(
+                        rule_id=rule.rule_id,
+                        rule_name=rule.rule_name,
+                        field_id=rule.field_id,
+                        status="skipped",
+                        severity=rule.severity,
+                        message=f"Unparseable numeric value {value!r} — skipped for optional field",
+                    )
                 raise ValueError(f"Could not normalize value '{value}'")
             return passed() if lo <= v <= hi else fail()
-        except (ValueError, TypeError):
+        except (ValueError, TypeError) as e:
+            if not _field_is_required():
+                return RuleResult(
+                    rule_id=rule.rule_id,
+                    rule_name=rule.rule_name,
+                    field_id=rule.field_id,
+                    status="skipped",
+                    severity=rule.severity,
+                    message=f"Range check skipped (optional field): {e}",
+                )
             return fail(f"Could not parse value '{value}' as number for range check")
 
     if rule.check_type == "enum":

@@ -16,8 +16,16 @@ def _clean_json_text(raw: str) -> str:
 class OllamaProvider(LLMProvider):
     provider_name = "ollama"
 
-    def __init__(self, base_url: str):
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        num_ctx_chat: int | None = None,
+        num_ctx_generate: int | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
+        self.num_ctx_chat = num_ctx_chat
+        self.num_ctx_generate = num_ctx_generate
 
     def chat_json(
         self,
@@ -34,6 +42,8 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature},
         }
+        if self.num_ctx_chat is not None:
+            payload["options"]["num_ctx"] = int(self.num_ctx_chat)
         if response_format is not None:
             payload["format"] = response_format
 
@@ -72,6 +82,8 @@ class OllamaProvider(LLMProvider):
             "stream": False,
             "options": {"temperature": temperature},
         }
+        if self.num_ctx_generate is not None:
+            payload["options"]["num_ctx"] = int(self.num_ctx_generate)
         if response_format is not None:
             payload["format"] = response_format
 

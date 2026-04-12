@@ -65,7 +65,8 @@ def next_required_step(state: AgentState) -> str:
     if not state.rule_results:
         full_quality = bool(state.page_image_paths) and state.page_image_paths != state.compressed_page_paths
         if not full_quality:
-            return "convert_pdf_to_images(dpi=150)"
+            dpi = int(getattr(state, "page_render_dpi", 150) or 150)
+            return f"convert_pdf_to_images(dpi={dpi})"
     if state.visual_checks_pending:
         return "check_compliance_visual(page_num=N) — visual checks are pending"
     return ""

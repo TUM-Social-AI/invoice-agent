@@ -6,10 +6,25 @@ This file lists the agent tools, their intent, key params, and how exposure is c
 
 - `llm.provider` in `config/config.yaml` selects the HTTP backend for all agent reasoning and vision LLM calls (`ollama` or `gemini`).
 - **Ollama**: uses `ollama.base_url`, `ollama.reasoning_model`, `ollama.vision_model`.
-- **Gemini**: uses the Generative Language API; set `gemini.api_key_env` (default `GOOGLE_API_KEY`) and `gemini.reasoning_model` / `gemini.vision_model` (Flash models are a good default for cost/latency). Implementation lives under `src/llm/` (`build_llm_provider`, `GeminiProvider`).
+- **Gemini**: uses the Generative Language API; set `gemini.api_key_env` (default `GOOGLE_API_KEY`) and `gemini.reasoning_model` / `gemini.vision_model` (defaults in repo: **Flash** for both — cost/latency). Set `llm.provider: gemini` to use it. Implementation: `src/llm/` (`build_llm_provider`, `GeminiProvider`).
 - **Timeouts** (`timeout_cfg` / `llm_timeouts`): for Gemini, precedence is `gemini.timeout_*` → `llm.timeout_*` → `ollama.timeout_*` → defaults. For Ollama: `ollama.timeout_*` → `llm.timeout_*` → defaults.
-- **Remote guardrails** (`llm.remote_guard` and optional `gemini.remote_guard` merge, Gemini wins): optional `max_llm_requests_per_run`, `max_chat_requests_per_run`, `max_generate_requests_per_run`, `max_total_token_count_per_run`, `warn_token_threshold`. When any limit is set, Gemini calls go through `MeteredLLMProvider` (counters reset at each `InvoiceAgent.run()`).
-- **Prompt caps** (`agent.prompt_profile`: `auto` | `local` | `remote`): `auto` uses larger history/learnings caps for non-Ollama providers. Set `learnings_max_chars`, `planning_learnings_max_chars`, or `history_preview_chars` to an integer to override; use YAML `null` to use the profile default for that field.
+- **Remote guardrails** (`llm.remote_guard` and optional `gemini.remote_guard` merge, Gemini wins): `max_llm_requests_per_run`, `max_chat_requests_per_run`, `max_generate_requests_per_run`, `max_total_token_count_per_run`, `warn_token_threshold`. The repo ships **default numeric limits** under `llm.remote_guard` so switching to Gemini is not uncapped by mistake. When any limit is set **and** `llm.provider` is `gemini`, calls go through `MeteredLLMProvider` (counters reset at each `InvoiceAgent.run()`). With `ollama`, these keys are ignored.
+- **Prompt caps** (`agent.prompt_profile`: `auto` | `local` | `remote`): `auto` uses larger history/learnings caps for non-Ollama providers. Set `learnings_max_chars`, `planning_learnings_max_chars`, or `history_preview_chars` to an integer to override; use YAML `null` to use the profile default for that field. Defaults in `config/config.yaml` set `history_preview_chars` and `learnings_max_chars` explicitly for cost control with remote APIs.
+- **State summary caps** (`agent.state_summary_max_page_lines`, `state_summary_max_inventory_lines`, `state_summary_inventory_desc_chars`): truncate long page path lists and page-inventory rows in `AgentState.summary_for_prompt` so multi-page PDFs do not explode text tokens each turn.
+- **OCR injection cap** (`agent.ocr_prompt_max_chars`): truncates Surya OCR text passed into `extract_fields_vision` prompts (full-page and crop paths).
+
+### Vision / `generate_json` cost (Gemini or any remote VL)
+
+Each **`chat_json`** call is one reasoning/planning/reflection step. Each **`generate_json`** call sends at least one image + prompt. Main sites:
+
+| Location | Calls | Notes |
+|----------|--------|--------|
+| [`src/tools/page_inventory.py`](../src/tools/page_inventory.py) `inventory_pages` | **One per PDF page** | Dominates for long documents; `compress_pages` first uses smaller thumbnails but still one request per page. |
+| [`src/tools/vision_llm.py`](../src/tools/vision_llm.py) `classify_document_type` | 1 | First page classification. |
+| [`src/tools/vision_llm.py`](../src/tools/vision_llm.py) `extract_fields_vision` | Per extraction (often per page / crop group) | Full-res or medium image bytes; OCR text capped by `ocr_prompt_max_chars`. |
+| [`src/tools/compliance_visual.py`](../src/tools/compliance_visual.py) `check_compliance_visual` | Batched | Multiple pages in one call, capped by `visual_max_evidence_pages`, images resized before send. |
+
+Use `llm.remote_guard.max_generate_requests_per_run` to bound vision calls per run; raise it if you routinely process PDFs with more pages than the default budget allows.
 
 ## Mode Matrix
 

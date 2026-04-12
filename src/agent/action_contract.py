@@ -1,5 +1,9 @@
 """Validate LLM tool actions before dispatch."""
 
+from pydantic import ValidationError
+
+from src.models.action_models import TOOL_PARAM_MODELS
+
 _TOOL_PARAM_ALLOWLIST: dict[str, set[str]] = {
     "inspect_file": set(),
     "compress_pages": {"dpi", "quality", "max_width"},
@@ -40,10 +44,17 @@ def validate_action_contract(action: dict) -> str | None:
         return f"Unknown tool '{tool}'."
     if not isinstance(params, dict):
         return "params must be a JSON object."
+    model = TOOL_PARAM_MODELS.get(tool)
+    if model is None:
+        return f"Unknown tool '{tool}'."
     allowed = _TOOL_PARAM_ALLOWLIST[tool]
     extra = sorted([k for k in params.keys() if k not in allowed])
     if extra:
         return f"Tool '{tool}' has invalid params: {extra}. Allowed: {sorted(allowed)}"
+    try:
+        model.model_validate(params)
+    except ValidationError as exc:
+        return f"Tool '{tool}' params validation failed: {exc.errors()}"
     if tool in {"extract_fields_vision", "check_compliance_visual"}:
         if "page_num" not in params:
             return f"Tool '{tool}' requires 'page_num' (integer page index)."

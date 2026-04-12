@@ -18,6 +18,7 @@ Learning mode:
 import argparse
 import json
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -26,8 +27,15 @@ from dotenv import load_dotenv
 
 from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
+from src.agent.state import rule_verdict_summary
 from src.output.writer import write_results
-from src.learning.evaluator import load_ground_truth, evaluate, format_diff_for_agent
+from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
+from src.learning.evaluator import (
+    evaluate,
+    format_diff_for_agent,
+    ground_truth_csv_configured,
+    load_ground_truth,
+)
 from src.tools.tools import reset_learnings
 
 logging.basicConfig(
@@ -35,7 +43,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s — %(message)s",
     datefmt="%H:%M:%S",
 )
-logger = logging.getLogger("main")
 
 _LOG_LEVELS: dict[str, int] = {
     "CRITICAL": logging.CRITICAL,
@@ -45,6 +52,36 @@ _LOG_LEVELS: dict[str, int] = {
     "INFO": logging.INFO,
     "DEBUG": logging.DEBUG,
 }
+
+# Google APIs often accept ?key=... ; urllib3 DEBUG logs the full URL. Redact if anything slips through.
+_URL_QUERY_KEY_RE = re.compile(r"([?&])key=[A-Za-z0-9_\-]+")
+
+
+class _RedactUrlQueryKeyFilter(logging.Filter):
+    """Strip API keys from log messages (e.g. urllib3 connection debug lines)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = _URL_QUERY_KEY_RE.sub(r"\1key=***", record.msg)
+        if record.args:
+            record.args = tuple(
+                _URL_QUERY_KEY_RE.sub(r"\1key=***", a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        return True
+
+
+def _install_url_query_key_redaction() -> None:
+    if getattr(_install_url_query_key_redaction, "_done", False):
+        return
+    f = _RedactUrlQueryKeyFilter()
+    for name in ("urllib3.connectionpool", "urllib3.connection"):
+        logging.getLogger(name).addFilter(f)
+    setattr(_install_url_query_key_redaction, "_done", True)
+
+
+_install_url_query_key_redaction()
+logger = logging.getLogger("main")
 
 
 def apply_configured_log_level(app_config: dict) -> None:
@@ -99,28 +136,70 @@ def process_invoice(
     print(f"  Status   : {state.status.value.upper()}")
     print(f"  Turns    : {state.turn}")
     print(f"  Fields   : {len(state.extracted_fields)} extracted")
-    print(f"  Rules    : {len(state.passed_rules)} passed / {len(state.failed_rules)} failed")
-    if state.failed_rules:
-        print(f"  Failed   : {', '.join(state.failed_rules)}")
+    _rv = rule_verdict_summary(state.rule_results)
+    print(
+        f"  Rules    : {len(state.passed_rules)} passed | "
+        f"blocking errors: {len(_rv['error_failed_rule_ids'])} | "
+        f"warnings: {len(_rv['warning_failed_rule_ids'])}"
+    )
+    if _rv["error_failed_rule_ids"]:
+        print(f"  Errors   : {', '.join(_rv['error_failed_rule_ids'])}")
+    if _rv["warning_failed_rule_ids"]:
+        print(f"  Warnings : {', '.join(_rv['warning_failed_rule_ids'])}")
     flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
     if flagged:
         print(f"  Review   : {', '.join(flagged)}")
     print(f"  Output   : {paths['fields_csv']}")
 
-    if learn:
-        truth = load_ground_truth(pdf_path, config=getattr(agent, "config", None))
-        if truth is None:
-            print(f"  Learn    : no truth file found — skipping reflection")
-            print(f"             (expected: {Path(pdf_path).stem}_truth.json)")
+    cfg = getattr(agent, "config", None) or {}
+    agent_block = cfg.get("agent") or {}
+    date_parse = str(agent_block.get("ground_truth_date_parse", "DMY")).strip().upper()
+    truth = load_ground_truth(
+        pdf_path,
+        config=cfg,
+        invoice_type_id=state.invoice_type_id or None,
+    )
+    if truth is not None:
+        diff = evaluate(state, truth, store=agent.store, date_parse=date_parse)
+        diff_text = format_diff_for_agent(diff)
+        s = diff["score"]
+        ft = s.get("fields_total") or 0
+        if ft:
+            print(
+                f"  Ground truth: {ft} field(s) compared | "
+                f"exact {s.get('fields_exact', 0)} · partial {s.get('fields_partial', 0)} · "
+                f"wrong {s.get('fields_wrong', 0)} "
+                f"(missing {s.get('fields_not_extracted', 0)} · mismatch {s.get('fields_wrong_value', 0)})"
+            )
+            if s.get("field_accuracy") is not None:
+                exa = s.get("exact_accuracy")
+                print(
+                    f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
+                    f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
+                )
         else:
-            diff = evaluate(state, truth)
-            diff_text = format_diff_for_agent(diff)
-            s = diff["score"]
-            print(f"  Learn    : field accuracy {s.get('field_accuracy', '?') or '?'} | "
-                  f"rule accuracy {s.get('rule_accuracy', '?') or '?'}")
-            print(f"             Running reflection loop...")
+            print("  Ground truth: no overlapping fields to score")
+        if s.get("rule_accuracy") is not None:
+            rt = s.get("rules_total") or 0
+            print(
+                f"                 compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
+                f"({s['rule_accuracy']:.0%})"
+            )
+        rt = parse_agent_runtime_settings(cfg)
+        max_c = int(rt.get("log_line_max_chars", 120))
+        for line in diff_text.splitlines():
+            logger.info(clip_for_log(line, max_c))
+        if learn:
+            print(f"  Learn    : running reflection loop...")
             agent.run_reflection(state, diff_text)
             print(f"             Learnings written to learnings.md")
+    else:
+        if learn:
+            stem = Path(pdf_path).stem
+            print(f"  Learn    : no ground truth — skipping reflection")
+            print(f"             (add {stem}_truth.json or a matching CSV row)")
+        elif ground_truth_csv_configured(cfg):
+            print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
 
     print(f"{'='*60}\n")
     return state

@@ -382,3 +382,57 @@ class TestFullVIAJESRun:
         failed_ids = {r["rule_id"] for r in result["failed_errors"]}
         assert "R_VIA_001" in failed_ids  # invoice_date required
         assert "R_VIA_002" in failed_ids  # total_amount required
+
+
+class TestNormalizeNumeric:
+    def test_strips_html_tags(self):
+        from src.tools.compliance_eval import _normalize_numeric
+
+        assert _normalize_numeric("<span>87</span>%") == 87.0
+        assert _normalize_numeric("<td>12,5</td>") == 12.5
+
+
+class TestPersLocalProjectAllocation:
+    def test_range_accepts_html_wrapped_value(self, store):
+        state = make_state(
+            {"project_allocation_pct": "<span>50</span>"},
+            invoice_type_id="PERS_LOCAL",
+        )
+        rules = [r for r in store.get_rules("PERS_LOCAL") if r.rule_id == "R_PL_006"]
+        if not rules:
+            pytest.skip("R_PL_006 not in PERS_LOCAL rules")
+        check_compliance(state, rules, store=store)
+        assert state.rule_results[0].status == "passed"
+
+    def test_range_unparseable_optional_skips(self, store):
+        state = make_state(
+            {"project_allocation_pct": "%%%"},
+            invoice_type_id="PERS_LOCAL",
+        )
+        rules = [r for r in store.get_rules("PERS_LOCAL") if r.rule_id == "R_PL_006"]
+        if not rules:
+            pytest.skip("R_PL_006 not in PERS_LOCAL rules")
+        check_compliance(state, rules, store=store)
+        assert state.rule_results[0].status == "skipped"
+
+
+class TestMergeDecimalCoercion:
+    def test_decimal_string_coerced_at_merge(self, store):
+        schema_full = store.build_extraction_schema("PERS_LOCAL")
+        schema = {"project_allocation_pct": schema_full["project_allocation_pct"]}
+        state = AgentState(
+            pdf_path="test.pdf",
+            invoice_type_id="PERS_LOCAL",
+            output_dir="/tmp/test_output",
+        )
+        merge_extracted_fields(
+            state=state,
+            new_extraction={
+                "project_allocation_pct": "50%",
+                "project_allocation_pct_confidence": 0.9,
+            },
+            schema=schema,
+            source_page=1,
+            source_region="body",
+        )
+        assert state.extracted_fields["project_allocation_pct"].extracted_value == 50.0

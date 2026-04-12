@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import requests
 from PIL import Image
@@ -19,9 +19,36 @@ from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
+from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel
+from src.prompts.llm_prompts import (
+    build_extract_fields_vision_prompt,
+    classify_document_type_prompt,
+    format_extraction_accuracy_block,
+    ocr_transcript_section,
+)
 from src.tools.pdf_pages import _image_to_base64
 
 logger = logging.getLogger(__name__)
+
+# Lower than chat; reduces invented tokens on dense forms.
+EXTRACTION_TEMPERATURE = 0.05
+
+
+def _sanitize_extracted_string_value(value: Any, ftype: str) -> Any:
+    """Strip HTML/XML noise from string/date fields before merge (OCR/layout sometimes embeds tags)."""
+    if value is None:
+        return None
+    ftl = (ftype or "").strip().lower()
+    if ftl not in ("string", "date", ""):
+        return value
+    if not isinstance(value, str):
+        return value
+    s = re.sub(r"<[^>]+>", "", value)
+    s = re.sub(r"&#\d+;", " ", s)
+    s = s.replace("&nbsp;", " ").replace("\xa0", " ").strip()
+    if not s or s.lower() in ("null", "none"):
+        return None
+    return s
 
 
 def classify_document_type(
@@ -46,15 +73,7 @@ def classify_document_type(
         for t in store.invoice_types.values()
     )
 
-    prompt = f"""You are an invoice classification expert. Look at this document and identify which type it is.
-
-Available types:
-{type_descriptions}
-
-Respond with ONLY a valid JSON object:
-{{"invoice_type_id": "EU_VAT", "confidence": 0.92, "reasoning": "one sentence"}}
-
-Pick exactly one type_id from the list. Do not invent new types."""
+    prompt = classify_document_type_prompt(type_descriptions)
 
     img_b64 = _image_to_base64(first_page)
     payload = {
@@ -82,9 +101,10 @@ Pick exactly one type_id from the list. Do not invent new types."""
             raw = resp.json().get("response", "")
             raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
             parsed = json.loads(raw)
-        detected = parsed.get("invoice_type_id", "").strip()
-        confidence = parsed.get("confidence", 0)
-        reasoning = parsed.get("reasoning", "")
+        parsed_model = ClassificationResultModel.model_validate(parsed)
+        detected = parsed_model.invoice_type_id.strip()
+        confidence = parsed_model.confidence
+        reasoning = parsed_model.reasoning
 
         if detected not in store.invoice_types:
             return {
@@ -121,8 +141,8 @@ def extract_fields_vision(
     """
     Send image + schema to Qwen2-VL via Ollama.
     Returns structured JSON matching the schema fields.
-    If text_context is provided (native PDF text layer), it is injected before the field
-    list so the vision model can cross-check pixel reading against the text layer.
+    If text_context is provided (e.g. OCR text), it is injected so the vision model can
+    cross-check pixel reading against the transcript.
     """
     field_descriptions = []
     for field_name, meta in schema.items():
@@ -136,28 +156,14 @@ def extract_fields_vision(
 
     fields_text = "\n".join(field_descriptions)
 
-    text_section = (
-        f"[Native PDF text layer — use as primary reference for exact values]\n{text_context}\n\n"
-        if text_context else ""
+    text_section = ocr_transcript_section(text_context)
+    acc = format_extraction_accuracy_block(state)
+    prompt = build_extract_fields_vision_prompt(
+        text_section=text_section,
+        hints=hints,
+        accuracy_block=acc,
+        fields_text=fields_text,
     )
-
-    prompt = f"""You are an invoice data extraction specialist. Extract the following fields from this invoice image.
-
-{text_section}{hints}
-
-Extract these fields (return null if not found, not if uncertain):
-{fields_text}
-
-Return ONLY a valid JSON object with exactly these keys. For each field also include a "_confidence" key (0.0-1.0).
-Example format:
-{{
-  "vendor_name": "Acme GmbH",
-  "vendor_name_confidence": 0.95,
-  "invoice_number": null,
-  "invoice_number_confidence": 0.0
-}}
-
-Do not include any text outside the JSON object."""
 
     img_b64 = _image_to_base64(image_path)
 
@@ -166,17 +172,27 @@ Do not include any text outside the JSON object."""
         "prompt": prompt,
         "images": [img_b64],
         "stream": False,
-        "options": {"temperature": 0.1},  # low temp for extraction tasks
+        "options": {"temperature": EXTRACTION_TEMPERATURE},
+        "format": "json",  # Ollama /api/generate: constrain output to JSON when using raw HTTP path
     }
 
     try:
         if provider is not None:
+            # Gemini: responseMimeType application/json. Ollama: top-level format=json (see ollama_provider.generate_json).
+            pname = getattr(provider, "provider_name", "")
+            if pname == "gemini":
+                extraction_json_mode: str | None = "application/json"
+            elif pname == "ollama":
+                extraction_json_mode = "json"
+            else:
+                extraction_json_mode = None
             llm_result = provider.generate_json(
                 model=model,
                 prompt=prompt,
                 images_b64=[img_b64],
-                temperature=0.1,
+                temperature=EXTRACTION_TEMPERATURE,
                 timeout_s=timeout_s,
+                response_format=extraction_json_mode,
             )
             raw = llm_result.content_text
             parsed = llm_result.content_json if llm_result.content_json is not None else json.loads(raw)
@@ -193,7 +209,8 @@ Do not include any text outside the JSON object."""
             raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("```").strip()
 
             parsed = json.loads(raw)
-        return {"success": True, "extracted": parsed, "raw_response": raw}
+        payload_model = ExtractionPayloadModel.model_validate({"payload": parsed})
+        return {"success": True, "extracted": payload_model.payload, "raw_response": raw}
 
     except json.JSONDecodeError as e:
         return {"success": False, "error": f"JSON parse error: {e}", "raw_response": raw}
@@ -223,6 +240,8 @@ def merge_extracted_fields(
     Merge new extraction results into state.extracted_fields.
     Only updates a field if the new confidence is higher than existing.
     """
+    from src.tools.compliance_eval import _normalize_numeric as _coerce_numeric
+
     updated = []
     skipped = []
     null_fields = []
@@ -230,6 +249,15 @@ def merge_extracted_fields(
     for field_name, meta in schema.items():
         value = new_extraction.get(field_name)
         confidence = float(new_extraction.get(f"{field_name}_confidence", 0.5))
+
+        if value is not None:
+            ftype = (meta.get("type") or meta.get("data_type") or "").strip().lower()
+            if ftype == "decimal" and isinstance(value, str):
+                n = _coerce_numeric(value)
+                if n is not None:
+                    value = n
+            else:
+                value = _sanitize_extracted_string_value(value, ftype)
 
         if value is None:
             # The model explicitly returned null for this field.

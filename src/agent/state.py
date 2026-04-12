@@ -4,10 +4,11 @@ Every tool call reads from and writes back to this state.
 """
 
 import time
-from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any, Optional
+
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class AgentStatus(Enum):
@@ -19,8 +20,8 @@ class AgentStatus(Enum):
     INTERRUPTED = "interrupted" # user cancelled (Ctrl+C)
 
 
-@dataclass
-class FieldResult:
+class FieldResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     field_id: str
     field_name: str
     extracted_value: Any
@@ -33,8 +34,8 @@ class FieldResult:
     batch_review: bool = False  # True when confidence is medium (threshold–0.85); non-blocking
 
 
-@dataclass
-class RuleResult:
+class RuleResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     rule_id: str
     rule_name: str
     field_id: str
@@ -44,8 +45,23 @@ class RuleResult:
     agent_notes: Optional[str] = None
 
 
-@dataclass
-class AgentAction:
+def rule_verdict_summary(rule_results: list[RuleResult]) -> dict[str, Any]:
+    """
+    Split rule outcomes by severity. `status == "failed"` includes both error- and
+    warning-severity rules; finish() only blocks on the former.
+    """
+    passed_n = sum(1 for r in rule_results if r.status == "passed")
+    err_failed = [r.rule_id for r in rule_results if r.status == "failed" and r.severity == "error"]
+    warn_failed = [r.rule_id for r in rule_results if r.status == "failed" and r.severity == "warning"]
+    return {
+        "passed_count": passed_n,
+        "error_failed_rule_ids": err_failed,
+        "warning_failed_rule_ids": warn_failed,
+    }
+
+
+class AgentAction(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     turn: int
     tool_name: str
     tool_input: dict
@@ -53,8 +69,8 @@ class AgentAction:
     reasoning: str              # why the agent picked this tool
 
 
-@dataclass
-class AgentState:
+class AgentState(BaseModel):
+    model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
     # --- Inputs ---
     pdf_path: str
     output_dir: str
@@ -63,44 +79,46 @@ class AgentState:
     # --- Runtime ---
     status: AgentStatus = AgentStatus.RUNNING
     turn: int = 0
-    started_at: float = field(default_factory=time.time)
+    started_at: float = Field(default_factory=time.time)
 
     # --- File metadata (set by inspect_file) ---
-    file_info: dict = field(default_factory=dict)
+    file_info: dict = Field(default_factory=dict)
 
     # --- PDF processing ---
-    page_image_paths: list[str] = field(default_factory=list)
-    compressed_page_paths: list[str] = field(default_factory=list)  # low-res copies from compress_pages
+    page_image_paths: list[str] = Field(default_factory=list)
+    compressed_page_paths: list[str] = Field(default_factory=list)  # low-res copies from compress_pages
     # Medium-res pages for hybrid extraction/visual (tmp/medium_pages); same length as page_image_paths when set
-    medium_page_paths: list[str] = field(default_factory=list)
+    medium_page_paths: list[str] = Field(default_factory=list)
     page_count: int = 0
-    region_crops: dict[str, str] = field(default_factory=dict)   # "page1_header" → path
+    region_crops: dict[str, str] = Field(default_factory=dict)   # "page1_header" → path
     compressed: bool = False        # True after compress_pages was called
+    # Default DPI for convert_pdf_to_images when the tool omits dpi (from config agent.page_dpi).
+    page_render_dpi: int = 150
 
     # --- Page inventory (set by inventory_pages) ---
     # [{page: 1, description: "invoice header with vendor info"}, ...]
-    page_inventory: list[dict] = field(default_factory=list)
+    page_inventory: list[dict] = Field(default_factory=list)
     # Normalized page facts used by evidence-grounded compliance.
     # {page_num: {"category": str, "doc_subtype": str, "entities": {...}, "confidence": float}}
-    page_facts: dict[int, dict] = field(default_factory=dict)
+    page_facts: dict[int, dict] = Field(default_factory=dict)
 
     # --- Extraction ---
-    extracted_fields: dict[str, FieldResult] = field(default_factory=dict)  # field_name → result
-    field_retry_counts: dict[str, int] = field(default_factory=dict)
+    extracted_fields: dict[str, FieldResult] = Field(default_factory=dict)  # field_name → result
+    field_retry_counts: dict[str, int] = Field(default_factory=dict)
 
     # --- Compliance ---
-    rule_results: list[RuleResult] = field(default_factory=list)
-    failed_rules: list[str] = field(default_factory=list)         # rule_ids still failing
-    passed_rules: list[str] = field(default_factory=list)
-    skipped_checks: list[dict] = field(default_factory=list)      # non-visual skips: [{rule_id, reason}]
-    visual_checks_pending: list[str] = field(default_factory=list)  # rule_ids awaiting check_compliance_visual
+    rule_results: list[RuleResult] = Field(default_factory=list)
+    failed_rules: list[str] = Field(default_factory=list)         # rule_ids still failing
+    passed_rules: list[str] = Field(default_factory=list)
+    skipped_checks: list[dict] = Field(default_factory=list)      # non-visual skips: [{rule_id, reason}]
+    visual_checks_pending: list[str] = Field(default_factory=list)  # rule_ids awaiting check_compliance_visual
     # Evidence and policy grounding for each rule_id.
     # rule_evidence[rule_id] = {"required_slots": [...], "filled_slots": [...], "missing_slots": [...], "refs": [...]}
-    rule_evidence: dict[str, dict] = field(default_factory=dict)
+    rule_evidence: dict[str, dict] = Field(default_factory=dict)
     # rule_policy_refs[rule_id] = [{"source": "learnings", "snippet_id": "L042", "snippet": "..."}]
-    rule_policy_refs: dict[str, list[dict]] = field(default_factory=dict)
+    rule_policy_refs: dict[str, list[dict]] = Field(default_factory=dict)
     # rule_state[rule_id] = unseen|candidate|supported|contradicted|finalized_pass|finalized_fail|needs_review
-    rule_state: dict[str, str] = field(default_factory=dict)
+    rule_state: dict[str, str] = Field(default_factory=dict)
 
     # --- Compliance loop detection ---
     last_compliance_hash: str = ""   # MD5 of last check_compliance result (detects redundant calls)
@@ -109,13 +127,13 @@ class AgentState:
     compliance_same_result_streak: int = 0
 
     # --- History ---
-    action_history: list[AgentAction] = field(default_factory=list)
+    action_history: list[AgentAction] = Field(default_factory=list)
     learnings_context: str = ""     # loaded from learnings.md at start
 
     # --- Per-file working memory ---
     # The agent can freely write observations, hypotheses and decisions here
     # across turns without committing them to the permanent learnings file.
-    session_notes: list[str] = field(default_factory=list)
+    session_notes: list[str] = Field(default_factory=list)
 
     # --- Final output ---
     finish_reason: Optional[str] = None
@@ -128,10 +146,11 @@ class AgentState:
     batch_review_threshold: float = 0.85
 
     # --- Execution plan (generated once before the main loop) ---
-    execution_plan: list[dict] = field(default_factory=list)
+    execution_plan: list[dict] = Field(default_factory=list)
 
     # --- Adaptive model routing ---
     use_fallback_model: bool = False
+    fallback_logged: bool = False
 
     # --- Per-run log ---
     run_log_path: Optional[str] = None
@@ -156,8 +175,63 @@ class AgentState:
     def increment_field_retry(self, field_name: str):
         self.field_retry_counts[field_name] = self.get_field_retry_count(field_name) + 1
 
-    def summary_for_prompt(self) -> str:
-        """Returns a compact state summary for injection into agent turns."""
+    def summary_for_prompt(
+        self,
+        *,
+        max_page_lines: int = 28,
+        max_inventory_lines: int = 50,
+        inventory_desc_chars: int = 180,
+    ) -> str:
+        """Returns a compact state summary for injection into agent turns.
+
+        Path and inventory lists are truncated for large PDFs so prompts stay bounded
+        for remote APIs (see agent.state_summary_* in config).
+        """
+        def _truncate_desc(d: str, max_chars: int) -> str:
+            d = (d or "").strip()
+            if max_chars <= 0:
+                return d
+            if len(d) <= max_chars:
+                return d
+            return d[: max(0, max_chars - 3)] + "..."
+
+        def _format_paths_block(
+            paths: list[str],
+            *,
+            title: str,
+            subtitle: str,
+            max_lines: int,
+        ) -> str:
+            n = len(paths)
+            if n == 0:
+                return ""
+            if max_lines <= 0:
+                return (
+                    f"{title} ({n} total — {subtitle}): "
+                    f"(paths omitted — use page_num 1..{n})\n"
+                    f"  → Pass page_num=N (integer 1-indexed). NEVER construct or guess paths."
+                )
+            if n <= max_lines:
+                body = "\n".join(f"  page_num={i+1}: {p}" for i, p in enumerate(paths))
+            else:
+                head = max_lines // 2
+                tail = max_lines - head
+                first = "\n".join(f"  page_num={i+1}: {p}" for i, p in enumerate(paths[:head]))
+                last = "\n".join(
+                    f"  page_num={n - tail + i + 1}: {p}"
+                    for i, p in enumerate(paths[-tail:])
+                )
+                omitted = n - head - tail
+                body = (
+                    f"{first}\n"
+                    f"  ... ({omitted} pages omitted — valid page_num 1..{n}) ...\n"
+                    f"{last}"
+                )
+            return (
+                f"{title} ({n} total — {subtitle}):\n{body}\n"
+                f"  → Pass page_num=N (integer 1-indexed). NEVER construct or guess paths."
+            )
+
         file_summary = (
             f"File: {self.file_info.get('filename', Path(self.pdf_path).name)} | "
             f"Size: {self.file_info.get('size_mb', '?')} MB | "
@@ -174,38 +248,50 @@ class AgentState:
         )
         # Full-res pages (for extraction)
         if self.page_image_paths:
-            indexed = "\n".join(
-                f"  page_num={i+1}: {p}" for i, p in enumerate(self.page_image_paths)
-            )
-            pages_summary = (
-                f"Full-res pages ({len(self.page_image_paths)} total"
-                f" — USE THESE for extract_fields_vision):\n{indexed}\n"
-                f"  → Pass page_num=N (integer 1-indexed). NEVER construct or guess paths."
+            pages_summary = _format_paths_block(
+                self.page_image_paths,
+                title="Full-res pages",
+                subtitle="USE THESE for extract_fields_vision",
+                max_lines=max_page_lines,
             )
         else:
+            _dpi = int(self.page_render_dpi or 150)
             pages_summary = (
                 "Full-res pages: NOT RENDERED"
-                " — call convert_pdf_to_images(dpi=150) before extraction."
+                f" — call convert_pdf_to_images(dpi={_dpi}) before extraction."
             )
 
         # Compressed thumbnails (for inventory/classify only)
         if self.compressed_page_paths:
-            cidx = "\n".join(
-                f"  page_num={i+1}: {p}" for i, p in enumerate(self.compressed_page_paths)
-            )
-            compressed_summary = (
-                f"Compressed thumbnails ({len(self.compressed_page_paths)} total"
-                f" — inventory/classify ONLY, NOT suitable for extraction):\n{cidx}"
+            compressed_summary = _format_paths_block(
+                self.compressed_page_paths,
+                title="Compressed thumbnails",
+                subtitle="inventory/classify ONLY, NOT suitable for extraction",
+                max_lines=max_page_lines,
             )
         else:
             compressed_summary = "Compressed thumbnails: none"
 
         if self.page_inventory:
-            inventory_lines = "\n".join(
-                f"  p{e['page']} [{e.get('category', '?')}]: {e['description']}"
-                for e in self.page_inventory
+            inv = self.page_inventory
+            max_inv = max(1, max_inventory_lines)
+            if len(inv) <= max_inv:
+                slice_inv = inv
+                inv_omit = ""
+            else:
+                head = max_inv // 2
+                tail = max_inv - head
+                slice_inv = inv[:head] + inv[-tail:]
+                inv_omit = (
+                    f"  ... ({len(inv) - len(slice_inv)} inventory rows omitted; "
+                    f"pages 1..{len(inv)}) ...\n"
+                )
+            inv_lines = "\n".join(
+                f"  p{e['page']} [{e.get('category', '?')}]: "
+                f"{_truncate_desc(str(e.get('description', '')), inventory_desc_chars)}"
+                for e in slice_inv
             )
-            inventory_summary = f"Page inventory:\n{inventory_lines}"
+            inventory_summary = f"Page inventory:\n{inv_omit}{inv_lines}"
         else:
             inventory_summary = "Page inventory: (not built yet — call inventory_pages after compression)"
 
@@ -290,6 +376,12 @@ class AgentState:
                     f"Evidence gaps (error-priority): {', '.join(high_priority_gaps[:8])}\n"
                 )
 
+        rv = rule_verdict_summary(self.rule_results)
+        rules_line = (
+            f"Non-pass rules — blocking (error): {rv['error_failed_rule_ids']} | "
+            f"non-blocking (warning): {rv['warning_failed_rule_ids']}\n"
+        )
+
         return (
             f"Turn: {self.turn}\n"
             f"{file_summary}\n"
@@ -302,8 +394,8 @@ class AgentState:
             f"{inventory_summary}\n"
             f"Extracted fields — {done_summary}\n"
             + (f"Extracted fields — {batch_review_summary}\n" if batch_review_summary else "")
-            + f"Extracted fields — need attention ({len(attention_fields)}): {attention_fields}\n"
-            f"Failed rules: {self.failed_rules}\n"
+            +             f"Extracted fields — need attention ({len(attention_fields)}): {attention_fields}\n"
+            f"{rules_line}"
             + (
                 f"⚠ VISUAL CHECKS PENDING ({len(self.visual_checks_pending)}): "
                 f"{self.visual_checks_pending} — MUST call check_compliance_visual before finish\n"

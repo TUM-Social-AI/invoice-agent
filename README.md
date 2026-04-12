@@ -319,33 +319,21 @@ To compare fairly, run the same PDF set with `--learn` **off** (so learnings don
 Everything is driven by three CSV files in `config/csv/` and one YAML file. No code changes are needed to add invoice types, fields, or rules.
 
 Tool catalog and mode/group exposure details are documented in [`docs/tools.md`](docs/tools.md).
+Agent tool-selection, per-phase tool availability, and orchestration diagrams are documented in [`docs/architecture.md`](docs/architecture.md).
 
 ### `config/config.yaml`
 
 ```yaml
 llm:
-  provider: ollama   # or gemini (Google AI — set GOOGLE_API_KEY and gemini.* below)
-  # Shared timeouts (optional): gemini also reads gemini.timeout_* with higher precedence.
-  # timeout_chat_s: 300
-  # timeout_generate_s: 600
-  # Optional caps for remote APIs (Gemini): max_llm_requests_per_run, token warnings, etc.
-  # remote_guard:
-  #   max_llm_requests_per_run: 120
-  #   max_total_token_count_per_run: 500000
-  #   warn_token_threshold: 100000
+  provider: ollama   # or gemini (Google AI — set GOOGLE_API_KEY; see gemini.* below)
+  # remote_guard: per-run caps when provider is gemini (see config/config.yaml for defaults)
 
 ollama:
   base_url: "http://localhost:11434"
   vision_model: "qwen2.5vl:32b"    # used for extraction, inventory, visual checks
   reasoning_model: "qwen3:1.7b"    # used for the agent reasoning loop only
 
-# gemini:
-#   api_key_env: GOOGLE_API_KEY
-#   reasoning_model: gemini-2.0-flash
-#   vision_model: gemini-2.0-flash
-#   timeout_generate_s: 600
-#   remote_guard:
-#     max_llm_requests_per_run: 80
+# gemini: block lives in config/config.yaml (Flash defaults); set llm.provider: gemini to use.
 
 agent:
   # Orchestration mode:

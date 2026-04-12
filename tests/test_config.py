@@ -41,6 +41,26 @@ def test_compliance_rules_loaded(store):
     assert "R_VIA_007" in rule_ids  # cross-field math check
 
 
+def test_rule_group_column_loaded(store):
+    via = store.get_rules("VIAJES")
+    r009 = next(r for r in via if r.rule_id == "R_VIA_009")
+    assert r009.rule_group == "xunta_galicia"
+    r001 = next(r for r in via if r.rule_id == "R_VIA_001")
+    assert r001.rule_group == "general"
+
+
+def test_get_rules_respects_active_rule_groups(store):
+    all_via = store.get_rules("VIAJES", None)
+    gen_only = store.get_rules("VIAJES", ["general"])
+    assert len(gen_only) < len(all_via)
+    gen_ids = {r.rule_id for r in gen_only}
+    assert "R_VIA_001" in gen_ids
+    assert "R_VIA_009" not in gen_ids
+    xunta_ids = {r.rule_id for r in store.get_rules("VIAJES", ["xunta_galicia"])}
+    assert "R_VIA_009" in xunta_ids
+    assert "R_VIA_001" not in xunta_ids
+
+
 def test_build_extraction_schema(store):
     schema = store.build_extraction_schema("VIAJES")
     assert "vendor_name" in schema

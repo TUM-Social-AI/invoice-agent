@@ -9,12 +9,14 @@ from typing import Any
 from src.agent.state import AgentState
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
+from src.llm.config_resolve import active_rule_groups_from_config
 from src.agent.phases import current_phase as _current_phase, next_required_step as _next_required_step
 from src.agent.tool_policy import (
     parse_tool_description_blocks,
     load_tool_description_overrides,
     render_tool_documentation,
 )
+from src.prompts.llm_prompts import build_reflection_learning_prompt
 
 logger = logging.getLogger(__name__)
 
@@ -72,7 +74,7 @@ read_learnings()
 write_learning(category, content, invoice_type_id=null)
   → appends a new learning; returns {"learning_id": "L042", ...} — save the ID if you may edit it later
   → skips silently if identical content already exists (exact dedup)
-  categories: approaches | extraction_patterns | common_failures | compliance_edge_cases | tool_suggestions
+  categories: approaches | extraction_patterns | vision_model_extraction | common_failures | compliance_edge_cases | tool_suggestions
   set invoice_type_id="GENERAL" for cross-type insights and tool suggestions
 edit_learning(learning_id, new_content)
   → replace the content of learning [L042] in-place (original date preserved, [edited] suffix added)
@@ -90,6 +92,9 @@ install_package(package)
   → pip-install a package into the active conda env; call when a tool fails with "not installed" or ImportError, then retry the tool
 finish(reason, all_errors_resolved)
   reason: "compliance_passed" | "max_retries" | "human_review_needed" | "unrecoverable_error"
+  Note: "compliance_passed" means no blocking ERROR-severity rule failures (and no incomplete
+  error evidence). WARNING-severity rules may still be non-pass — check warning_failures in the result.
+  The returned status_explanation summarizes this.
 """
 
 def build_system_prompt(
@@ -101,6 +106,7 @@ def build_system_prompt(
     confidence_threshold: float = 0.65,
 ) -> str:
     agent_cfg = config.get("agent", {})
+    _page_dpi = int(agent_cfg.get("page_dpi", 150))
     learnings_inject_enabled = bool(agent_cfg.get("learnings_inject_enabled", True))
     if not state.invoice_type_id:
         type_context = (
@@ -118,7 +124,10 @@ def build_system_prompt(
             )
         )
     else:
-        type_context = store.build_agent_context(state.invoice_type_id)
+        type_context = store.build_agent_context(
+            state.invoice_type_id,
+            active_rule_groups_from_config(config),
+        )
 
     improvement_guidance = f"""
 Working style:
@@ -131,7 +140,7 @@ Working style:
     inventory_pages() returns a fixed category (INVOICE_HEADER, LINE_ITEMS, TOTALS,
     SIGNATURE_STAMP, SUPPORTING_DOC, COVER_PAGE, BLANK) for every page plus a short
     description. Use this map to target extraction — don't guess which page has what.
-  Phase 2 (extraction): convert_pdf_to_images(dpi=150) → targeted extraction on the right pages
+  Phase 2 (extraction): convert_pdf_to_images(dpi={_page_dpi}) → targeted extraction on the right pages
     Extract all fields expected on the same page in a SINGLE extract_fields_vision call.
     Do NOT call extract_fields_vision once per field — pass the full field_subset for
     that page in one call. This saves turns and reduces redundant vision model load.
@@ -176,6 +185,15 @@ Working style:
 
     # Tool descriptions should match what the LLM can actually call.
     tool_doc = TOOL_DESCRIPTIONS
+    tool_doc = tool_doc.replace(
+        "convert_pdf_to_images(dpi=150)",
+        f"convert_pdf_to_images(dpi={_page_dpi})",
+    )
+    if not bool(agent_cfg.get("hybrid_extraction", True)):
+        tool_doc = tool_doc.replace(
+            "After convert_pdf_to_images, hybrid mode may run medium-res first internally, then promote to full-res.",
+            "Hybrid extraction is disabled: vision uses full-resolution page images only (no medium-res pass).",
+        )
     if allowed_tool_names is not None:
         # Cache parsed blocks on the function for speed.
         cache = getattr(build_system_prompt, "_tool_desc_cache", None)
@@ -192,6 +210,15 @@ Working style:
             overrides=overrides,
             allowed_tool_names=set(allowed_tool_names),
         )
+        tool_doc = tool_doc.replace(
+            "convert_pdf_to_images(dpi=150)",
+            f"convert_pdf_to_images(dpi={_page_dpi})",
+        )
+        if not bool(agent_cfg.get("hybrid_extraction", True)):
+            tool_doc = tool_doc.replace(
+                "After convert_pdf_to_images, hybrid mode may run medium-res first internally, then promote to full-res.",
+                "Hybrid extraction is disabled: vision uses full-resolution page images only (no medium-res pass).",
+            )
 
     return f"""You are an invoice compliance agent that learns and improves with each document it processes.
 
@@ -212,30 +239,10 @@ Hard rules:
   check_compliance_visual(page_num=N) on the SIGNATURE_STAMP or INVOICE_HEADER page
   before calling finish — finish() will be rejected with an error if visual checks are pending
 - When all error-level rules pass AND visual_checks_pending is empty, finish with all_errors_resolved=true
+  (warning-level rule failures alone do not block PASSED — read error_failures vs warning_failures on finish)
 - Always use page_num=N (an integer like 1, 2, 3) — NEVER construct or guess image file paths
 - When retrying extract_fields_vision or check_compliance_visual, change parameters (page_num, region, hints, or field_subset) — do not repeat identical params
 - Respond ONLY with valid JSON."""
 
 def build_reflection_prompt(state: AgentState, diff_text: str, store: ConfigStore) -> str:
-    type_id = state.invoice_type_id or diff_text  # fallback: type visible in diff
-    return f"""You have just processed an invoice in LEARNING MODE.
-Your normal run is complete. Now you will receive the verified ground truth and reflect on your performance.
-
-{diff_text}
-
-Your session notes from this run:
-{chr(10).join(f'  - {n}' for n in state.session_notes) or '  (none)'}
-
-Your task now is to write learnings that will make future runs better.
-For each meaningful discrepancy or success, call write_learning() with a specific, actionable insight.
-Focus on WHY something went wrong and HOW to avoid it next time.
-
-Available categories:
-- "approaches"           — update the overall strategy for this document type
-- "extraction_patterns"  — where/how to find a specific field more reliably
-- "common_failures"      — what caused a miss and how to recover
-- "compliance_edge_cases"— rules that behaved unexpectedly
-- "tool_suggestions"     — capabilities that were missing (use invoice_type_id="GENERAL")
-
-When you have written all useful learnings, call finish(reason="reflection_complete", all_errors_resolved=false).
-Respond ONLY with valid JSON: {{"tool": "...", "params": {{}}, "reasoning": "..."}}"""
+    return build_reflection_learning_prompt(diff_text, list(state.session_notes))
