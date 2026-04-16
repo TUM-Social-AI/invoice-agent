@@ -53,6 +53,69 @@ from src.models.action_models import (
 
 logger = logging.getLogger(__name__)
 
+
+def _auto_expand_fields(
+    kwargs: dict,
+    full_schema: dict,
+    state: "AgentState",
+    agent_cfg: dict,
+) -> dict:
+    """Return the effective extraction schema for one vision call.
+
+    Starts from whatever field subset the agent requested, then fills
+    remaining slots with every field that has never been attempted — so
+    un-tried fields get a free ride in the same vision call (cuts turns
+    by ~60-70%).  The caller gates this function with ``batch_auto_expand``
+    from config so it can be disabled when exact field control is needed.
+
+    Args:
+        kwargs:     Raw tool-call keyword arguments from the agent.
+        full_schema: All fields defined for the current invoice type.
+        state:      Current agent state (used to check retry counts).
+        agent_cfg:  The ``agent`` section of config (for ``micro_tools_phase2``
+                    and the MAX_BATCH_FIELDS cap).
+
+    Returns:
+        A filtered schema dict (subset of ``full_schema``).
+    """
+    MAX_BATCH_FIELDS = 8 if agent_cfg.get("micro_tools_phase2") else 15
+    _raw_subset = resolve_param(kwargs, "field_subset") or []
+    # Guard: if the LLM passed a comma-separated string instead of a list, split it.
+    if isinstance(_raw_subset, str):
+        _raw_subset = [s.strip() for s in _raw_subset.split(",") if s.strip()]
+    requested_subset_list = [x for x in _raw_subset if x]
+    requested_subset = set(requested_subset_list)
+    never_attempted = {
+        k for k in full_schema
+        if state.get_field_retry_count(k) == 0
+        and k not in state.extracted_fields
+    }
+    if len(requested_subset) > MAX_BATCH_FIELDS:
+        seen: set[str] = set()
+        trimmed: list[str] = []
+        for f in requested_subset_list:
+            if f not in seen and f in requested_subset:
+                trimmed.append(f)
+                seen.add(f)
+            if len(trimmed) >= MAX_BATCH_FIELDS:
+                break
+        requested_subset = set(trimmed)
+        extras_allowed = 0
+    else:
+        extras_allowed = max(0, MAX_BATCH_FIELDS - len(requested_subset))
+    extras = set(sorted(never_attempted - requested_subset)[:extras_allowed])
+    effective_subset = requested_subset | extras
+    if effective_subset and effective_subset != set(full_schema):
+        schema = {k: v for k, v in full_schema.items() if k in effective_subset}
+        if extras:
+            logger.debug(
+                f"  batch expansion: +{len(extras)} un-attempted fields "
+                f"added to this call ({', '.join(sorted(extras))})"
+            )
+        return schema
+    return full_schema
+
+
 def build_tool_registry(
     config: dict,
     store: ConfigStore,
@@ -276,67 +339,17 @@ def build_tool_registry(
         full_schema = store.build_extraction_schema(invoice_type_id)
 
 
-        ## TODO: maybe autoexpansion should also be added as toggable to the config. Also the whole autoexpansion should be it's own function
         # ── Batch auto-expansion ──────────────────────────────────────────────
-        # The agent often asks for a small field_subset, but we're already paying
-        # for one vision-model call. Auto-expand: add every field that has never
-        # been attempted yet. Fields the agent didn't ask for but that haven't been
-        # tried get a free ride in the same call — cuts total turns by 60-70%.
-        #
-        # Cap: never expand beyond MAX_BATCH_FIELDS total. Sending a 20-field schema
-        # to a stamp/signature page adds no value and causes the vision model to
-        # time out or hallucinate. Requested fields always take priority; extras fill
-        # the remaining slots sorted alphabetically for determinism.
-        # Optional phase-2 "micro tools" behavior:
-        # fewer fields per vision call → more granular extraction on weird layouts.
-        MAX_BATCH_FIELDS = 8 if agent_cfg.get("micro_tools_phase2") else 15
-        # Accept common aliases the LLM uses instead of "field_subset"
-        _raw_subset = (
-            kwargs.get("field_subset")
-            or kwargs.get("fields")
-            or kwargs.get("field_names")
-            or kwargs.get("regions")   # LLM sometimes conflates regions with field list
-            or []
-        )
-        # Guard: if the LLM passed a comma-separated string instead of a list,
-        # set("a,b,c") would iterate characters → wrong. Split explicitly.
-        if isinstance(_raw_subset, str):
-            _raw_subset = [s.strip() for s in _raw_subset.split(",") if s.strip()]
-        # Keep insertion order for deterministic truncation when the model requests
-        # more than MAX_BATCH_FIELDS explicitly.
-        requested_subset_list = [x for x in _raw_subset if x]
-        requested_subset = set(requested_subset_list)
-        never_attempted = {
-            k for k in full_schema
-            if state.get_field_retry_count(k) == 0
-            and k not in state.extracted_fields
-        }
-        # Merge: explicit subset ∪ never-attempted (agent's focus stays, free extras added)
-        if len(requested_subset) > MAX_BATCH_FIELDS:
-            seen = set()
-            trimmed: list[str] = []
-            for f in requested_subset_list:
-                if f not in seen and f in requested_subset:
-                    trimmed.append(f)
-                    seen.add(f)
-                if len(trimmed) >= MAX_BATCH_FIELDS:
-                    break
-            requested_subset = set(trimmed)
-            extras_allowed = 0
+        # Adds un-attempted fields to the current vision call so they get a
+        # free ride without an extra LLM request (cuts turns by ~60-70%).
+        # Controlled by agent.batch_auto_expand in config; see _auto_expand_fields.
+        if agent_cfg.get("batch_auto_expand", True):
+            schema = _auto_expand_fields(kwargs, full_schema, state, agent_cfg)
         else:
-            extras_allowed = max(0, MAX_BATCH_FIELDS - len(requested_subset))
-        extras = set(sorted(never_attempted - requested_subset)[:extras_allowed])
-        effective_subset = requested_subset | extras
-        added = extras
-        if effective_subset and effective_subset != set(full_schema):
-            schema = {k: v for k, v in full_schema.items() if k in effective_subset}
-            if added:
-                logger.debug(
-                    f"  batch expansion: +{len(added)} un-attempted fields "
-                    f"added to this call ({', '.join(sorted(added))})"
-                )
-        else:
-            schema = full_schema
+            _raw = resolve_param(kwargs, "field_subset") or []
+            if isinstance(_raw, str):
+                _raw = [s.strip() for s in _raw.split(",") if s.strip()]
+            schema = {k: v for k, v in full_schema.items() if k in set(_raw)} if _raw else full_schema
         # ─────────────────────────────────────────────────────────────────────
 
         def _needs_full_res_after_medium(r: dict) -> bool:
