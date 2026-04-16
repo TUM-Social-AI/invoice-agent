@@ -22,6 +22,7 @@ from src.agent.turn import agent_turn
 from src.agent.reflection import reflect
 from src.agent.loop_utils import open_run_log as _open_run_log, append_log_entry as _append_log_entry, timeout_cfg as _timeout_cfg, log_tool_result
 from src.agent.tool_policy import merge_exposed_tool_names
+from src.agent.param_resolver import resolve_sig_params
 from src.tools.tools import load_surya_models
 from src.prompts.llm_prompts import PLANNING_SYSTEM_MESSAGE, build_planning_user_prompt
 
@@ -424,36 +425,9 @@ class InvoiceAgent:
                     state.execution_plan = self._generate_plan(state)
 
                 # ── Duplicate action guard ────────────────────────────────────
-                # Build a canonical fingerprint that resolves param aliases so
-                # page_path/image_path and page_num/page_index/page all map to
-                # the same key. Without this, alias variants all look like empty
-                # params and every call appears identical.
-                _img = (
-                    params.get("image_path")
-                    or params.get("page_path")
-                    or params.get("image")
-                )
-                _pg = (
-                    params.get("page_num")
-                    or params.get("page_index")
-                    or params.get("page")
-                )
-                # Normalize all field_subset aliases so alternating between "fields",
-                # "regions", "field_names" still counts as the same repeated call.
-                _fs = (
-                    params.get("field_subset")
-                    or params.get("fields")
-                    or params.get("field_names")
-                    or params.get("regions")
-                )
-                sig_params = {k: v for k, v in {
-                    "image_path":  _img,
-                    "page_num":    _pg,
-                    "field_subset": _fs,
-                    "region":      params.get("region"),
-                    "hints":       params.get("hints"),
-                    "package":     params.get("package"),
-                }.items() if v is not None}
+                # Build a canonical fingerprint via resolve_sig_params so all
+                # param aliases map to the same key; see param_resolver.py.
+                sig_params = resolve_sig_params(params)
                 # check_compliance has no params — do not treat repeated calls as identical actions
                 if tool_name == "check_compliance":
                     consecutive_same_action = 0

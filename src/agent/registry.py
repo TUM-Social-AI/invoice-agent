@@ -19,6 +19,7 @@ from src.llm.config_resolve import (
     vision_model_for_config,
 )
 from src.agent.loop_utils import timeout_cfg as _timeout_cfg
+from src.agent.param_resolver import resolve_param
 from src.tools.tools import (
     inspect_file,
     compress_pages,
@@ -179,27 +180,18 @@ def build_tool_registry(
             logger.info(f"  {label or 'tool'}: page_num={page_num} → {image_path}")
             return image_path, page_num, None
 
-        # crop_region: allow explicit path if it exists and looks valid
-        image_path = (
-            ## TODO: maybe such things should also be centralized? in like an alias table for a specific attribute? I think there are multiple such places, maybe with a function also resolve for x -> looks through all possible ones and tries to resolve it
-            kwargs.get("image_path")
-            or kwargs.get("page_path")
-            or kwargs.get("page_image_path")
-            or kwargs.get("image")
-            or kwargs.get("path")
-            or kwargs.get("file_path")
-            or kwargs.get("page_file")
-            or next(
-                (v for v in kwargs.values()
-                 if isinstance(v, str) and v.lower().endswith(_IMG_EXTS)),
-                None,
-            )
-            or next(
-                (v[0] for v in kwargs.values()
-                 if isinstance(v, list) and v
-                 and isinstance(v[0], str) and v[0].lower().endswith(_IMG_EXTS)),
-                None,
-            )
+        # crop_region: allow explicit path if it exists and looks valid.
+        # Named aliases are resolved via param_resolver; extension-based
+        # fallback handles ad-hoc path keys the LLM may invent.
+        image_path = resolve_param(kwargs, "image_path") or next(
+            (v for v in kwargs.values()
+             if isinstance(v, str) and v.lower().endswith(_IMG_EXTS)),
+            None,
+        ) or next(
+            (v[0] for v in kwargs.values()
+             if isinstance(v, list) and v
+             and isinstance(v[0], str) and v[0].lower().endswith(_IMG_EXTS)),
+            None,
         )
 
         if page_given and state.page_image_paths:
