@@ -1,4 +1,14 @@
-"""Reflection loop."""
+"""Reflection loop: receives a ground-truth diff and writes learnings.
+
+Runs a short agent loop that has access only to the learning-management
+tools (``write_learning``, ``edit_learning``, ``delete_learning``,
+``note``, ``finish``).  Uses the same ``LLMProvider`` as the main loop
+and shares the same ``AgentState`` object so learnings are written to
+the same file.
+
+Payload construction is delegated to ``llm_payload.build_payload`` so
+temperature and wire format are defined in one place.
+"""
 
 import json
 import logging
@@ -10,6 +20,8 @@ from src.agent.state import AgentState
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
 from src.llm.config_resolve import reasoning_model_for_config
+from src.agent.prompts import build_reflection_prompt
+from src.agent.llm_payload import build_payload
 
 logger = logging.getLogger(__name__)
 
@@ -32,17 +44,16 @@ def reflect(
     reflection_state = state  # same state object — learnings write to same file
 
     for turn in range(MAX_REFLECTION_TURNS):
-        ## TODO: Payload should be centralized in response schema, temperature should maybe also be in config, or centralized based on prompt type?
-        payload = {
-            "model": reasoning_model_for_config(config),
-            "messages": [
-                {"role": "system", "content": build_reflection_prompt(state, diff_text, store)},
-                {"role": "user", "content": f"Reflection turn {turn + 1}. Write your next learning or finish."},
-            ],
-            "stream": False,
-            "options": {"temperature": 0.3},
-            "format": "json",
-        }
+        messages = [
+            {"role": "system", "content": build_reflection_prompt(state, diff_text, store)},
+            {"role": "user", "content": f"Reflection turn {turn + 1}. Write your next learning or finish."},
+        ]
+        payload = build_payload(
+            reasoning_model_for_config(config),
+            messages,
+            schema="json",
+            temperature=0.3,
+        )
 
         try:
             if provider is not None:
