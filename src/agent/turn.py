@@ -34,6 +34,8 @@ def _state_summary_kwargs(agent_cfg: dict) -> dict:
     }
 
 
+
+## TODO: too complicated, also the payload etc. response schema should be centralized
 def agent_turn(
     state: AgentState,
     store: ConfigStore,

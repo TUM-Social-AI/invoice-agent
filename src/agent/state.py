@@ -175,6 +175,8 @@ class AgentState(BaseModel):
     def increment_field_retry(self, field_name: str):
         self.field_retry_counts[field_name] = self.get_field_retry_count(field_name) + 1
 
+
+    ## TODO: could this be modularized?
     def summary_for_prompt(
         self,
         *,

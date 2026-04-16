@@ -1,5 +1,5 @@
 """Prompt builders and tool docs."""
-
+## TODO: maybe the prompts should be in a csv or in their own files? So you don't have to edit the code to change them
 import json
 import logging
 import re
@@ -20,6 +20,7 @@ from src.prompts.llm_prompts import build_reflection_learning_prompt
 
 logger = logging.getLogger(__name__)
 
+## TODO: for this maybe a csv with one row per tool would be good?
 TOOL_DESCRIPTIONS = """
 Available tools — respond with JSON: {"tool": "name", "params": {}, "reasoning": "why"}
 

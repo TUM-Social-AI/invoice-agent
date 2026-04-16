@@ -32,6 +32,7 @@ def reflect(
     reflection_state = state  # same state object — learnings write to same file
 
     for turn in range(MAX_REFLECTION_TURNS):
+        ## TODO: Payload should be centralized in response schema, temperature should maybe also be in config, or centralized based on prompt type?
         payload = {
             "model": reasoning_model_for_config(config),
             "messages": [

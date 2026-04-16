@@ -1,3 +1,5 @@
+## TODO: Is this all necessary, it seems very hardcoded at times, is there a way to make it less hard coded?
+
 """Phase-based tool narrowing for the agent loop."""
 
 from __future__ import annotations

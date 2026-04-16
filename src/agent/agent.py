@@ -37,6 +37,9 @@ def _agent_cfg(config: dict) -> dict:
         "batch_review_threshold": float(a.get("batch_review_threshold", 0.85)),
         "planning_timeout_s": int(a.get("planning_timeout_s", 180)),
         "reflection_timeout_s": int(a.get("reflection_timeout_s", 120)),
+        "max_consecutive_failures": int(a.get("max_consecutive_failures", 3)),
+        "max_same_action_warn": int(a.get("max_same_action_warn", 2)),
+        "max_same_action_stop": int(a.get("max_same_action_stop", 5)),
     }
 
 
@@ -65,6 +68,9 @@ class InvoiceAgent:
         self.generate_timeout_s = timeouts["generate_timeout_s"]
         self.planning_timeout_s = cfg["planning_timeout_s"]
         self.reflection_timeout_s = cfg["reflection_timeout_s"]
+        self.max_consecutive_failures = cfg["max_consecutive_failures"]
+        self.max_same_action_warn = cfg["max_same_action_warn"]
+        self.max_same_action_stop = cfg["max_same_action_stop"]
         self.provider: LLMProvider = build_llm_provider(config)
         # Load surya OCR models once here — shared across all runs in this session.
         # Takes ~5-15s on first call; subsequent calls use cached weights.
@@ -177,6 +183,9 @@ class InvoiceAgent:
             logger.warning(f"  Plan generation failed (non-fatal): {e}")
             return []
 
+
+
+## TODO: the run function is way too long and verbose and complicated. Plan on how to improve, modularize and uncomplicate it
     def run(self, pdf_path: str, output_dir: str, invoice_type_id: str = "") -> AgentState:
         _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
         state = AgentState(
@@ -250,11 +259,8 @@ class InvoiceAgent:
             return state
 
         consecutive_failures: dict[str, int] = {}  # tool_name → consecutive fail count
-        MAX_CONSECUTIVE_FAILURES = 3
         last_action_sig: str = ""          # (tool, key-params) fingerprint of previous turn
         consecutive_same_action: int = 0
-        MAX_SAME_ACTION_WARN = 2           # start warning after this many identical calls
-        MAX_SAME_ACTION_STOP = 5           # hard-stop the loop after this many
         null_extract_streak_by_key: dict[str, int] = {}
 
         try:
@@ -288,8 +294,8 @@ class InvoiceAgent:
                         if _reasoning_backend_unreachable(reason):
                             reason = (
                                 f"{reason}\n\nReasoning LLM request failed (HTTP/connection). "
-                                "Start Ollama, pull the configured models, and check "
-                                "`ollama.base_url` in config — vision and classification use the same host."
+                                "Check that the configured LLM provider is reachable and "
+                                "the relevant API key or base_url in config is correct."
                             )
                         state.finish_reason = reason
                         _append_log_entry(log_handle, {
@@ -337,15 +343,15 @@ class InvoiceAgent:
                     # Count unknown-tool calls toward consecutive failures so the
                     # guard can stop a hallucination loop (e.g. repeated invented tool names)
                     consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
-                    if consecutive_failures[tool_name] >= MAX_CONSECUTIVE_FAILURES:
+                    if consecutive_failures[tool_name] >= self.max_consecutive_failures:
                         logger.error(
-                            f"Unknown tool '{tool_name}' called {MAX_CONSECUTIVE_FAILURES} "
+                            f"Unknown tool '{tool_name}' called {self.max_consecutive_failures} "
                             f"times in a row — stopping to avoid infinite loop"
                         )
                         state.status = AgentStatus.ERROR
                         state.finish_reason = (
                             f"Unrecoverable: unknown tool '{tool_name}' called "
-                            f"{MAX_CONSECUTIVE_FAILURES} consecutive times"
+                            f"{self.max_consecutive_failures} consecutive times"
                         )
                     continue
 
@@ -455,7 +461,7 @@ class InvoiceAgent:
                     action_sig = f"{tool_name}|{json.dumps(sig_params, sort_keys=True)}"
                     if action_sig == last_action_sig:
                         consecutive_same_action += 1
-                        if consecutive_same_action >= MAX_SAME_ACTION_WARN:
+                        if consecutive_same_action >= self.max_same_action_warn:
                             warning = (
                                 f"LOOP DETECTED: '{tool_name}' called {consecutive_same_action + 1} "
                                 f"times in a row with the same params. "
@@ -464,7 +470,7 @@ class InvoiceAgent:
                             )
                             logger.warning(f"  {warning}")
                             state.session_notes.append(warning)
-                        if consecutive_same_action >= MAX_SAME_ACTION_STOP:
+                        if consecutive_same_action >= self.max_same_action_stop:
                             logger.error(
                                 f"Hard-stopping: '{tool_name}' called "
                                 f"{consecutive_same_action + 1} times in a row with identical params. "
@@ -485,15 +491,15 @@ class InvoiceAgent:
                 tool_failed = result.get("success") is False or "error" in result
                 if tool_failed:
                     consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
-                    if consecutive_failures[tool_name] >= MAX_CONSECUTIVE_FAILURES:
+                    if consecutive_failures[tool_name] >= self.max_consecutive_failures:
                         logger.error(
-                            f"Tool '{tool_name}' failed {MAX_CONSECUTIVE_FAILURES} times in a row "
+                            f"Tool '{tool_name}' failed {self.max_consecutive_failures} times in a row "
                             f"— stopping to avoid infinite loop"
                         )
                         state.status = AgentStatus.ERROR
                         state.finish_reason = (
                             f"Unrecoverable: '{tool_name}' failed "
-                            f"{MAX_CONSECUTIVE_FAILURES} consecutive times"
+                            f"{self.max_consecutive_failures} consecutive times"
                         )
                         break
                 else:

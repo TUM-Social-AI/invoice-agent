@@ -1,4 +1,6 @@
 """Tool registry builder."""
+## TODO: for all files, explain at the top more what they are for
+## TODO: are you sure all of those functions fit the registry file?
 
 import json
 import logging
@@ -56,6 +58,7 @@ def build_tool_registry(
     surya_models: "Optional[SuryaModels]" = None,
     provider: "LLMProvider | None" = None,
 ):
+    ## TODO Why should we have ollama_url here? Shouldn't the provider be abstracted?
     ollama_url = ollama_base_url(config)
     vision_model = vision_model_for_config(config)
     learnings_path = config.get("learnings_path", "learnings/learnings.md")
@@ -178,6 +181,7 @@ def build_tool_registry(
 
         # crop_region: allow explicit path if it exists and looks valid
         image_path = (
+            ## TODO: maybe such things should also be centralized? in like an alias table for a specific attribute? I think there are multiple such places, maybe with a function also resolve for x -> looks through all possible ones and tries to resolve it
             kwargs.get("image_path")
             or kwargs.get("page_path")
             or kwargs.get("page_image_path")
@@ -279,6 +283,8 @@ def build_tool_registry(
         invoice_type_id = state.invoice_type_id
         full_schema = store.build_extraction_schema(invoice_type_id)
 
+
+        ## TODO: maybe autoexpansion should also be added as toggable to the config. Also the whole autoexpansion should be it's own function
         # ── Batch auto-expansion ──────────────────────────────────────────────
         # The agent often asks for a small field_subset, but we're already paying
         # for one vision-model call. Auto-expand: add every field that has never
@@ -784,3 +790,6 @@ def build_tool_registry(
         "delete_learning": _delete_learning,
         "finish": _finish,
     }
+
+
+## TODO: this file seems to define all the tools, that shouldn't be it's purpose, also for all functions that are not self explanatory comments should be added regarding what the function is for and how it is used

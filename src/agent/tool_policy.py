@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     pass
 
 # Registry keys must exist; groups are subsets of logical tool names.
+## TODO: shouldn't the tools be defined somewhere centralized, so if I want to remove/add/edit a tool, I only have to do it in one place
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     "pipeline": frozenset({
         "inspect_file",

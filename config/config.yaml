@@ -89,7 +89,7 @@ agent:
   planning_learnings_max_chars: null
 
   # Logging preview caps (0 = unlimited for console logs).
-  log_line_max_chars: 120
+  log_line_max_chars: 250
   # Tool-output preview in recent-actions JSON (remote profile default ~900).
   history_preview_chars: 900
 
@@ -149,6 +149,9 @@ agent:
   page_dpi: 200
   planning_timeout_s: 180
   reflection_timeout_s: 120
+  max_consecutive_failures: 3    # hard-stop a tool after this many back-to-back failures
+  max_same_action_warn: 2        # warn after this many identical consecutive tool calls
+  max_same_action_stop: 5        # hard-stop the loop after this many identical calls
 
 ocr:
   # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
