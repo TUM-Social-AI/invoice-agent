@@ -54,6 +54,20 @@ from src.models.action_models import (
 logger = logging.getLogger(__name__)
 
 
+def _resolve_ollama_url(provider: "LLMProvider | None", config: dict) -> str:
+    """Return the Ollama base URL, preferring the provider over config.
+
+    When ``provider`` is an ``OllamaProvider`` the URL was already resolved
+    at startup and stored on the object — using it here avoids a second
+    config read and makes the registry independent of Ollama-specific config
+    keys.  For non-Ollama providers (e.g. Gemini) ``base_url`` is absent, so
+    we fall back to reading the config as before.
+    """
+    if provider is not None and getattr(provider, "base_url", None):
+        return provider.base_url  # type: ignore[attr-defined]
+    return ollama_base_url(config)
+
+
 def _auto_expand_fields(
     kwargs: dict,
     full_schema: dict,
@@ -122,8 +136,7 @@ def build_tool_registry(
     surya_models: "Optional[SuryaModels]" = None,
     provider: "LLMProvider | None" = None,
 ):
-    ## TODO Why should we have ollama_url here? Shouldn't the provider be abstracted?
-    ollama_url = ollama_base_url(config)
+    ollama_url = _resolve_ollama_url(provider, config)
     vision_model = vision_model_for_config(config)
     learnings_path = config.get("learnings_path", "learnings/learnings.md")
     agent_cfg = config.get("agent", {})
