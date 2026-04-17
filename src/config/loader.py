@@ -14,7 +14,6 @@ from src.models.config_models import (
     ComplianceRuleModel,
     ExtractionFieldModel,
     InvoiceTypeModel,
-    VisualObservationFallbackModel,
 )
 
 logger = logging.getLogger(__name__)
@@ -29,10 +28,6 @@ class ExtractionField(ExtractionFieldModel):
 
 
 class ComplianceRule(ComplianceRuleModel):
-    pass
-
-
-class VisualObservationFallback(VisualObservationFallbackModel):
     pass
 
 
@@ -76,7 +71,6 @@ class ConfigStore(BaseModel):
     compliance_rules: dict[str, list[ComplianceRule]] = Field(default_factory=dict)     # keyed by invoice_type_id
     schema_cache: dict[str, dict] = Field(default_factory=dict, repr=False)            # cache for build_extraction_schema
     employee_name_role_denylist: list[str] = Field(default_factory=list, repr=False)
-    visual_observation_fallbacks: list[VisualObservationFallback] = Field(default_factory=list, repr=False)
 
     def get_type(self, invoice_type_id: str) -> Optional[InvoiceType]:
         return self.invoice_types.get(invoice_type_id)
@@ -159,10 +153,6 @@ class ConfigStore(BaseModel):
 
         return "\n".join(lines)
 
-    def observation_fallbacks_for(self, invoice_type_id: str) -> list[VisualObservationFallback]:
-        return [x for x in self.visual_observation_fallbacks if x.invoice_type_id == invoice_type_id and x.enabled]
-
-
 def load_config(config_dir: str = "config/csv") -> ConfigStore:
     store = ConfigStore()
     base = Path(config_dir)
@@ -237,37 +227,5 @@ def load_config(config_dir: str = "config/csv") -> ConfigStore:
 
     store.employee_name_role_denylist = _load_employee_name_role_denylist(base)
     logger.info(f"Loaded {len(store.employee_name_role_denylist)} employee_name role denylist phrases")
-
-    fb_path = base / "visual_observation_fallback.csv"
-    if fb_path.exists():
-        with open(fb_path, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                if (row.get("enabled") or "true").strip().lower() != "true":
-                    continue
-                tid = (row.get("invoice_type_id") or "").strip()
-                if tid not in store.invoice_types:
-                    continue
-                src = (row.get("source_rule_id") or "").strip()
-                tfn = (row.get("target_field_name") or "").strip()
-                tfid = (row.get("target_field_id") or "").strip()
-                pkind = (row.get("parser_kind") or "").strip()
-                if not src or not tfn or not tfid or pkind not in ("employee_name_quote", "payment_phrase"):
-                    logger.warning("Skipping invalid visual_observation_fallback row: %s", row)
-                    continue
-                try:
-                    store.visual_observation_fallbacks.append(
-                        VisualObservationFallback(
-                            invoice_type_id=tid,
-                            source_rule_id=src,
-                            target_field_name=tfn,
-                            target_field_id=tfid,
-                            parser_kind=pkind,  # type: ignore[arg-type]
-                            reevaluate_rule_id=(row.get("reevaluate_rule_id") or "").strip(),
-                            enabled=True,
-                        )
-                    )
-                except Exception as e:
-                    logger.warning("Skipping visual_observation_fallback row: %s (%s)", row, e)
-        logger.info(f"Loaded {len(store.visual_observation_fallbacks)} visual observation fallback rows")
 
     return store

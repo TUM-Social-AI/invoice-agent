@@ -5,20 +5,6 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
-class VisualObservationFallbackModel(BaseModel):
-    """When a visual rule passes, optionally parse observation text to backfill an extraction field."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    invoice_type_id: str
-    source_rule_id: str
-    target_field_name: str
-    target_field_id: str
-    parser_kind: Literal["employee_name_quote", "payment_phrase"]
-    reevaluate_rule_id: str = ""
-    enabled: bool = True
-
-
 class InvoiceTypeModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

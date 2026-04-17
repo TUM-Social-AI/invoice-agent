@@ -31,40 +31,6 @@ logger = logging.getLogger(__name__)
 _ROLE_SUBSTRING_MAX_LEN = 35
 
 
-def _parse_employee_name_from_visual_observation(text: str, store: ConfigStore) -> Optional[str]:
-    """
-    Parse a person name from English-style quoted phrases in observation text.
-    Phrases that look like job titles (config: employee_name_role_denylist.txt) are rejected.
-    """
-    if not text or len(text) < 8:
-        return None
-    patterns = [
-        r"(?i)the\s+employee\s+name\s+['\"]([^'\"]{3,120})['\"]",
-        r"(?i)employee\s+name\s+['\"]([^'\"]{3,120})['\"]",
-        r"(?i)name\s+['\"]([^'\"]{3,120})['\"]\s*,\s*role",
-    ]
-    phrases = store.employee_name_role_denylist
-    for p in patterns:
-        m = re.search(p, text)
-        if not m:
-            continue
-        name = m.group(1).strip()
-        if _reject_employee_name_role_like(name, phrases):
-            continue
-        return name
-    return None
-
-
-def _parse_payment_phrase_from_visual_observation(text: str) -> Optional[str]:
-    """Best-effort payer / payment wording (French/English cues) from observation text."""
-    if not text:
-        return None
-    m = re.search(r"(?i)(payé\s+par|paid\s+by)[^.]{0,220}", text)
-    if m:
-        return m.group(0).strip()[:240]
-    return None
-
-
 def _reject_employee_name_role_like(name: str, phrases: list[str]) -> bool:
     """True if the string should not be used as employee_name (role/title line, etc.)."""
     low = name.lower().strip()
@@ -79,14 +45,6 @@ def _reject_employee_name_role_like(name: str, phrases: list[str]) -> bool:
         if pl in low and len(name) < _ROLE_SUBSTRING_MAX_LEN:
             return True
     return False
-
-
-def _parse_observation_by_kind(kind: str, text: str, store: ConfigStore) -> Optional[str]:
-    if kind == "employee_name_quote":
-        return _parse_employee_name_from_visual_observation(text, store)
-    if kind == "payment_phrase":
-        return _parse_payment_phrase_from_visual_observation(text)
-    return None
 
 
 def _merge_visual_field_updates(
@@ -441,89 +399,9 @@ def check_compliance_visual(
             backfilled_fields.extend(merged)
         backfilled_fields = list(dict.fromkeys(backfilled_fields))
 
-    # Regex fallback: when the model omits field_updates but encodes facts in observation text (config CSV).
-    rules_to_reeval: set[str] = set()
-    if store is not None:
-        for fb in store.observation_fallbacks_for(state.invoice_type_id):
-            nr = next(
-                (r for r in new_results if r.rule_id == fb.source_rule_id and r.status == "passed"),
-                None,
-            )
-            if not nr:
-                continue
-            field = fb.target_field_name
-            obs = nr.message or ""
-            parsed = _parse_observation_by_kind(fb.parser_kind, obs, store)
-            if not parsed:
-                continue
-
-            existing = state.extracted_fields.get(field)
-            ev = existing.extracted_value if existing else None
-            empty = existing is None or ev in (None, "", "null")
-
-            if fb.parser_kind == "employee_name_quote":
-                if not empty:
-                    continue
-                state.extracted_fields[field] = FieldResult(
-                    field_id=fb.target_field_id,
-                    field_name=field,
-                    extracted_value=parsed,
-                    confidence=0.82,
-                    source_page=page_num,
-                    source_region=f"visual_{fb.source_rule_id}_observation_parse",
-                    extraction_attempts=existing.extraction_attempts if existing else 0,
-                    flagged_for_review=True,
-                    review_reason=f"Backfilled from {fb.source_rule_id} observation text — verify spelling",
-                )
-                backfilled_fields.append(field)
-                logger.info(
-                    "check_compliance_visual: backfilled %s from %s observation: %s",
-                    field,
-                    fb.source_rule_id,
-                    parsed[:72],
-                )
-                if fb.reevaluate_rule_id:
-                    rules_to_reeval.add(fb.reevaluate_rule_id)
-
-            elif fb.parser_kind == "payment_phrase":
-                pm = state.extracted_fields.get(field)
-                pm_val = pm.extracted_value if pm else None
-                pm_empty = pm is None or pm_val in (None, "", "null")
-                junk = pm_val is not None and _is_short_date_fragment(str(pm_val))
-                if not (pm_empty or junk):
-                    continue
-                state.extracted_fields[field] = FieldResult(
-                    field_id=fb.target_field_id,
-                    field_name=field,
-                    extracted_value=parsed,
-                    confidence=0.78,
-                    source_page=page_num,
-                    source_region=f"visual_{fb.source_rule_id}_observation_parse",
-                    extraction_attempts=pm.extraction_attempts if pm else 0,
-                    flagged_for_review=True,
-                    review_reason=f"Backfilled from {fb.source_rule_id} observation text",
-                )
-                backfilled_fields.append(field)
-                logger.info(
-                    "check_compliance_visual: backfilled %s from %s (%d chars)",
-                    field,
-                    fb.source_rule_id,
-                    len(parsed),
-                )
-
-        backfilled_fields = list(dict.fromkeys(backfilled_fields))
-
     # Merge into state — replace any existing entries for these rule_ids
     existing = [r for r in state.rule_results if r.rule_id not in {x.rule_id for x in new_results}]
     state.rule_results = existing + new_results
-
-    if store is not None and rules_to_reeval:
-        for rid in sorted(rules_to_reeval):
-            r_ev = next((r for r in rules if r.rule_id == rid), None)
-            if not r_ev:
-                continue
-            rr_ev = _evaluate_rule(r_ev, state, store)
-            state.rule_results = [rr_ev if r.rule_id == rid else r for r in state.rule_results]
 
     state.passed_rules = [r.rule_id for r in state.rule_results if r.status == "passed"]
     state.failed_rules = [r.rule_id for r in state.rule_results if r.status == "failed"]
