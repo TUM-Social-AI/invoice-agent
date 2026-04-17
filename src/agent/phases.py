@@ -1,17 +1,25 @@
-## TODO: Is this all necessary, it seems very hardcoded at times, is there a way to make it less hard coded?
+"""Phase-based tool narrowing for the agent loop.
 
-"""Phase-based tool narrowing for the agent loop."""
+Phase-to-tool mappings are loaded from ``config/phase_tools.yaml`` at import
+time.  If the file is absent the hardcoded fallback dict is used so the agent
+remains functional without the config file.  Edit ``config/phase_tools.yaml``
+to add, remove, or reassign tools without touching this file.
+"""
 
 from __future__ import annotations
 
+import logging
+import pathlib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from src.agent.state import AgentState
 
+logger = logging.getLogger(__name__)
+
 _ALWAYS_AVAILABLE = {"note", "install_package"}
 
-_PHASE_TOOLS: dict[str, set[str]] = {
+_PHASE_TOOLS_FALLBACK: dict[str, set[str]] = {
     "SCAN": {
         "inspect_file",
         "compress_pages",
@@ -47,6 +55,37 @@ _PHASE_TOOLS: dict[str, set[str]] = {
     }
     | _ALWAYS_AVAILABLE,
 }
+
+
+def _load_phase_tools(config_dir: str | pathlib.Path | None = None) -> dict[str, set[str]]:
+    """Load phase-to-tool mappings from ``config/phase_tools.yaml``.
+
+    Falls back to the hardcoded ``_PHASE_TOOLS_FALLBACK`` dict if the file is
+    absent or cannot be parsed.
+    """
+    try:
+        import yaml  # type: ignore[import-untyped]
+    except ImportError:
+        return _PHASE_TOOLS_FALLBACK
+
+    if config_dir is None:
+        config_dir = pathlib.Path(__file__).parent.parent.parent / "config"
+    yaml_path = pathlib.Path(config_dir) / "phase_tools.yaml"
+    if not yaml_path.exists():
+        return _PHASE_TOOLS_FALLBACK
+    try:
+        with yaml_path.open() as fh:
+            raw: dict = yaml.safe_load(fh) or {}
+        result: dict[str, set[str]] = {}
+        for phase, tools in raw.items():
+            result[phase] = set(tools or []) | _ALWAYS_AVAILABLE
+        return result
+    except Exception as exc:  # pragma: no cover
+        logger.warning("Failed to load %s, using fallback: %s", yaml_path, exc)
+        return _PHASE_TOOLS_FALLBACK
+
+
+_PHASE_TOOLS: dict[str, set[str]] = _load_phase_tools()
 
 
 def current_phase(state: AgentState) -> str:

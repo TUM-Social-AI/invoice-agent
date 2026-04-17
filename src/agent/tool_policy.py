@@ -1,5 +1,17 @@
-"""
-Config-driven tool exposure for the agent loop (groups, allow/deny overrides).
+"""Config-driven tool exposure for the agent loop.
+
+``TOOL_GROUPS`` defines capability categories used for access-control: which
+groups of tools a run is allowed to use.  Phase membership (which phase a tool
+is available in) is a separate concern handled by ``phases.py`` and
+``config/phase_tools.yaml``.  Adding or removing a tool requires three edits:
+
+1. Register it in ``src/agent/registry.py`` (``build_tool_registry``).
+2. List it in the appropriate phase(s) in ``config/phase_tools.yaml``.
+3. Add it to the relevant ``TOOL_GROUPS`` entry below if it should be
+   accessible via group-based access control.
+
+Tool *descriptions* can be overridden without touching Python by editing
+``config/tool_descriptions.yaml`` (see ``prompts.py``).
 """
 
 from __future__ import annotations
@@ -11,8 +23,6 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     pass
 
-# Registry keys must exist; groups are subsets of logical tool names.
-## TODO: shouldn't the tools be defined somewhere centralized, so if I want to remove/add/edit a tool, I only have to do it in one place
 TOOL_GROUPS: dict[str, frozenset[str]] = {
     "pipeline": frozenset({
         "inspect_file",

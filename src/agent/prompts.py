@@ -1,5 +1,12 @@
-"""Prompt builders and tool docs."""
-## TODO: maybe the prompts should be in a csv or in their own files? So you don't have to edit the code to change them
+"""Prompt builders and tool documentation for the agent loop.
+
+The hardcoded ``TOOL_DESCRIPTIONS`` string is the canonical fallback.
+Individual tool descriptions can be overridden without touching Python by
+editing ``config/tool_descriptions.yaml`` (path configurable via
+``agent.tool_descriptions_path`` in ``config/config.yaml``).  The YAML maps
+tool names to replacement description strings; any tool not listed there falls
+back to the text in this file.
+"""
 import json
 import logging
 import re
@@ -20,7 +27,6 @@ from src.prompts.llm_prompts import build_reflection_learning_prompt
 
 logger = logging.getLogger(__name__)
 
-## TODO: for this maybe a csv with one row per tool would be good?
 TOOL_DESCRIPTIONS = """
 Available tools — respond with JSON: {"tool": "name", "params": {}, "reasoning": "why"}
 
