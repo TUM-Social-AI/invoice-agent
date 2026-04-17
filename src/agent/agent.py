@@ -1,4 +1,21 @@
-"""Invoice agent orchestrator."""
+"""Invoice agent orchestrator.
+
+The main entry point is :class:`InvoiceAgent`.  ``run()`` wires together:
+
+1. State initialisation + learnings hydration.
+2. Pipeline mode (deterministic fixed sequence) *or*
+3. Agentic loop via :meth:`_run_agent_loop`:
+   - Calls ``agent_turn`` each iteration to get the next tool call.
+   - Dispatches to the tool registry.
+   - Uses :class:`~src.agent.loop_guards.DuplicateActionGuard` and
+     :class:`~src.agent.loop_guards.ConsecutiveFailureGuard` to detect stuck
+     states and stop before wasting turns.
+4. Post-loop status check.
+
+``summary_for_prompt`` in state.py is intentionally kept as one method;
+its complexity is intrinsic to the formatting contract, not a sign it
+should be split further.
+"""
 
 import json
 import logging
@@ -22,6 +39,7 @@ from src.agent.turn import agent_turn
 from src.agent.reflection import reflect
 from src.agent.loop_utils import open_run_log as _open_run_log, append_log_entry as _append_log_entry, timeout_cfg as _timeout_cfg, log_tool_result
 from src.agent.tool_policy import merge_exposed_tool_names
+from src.agent.loop_guards import DuplicateActionGuard, ConsecutiveFailureGuard
 from src.agent.param_resolver import resolve_sig_params
 from src.tools.tools import load_surya_models
 from src.prompts.llm_prompts import PLANNING_SYSTEM_MESSAGE, build_planning_user_prompt
@@ -186,82 +204,19 @@ class InvoiceAgent:
 
 
 
-## TODO: the run function is way too long and verbose and complicated. Plan on how to improve, modularize and uncomplicate it
-    def run(self, pdf_path: str, output_dir: str, invoice_type_id: str = "") -> AgentState:
-        _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
-        state = AgentState(
-            pdf_path=pdf_path,
-            output_dir=output_dir,
-            invoice_type_id=invoice_type_id,
-            confidence_threshold=self.confidence_threshold,
-            batch_review_threshold=self.batch_review_threshold,
-            page_render_dpi=_page_dpi,
-        )
+    def _run_agent_loop(self, state: AgentState, log_handle, log_path: str) -> None:
+        """Execute the main LLM→tool loop until finish or a guard trips.
 
-        # Learnings hydration: load prior insights into state BEFORE the agent
-        # starts extracting or evaluating compliance.
-        # - If invoice_type_id is provided: load that type + GENERAL
-        # - If invoice_type_id is empty: load GENERAL only
-        try:
-            if "read_learnings" in self.tools:
-                self.tools["read_learnings"](state)
-        except Exception as e:
-            logger.warning(f"Learnings hydration failed (non-fatal): {e}")
+        Extracted from ``run()`` to keep that method focused on state setup
+        and teardown.  Mutates *state* in place; closes *log_handle* in the
+        ``finally`` block so the log is always complete even on interruption.
 
-        # Open per-run JSONL log before the loop — partial runs still get a log
-        log_path, log_handle = _open_run_log(output_dir)
-        state.run_log_path = log_path
-
-        if invoice_type_id and not self.store.get_type(invoice_type_id):
-            state.status = AgentStatus.ERROR
-            state.finish_reason = f"Unknown invoice type: {invoice_type_id}"
-            log_handle.close()
-            return state
-
-        logger.info(
-            f"Agent starting | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
-            f"| log={log_path}"
-        )
-
-        if hasattr(self.provider, "reset_meters"):
-            self.provider.reset_meters()  # type: ignore[attr-defined]
-
-        # Pipeline orchestration (deterministic fixed sequence; no LLM tool routing).
-        if self.orchestration == "pipeline":
-            from src.agent.pipeline import run_fixed_pipeline
-
-            try:
-                run_fixed_pipeline(
-                    state=state,
-                    tools=self.tools,
-                    log_handle=log_handle,
-                    log_line_max_chars=self.log_line_max_chars,
-                    planning_enabled=self.planning_enabled,
-                    generate_plan_fn=self._generate_plan if self.planning_enabled else None,
-                )
-            except KeyboardInterrupt:
-                raise
-            except Exception as e:
-                logger.error(f"Pipeline orchestration failed: {e}", exc_info=True)
-                state.status = AgentStatus.ERROR
-                state.finish_reason = str(e)
-            finally:
-                if state.session_notes:
-                    _append_log_entry(log_handle, {
-                        "turn": state.turn,
-                        "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        "tool": "__session_notes__",
-                        "params": {},
-                        "reasoning": "",
-                        "result": {"notes": state.session_notes},
-                        "elapsed_ms": 0,
-                    })
-                log_handle.close()
-            return state
-
-        consecutive_failures: dict[str, int] = {}  # tool_name → consecutive fail count
-        last_action_sig: str = ""          # (tool, key-params) fingerprint of previous turn
-        consecutive_same_action: int = 0
+        Guards used:
+        - :class:`DuplicateActionGuard`: warns / stops on repeated identical calls.
+        - :class:`ConsecutiveFailureGuard`: stops when a tool fails too many times.
+        """
+        dup_guard = DuplicateActionGuard(self.max_same_action_warn, self.max_same_action_stop)
+        fail_guard = ConsecutiveFailureGuard(self.max_consecutive_failures)
         null_extract_streak_by_key: dict[str, int] = {}
 
         try:
@@ -341,10 +296,7 @@ class InvoiceAgent:
                         "result": result,
                         "elapsed_ms": int((_time.monotonic() - turn_start) * 1000),
                     })
-                    # Count unknown-tool calls toward consecutive failures so the
-                    # guard can stop a hallucination loop (e.g. repeated invented tool names)
-                    consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
-                    if consecutive_failures[tool_name] >= self.max_consecutive_failures:
+                    if fail_guard.record_failure(tool_name):
                         logger.error(
                             f"Unknown tool '{tool_name}' called {self.max_consecutive_failures} "
                             f"times in a row — stopping to avoid infinite loop"
@@ -369,7 +321,7 @@ class InvoiceAgent:
                 state.record_action(tool_name, params, result, reasoning)
 
                 _append_log_entry(log_handle, {
-                    "turn": state.turn - 1,  # record_action already incremented turn
+                    "turn": state.turn - 1,
                     "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
                     "tool": tool_name,
                     "params": params,
@@ -412,9 +364,6 @@ class InvoiceAgent:
                 if tool_name == "finish":
                     break
 
-                # After classify_document_type succeeds, generate the execution plan.
-                # Done here (not upfront) so the plan is informed by the actual document
-                # structure: invoice type, page inventory, and page roles are all known.
                 if (
                     tool_name == "classify_document_type"
                     and state.invoice_type_id
@@ -424,48 +373,35 @@ class InvoiceAgent:
                     logger.info("  Generating execution plan (document type known)...")
                     state.execution_plan = self._generate_plan(state)
 
-                # ── Duplicate action guard ────────────────────────────────────
-                # Build a canonical fingerprint via resolve_sig_params so all
-                # param aliases map to the same key; see param_resolver.py.
-                sig_params = resolve_sig_params(params)
-                # check_compliance has no params — do not treat repeated calls as identical actions
-                if tool_name == "check_compliance":
-                    consecutive_same_action = 0
-                else:
-                    action_sig = f"{tool_name}|{json.dumps(sig_params, sort_keys=True)}"
-                    if action_sig == last_action_sig:
-                        consecutive_same_action += 1
-                        if consecutive_same_action >= self.max_same_action_warn:
-                            warning = (
-                                f"LOOP DETECTED: '{tool_name}' called {consecutive_same_action + 1} "
-                                f"times in a row with the same params. "
-                                f"Change at least one of: page_num, region, hints, or field_subset "
-                                f"before retrying; or call flag_for_human_review / check_compliance / finish."
-                            )
-                            logger.warning(f"  {warning}")
-                            state.session_notes.append(warning)
-                        if consecutive_same_action >= self.max_same_action_stop:
-                            logger.error(
-                                f"Hard-stopping: '{tool_name}' called "
-                                f"{consecutive_same_action + 1} times in a row with identical params. "
-                                f"Agent is stuck in a loop."
-                            )
-                            state.status = AgentStatus.FAILED
-                            state.finish_reason = (
-                                f"Loop: '{tool_name}' called {consecutive_same_action + 1} "
-                                f"consecutive times with identical params"
-                            )
-                            break
-                    else:
-                        consecutive_same_action = 0
-                    last_action_sig = action_sig
-                # ─────────────────────────────────────────────────────────────
+                # ── Duplicate action guard ─────────────────────────────────────
+                guard_signal = dup_guard.check_and_record(tool_name, params)
+                if guard_signal == "warn":
+                    warning = (
+                        f"LOOP DETECTED: '{tool_name}' called {dup_guard.streak + 1} "
+                        f"times in a row with the same params. "
+                        f"Change at least one of: page_num, region, hints, or field_subset "
+                        f"before retrying; or call flag_for_human_review / check_compliance / finish."
+                    )
+                    logger.warning(f"  {warning}")
+                    state.session_notes.append(warning)
+                elif guard_signal == "stop":
+                    logger.error(
+                        f"Hard-stopping: '{tool_name}' called "
+                        f"{dup_guard.streak + 1} times in a row with identical params. "
+                        f"Agent is stuck in a loop."
+                    )
+                    state.status = AgentStatus.FAILED
+                    state.finish_reason = (
+                        f"Loop: '{tool_name}' called {dup_guard.streak + 1} "
+                        f"consecutive times with identical params"
+                    )
+                    break
+                # ──────────────────────────────────────────────────────────────
 
-                # Track consecutive failures per tool — stop if unrecoverable
+                # ── Consecutive failure guard ──────────────────────────────────
                 tool_failed = result.get("success") is False or "error" in result
                 if tool_failed:
-                    consecutive_failures[tool_name] = consecutive_failures.get(tool_name, 0) + 1
-                    if consecutive_failures[tool_name] >= self.max_consecutive_failures:
+                    if fail_guard.record_failure(tool_name):
                         logger.error(
                             f"Tool '{tool_name}' failed {self.max_consecutive_failures} times in a row "
                             f"— stopping to avoid infinite loop"
@@ -477,13 +413,13 @@ class InvoiceAgent:
                         )
                         break
                 else:
-                    consecutive_failures[tool_name] = 0
+                    fail_guard.record_success(tool_name)
+                # ──────────────────────────────────────────────────────────────
 
                 # Adaptive model routing: escalate to fallback after 2 consecutive
                 # failures on any tool; de-escalate once the agent succeeds again.
                 if self.fallback_reasoning_model:
-                    total_failures = sum(consecutive_failures.values())
-                    state.use_fallback_model = total_failures >= 2
+                    state.use_fallback_model = fail_guard.total_failures >= 2
                     if state.use_fallback_model and not state.fallback_logged:
                         logger.info(
                             f"  Switching to fallback reasoning model: {self.fallback_reasoning_model}"
@@ -498,7 +434,6 @@ class InvoiceAgent:
             state.finish_reason = "interrupted by user"
 
         finally:
-            # Write session notes before closing so the log is always complete
             if state.session_notes:
                 _append_log_entry(log_handle, {
                     "turn": state.turn,
@@ -510,6 +445,82 @@ class InvoiceAgent:
                     "elapsed_ms": 0,
                 })
             log_handle.close()
+
+    def run(self, pdf_path: str, output_dir: str, invoice_type_id: str = "") -> AgentState:
+        _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
+        state = AgentState(
+            pdf_path=pdf_path,
+            output_dir=output_dir,
+            invoice_type_id=invoice_type_id,
+            confidence_threshold=self.confidence_threshold,
+            batch_review_threshold=self.batch_review_threshold,
+            page_render_dpi=_page_dpi,
+        )
+
+        # Learnings hydration: load prior insights into state BEFORE the agent
+        # starts extracting or evaluating compliance.
+        # - If invoice_type_id is provided: load that type + GENERAL
+        # - If invoice_type_id is empty: load GENERAL only
+        try:
+            if "read_learnings" in self.tools:
+                self.tools["read_learnings"](state)
+        except Exception as e:
+            logger.warning(f"Learnings hydration failed (non-fatal): {e}")
+
+        # Open per-run JSONL log before the loop — partial runs still get a log
+        log_path, log_handle = _open_run_log(output_dir)
+        state.run_log_path = log_path
+
+        if invoice_type_id and not self.store.get_type(invoice_type_id):
+            state.status = AgentStatus.ERROR
+            state.finish_reason = f"Unknown invoice type: {invoice_type_id}"
+            log_handle.close()
+            return state
+
+        logger.info(
+            f"Agent starting | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
+            f"| log={log_path}"
+        )
+
+        if hasattr(self.provider, "reset_meters"):
+            self.provider.reset_meters()  # type: ignore[attr-defined]
+
+        # Pipeline orchestration (deterministic fixed sequence; no LLM tool routing).
+        if self.orchestration == "pipeline":
+            from src.agent.pipeline import run_fixed_pipeline
+
+            try:
+                run_fixed_pipeline(
+                    state=state,
+                    tools=self.tools,
+                    log_handle=log_handle,
+                    log_line_max_chars=self.log_line_max_chars,
+                    planning_enabled=self.planning_enabled,
+                    generate_plan_fn=self._generate_plan if self.planning_enabled else None,
+                )
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                logger.error(f"Pipeline orchestration failed: {e}", exc_info=True)
+                state.status = AgentStatus.ERROR
+                state.finish_reason = str(e)
+            finally:
+                if state.session_notes:
+                    _append_log_entry(log_handle, {
+                        "turn": state.turn,
+                        "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        "tool": "__session_notes__",
+                        "params": {},
+                        "reasoning": "",
+                        "result": {"notes": state.session_notes},
+                        "elapsed_ms": 0,
+                    })
+                log_handle.close()
+            return state
+
+        self._run_agent_loop(state, log_handle, log_path)
+
+        # log_handle is closed inside _run_agent_loop's finally block.
 
         if state.turn >= self.max_turns and state.status == AgentStatus.RUNNING:
             state.status = AgentStatus.FAILED
