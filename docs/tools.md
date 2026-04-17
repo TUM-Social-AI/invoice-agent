@@ -12,6 +12,9 @@ This file lists the agent tools, their intent, key params, and how exposure is c
 - **Prompt caps** (`agent.prompt_profile`: `auto` | `local` | `remote`): `auto` uses larger history/learnings caps for non-Ollama providers. Set `learnings_max_chars`, `planning_learnings_max_chars`, or `history_preview_chars` to an integer to override; use YAML `null` to use the profile default for that field. Defaults in `config/config.yaml` set `history_preview_chars` and `learnings_max_chars` explicitly for cost control with remote APIs.
 - **State summary caps** (`agent.state_summary_max_page_lines`, `state_summary_max_inventory_lines`, `state_summary_inventory_desc_chars`): truncate long page path lists and page-inventory rows in `AgentState.summary_for_prompt` so multi-page PDFs do not explode text tokens each turn.
 - **OCR injection cap** (`agent.ocr_prompt_max_chars`): truncates Surya OCR text passed into `extract_fields_vision` prompts (full-page and crop paths).
+- **Batch auto-expansion** (`agent.batch_auto_expand`, default `true`): when the agent calls `extract_fields_vision` for a `field_subset`, the wrapper automatically adds every other field that has never been attempted. All un-tried fields get a free ride in the same vision model call, cutting total turns by 60–70%. Set to `false` to disable and test targeted single-field extraction.
+- **Tool description overrides** (`agent.tool_descriptions_path`, default `config/tool_descriptions.yaml`): maps tool names to replacement description strings shown in the system prompt. Only list tools you want to override; everything else falls back to the hardcoded text in `src/agent/prompts.py`.
+- **Phase-to-tool mappings** (`config/phase_tools.yaml`): YAML listing which tools are available in each phase (`SCAN`, `EXTRACT`, `VALIDATE`). Edit without touching Python. Absent file → hardcoded fallback in `src/agent/phases.py`.
 
 ### Vision / `generate_json` cost (Gemini or any remote VL)
 
@@ -95,4 +98,65 @@ Use `llm.remote_guard.max_generate_requests_per_run` to bound vision calls per r
 
 - `finish(reason, all_errors_resolved)`
   - Finalizes run status with evidence/visual pending guards.
+
+## Customization Without Code Changes
+
+### Tool description overrides (`config/tool_descriptions.yaml`)
+
+Map any tool name to a replacement description string.  Only listed tools are overridden; everything else falls back to the hardcoded text in `src/agent/prompts.py`.  Path is controlled by `agent.tool_descriptions_path` in `config/config.yaml`.
+
+```yaml
+# config/tool_descriptions.yaml
+extract_fields_vision: |
+  extract_fields_vision(page_num, region="", hints="", field_subset=null)
+    Custom override: your project-specific extraction guidance here.
+note: |
+  note(text)
+    Record a private observation (not saved to disk).
+```
+
+### Phase-to-tool mappings (`config/phase_tools.yaml`)
+
+Lists which tools are callable in each phase.  `note` and `install_package` are always merged in automatically.  Edit to add, remove, or reassign tools across phases without touching Python.  If the file is absent, the hardcoded fallback in `src/agent/phases.py` is used.
+
+```yaml
+# config/phase_tools.yaml
+SCAN:
+  - inspect_file
+  - compress_pages
+  - inventory_pages
+  - classify_document_type
+  - read_learnings
+
+EXTRACT:
+  - convert_pdf_to_images
+  - extract_fields_vision
+  - crop_region
+  - flag_for_human_review
+  - flag_fields_for_review
+  - read_learnings
+  - write_learning
+  - edit_learning
+  - delete_learning
+  - check_compliance
+
+VALIDATE:
+  - check_compliance
+  - check_compliance_visual
+  - extract_fields_vision
+  - crop_region
+  - flag_for_human_review
+  - flag_fields_for_review
+  - write_learning
+  - edit_learning
+  - delete_learning
+  - finish
+```
+
+### Adding a new tool
+
+Three edits required:
+1. Register it in `src/agent/registry.py` (`build_tool_registry`) with a factory from `src/tools/tool_wrappers.py`.
+2. List it in the relevant phase(s) in `config/phase_tools.yaml`.
+3. Add it to the relevant group(s) in `src/agent/tool_policy.py` (`TOOL_GROUPS`) if it should be accessible via group-based access control.
 

@@ -5,10 +5,15 @@ This document explains how the agent decides which tool to call, which tools are
 ## 1) Tool Selection and Dispatch (Loop Mode)
 
 Mapped files:
-- `src/agent/agent.py`
-- `src/agent/turn.py`
-- `src/agent/action_contract.py`
-- `src/agent/registry.py`
+- `src/agent/agent.py` — orchestrator; `run()` delegates to `_run_agent_loop()`
+- `src/agent/turn.py` — single LLM turn: prompt assembly, JSON schema, parse, retry
+- `src/agent/action_contract.py` — validates and repairs the structured action
+- `src/agent/registry.py` — thin assembler; wires factories from `tool_wrappers.py` into the runtime dict
+- `src/tools/tool_wrappers.py` — all tool closure factories (`make_inspect`, `make_extract`, …)
+- `src/agent/loop_guards.py` — `DuplicateActionGuard` + `ConsecutiveFailureGuard`
+- `src/agent/llm_payload.py` — shared `build_payload()` used by `turn.py` and `reflection.py`
+- `src/agent/response_schema.py` — `build_response_schema()` for dynamic per-turn JSON schema
+- `src/agent/param_resolver.py` — `PARAM_ALIASES` + `resolve_param()` for LLM alias normalisation
 
 Last validated with code: current working tree
 
@@ -25,9 +30,9 @@ flowchart TD
   contractRecheck -->|"no"| failTurn[TurnErrorFallbackOrStop]
   contractRecheck -->|"yes"| dispatch
   contractCheck -->|"yes"| dispatch[RegistryDispatchByToolName]
-  dispatch --> toolExec[ExecuteToolWrapper]
+  dispatch --> toolExec[ExecuteToolWrapper_tool_wrappers.py]
   toolExec --> stateUpdate[RecordActionAndUpdateState]
-  stateUpdate --> guards[LoopAndFailureGuards]
+  stateUpdate --> guards[LoopAndFailureGuards_loop_guards.py]
   guards --> doneCheck{FinishOrStopCondition}
   doneCheck -->|"no"| phaseFilter
   doneCheck -->|"yes"| runEnd[RunEnd]
@@ -42,10 +47,11 @@ How to read this:
 ## 2) Per-Phase Available Tools
 
 Mapped files:
-- `src/agent/phases.py`
-- `src/agent/tool_policy.py`
-- `config/config.yaml`
-- `src/agent/prompts.py`
+- `src/agent/phases.py` — loads phase-to-tool map from `config/phase_tools.yaml` (hardcoded fallback)
+- `src/agent/tool_policy.py` — `TOOL_GROUPS` access control + allow/deny override merge
+- `config/phase_tools.yaml` — canonical phase-to-tool mappings (edit without touching Python)
+- `config/config.yaml` — `agent.tool_groups_enabled`, `learnings_tools_enabled`, allow/deny overrides
+- `src/agent/prompts.py` — system prompt builder; tool descriptions overridable via `config/tool_descriptions.yaml`
 
 Last validated with code: current working tree
 

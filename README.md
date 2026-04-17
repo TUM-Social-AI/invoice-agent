@@ -180,12 +180,12 @@ Learnings are organised by invoice type and category:
 
 ### Loop guards
 
-Several mechanisms prevent the agent from getting stuck:
+Several mechanisms prevent the agent from getting stuck. Guards live in `src/agent/loop_guards.py`:
 
 | Guard | Trigger | Action |
 |-------|---------|--------|
-| **Duplicate action guard** | Same tool + same params called 2+ times in a row | Injects a `LOOP DETECTED` warning into session notes, visible in the next turn's state summary |
-| **Consecutive failure guard** | Same tool fails 3 times in a row | Sets status to `ERROR`, stops the loop |
+| **DuplicateActionGuard** | Same tool + same params called 2+ times in a row | Injects a `LOOP DETECTED` warning into session notes, visible in the next turn's state summary |
+| **ConsecutiveFailureGuard** | Same tool fails 3 times in a row | Sets status to `ERROR`, stops the loop |
 | **Max turns** | Turn count exceeds `agent.max_turns` | Sets status to `FAILED` |
 | **Max field retries** | Field attempted more than `agent.max_field_retries` times | Agent is instructed to call `flag_for_human_review` instead |
 
@@ -362,6 +362,11 @@ agent:
   visual_max_evidence_pages: 6     # max pages included in one visual compliance call
   hybrid_extraction: true          # medium-res first, auto full-res on weak/null/error (vision extract + visual compliance)
 
+  # Batch field auto-expansion: include all un-attempted fields in every
+  # extract_fields_vision call as a free-ride alongside the requested subset.
+  # Disable only if you want to test targeted single-field extraction.
+  batch_auto_expand: true
+
   # CSV ground truth fallback for --learn (used only if _truth.json is missing).
   ground_truth_csv_path: null
   ground_truth_source_column: "Source file"
@@ -370,6 +375,13 @@ agent:
 ocr:
   langs: ["es", "en", "fr"]       # surya OCR languages for the pre-pass
 ```
+
+### Customizing tool descriptions and phase mappings
+
+Both can be edited without touching Python:
+
+- **`config/tool_descriptions.yaml`** — maps tool names to replacement description strings shown in the system prompt. Only list tools you want to override; everything else uses the default text from `src/agent/prompts.py`. The path can be changed via `agent.tool_descriptions_path`.
+- **`config/phase_tools.yaml`** — lists which tools are available in each phase (`SCAN`, `EXTRACT`, `VALIDATE`). Edit to add, remove, or reassign tools across phases. If the file is absent, the hardcoded fallback in `src/agent/phases.py` is used.
 
 ### `config/csv/invoice_types.csv`
 
@@ -525,16 +537,29 @@ invoice-agent/
 ├── main.py                     CLI entrypoint + batch runner
 ├── config/
 │   ├── config.yaml             Runtime config (models, thresholds, OCR langs)
+│   ├── phase_tools.yaml        Phase-to-tool mappings (edit without touching Python)
+│   ├── tool_descriptions.yaml  Per-tool description overrides for the system prompt
 │   └── csv/
 │       ├── invoice_types.csv
 │       ├── extraction_fields.csv
 │       └── compliance_rules.csv
 ├── src/
 │   ├── agent/
-│   │   ├── agent.py            Agentic loop, tool registry, system prompt builder
-│   │   └── state.py            AgentState dataclass — single mutable object for a run
+│   │   ├── agent.py            Orchestrator: run() sets up state and calls _run_agent_loop()
+│   │   ├── state.py            AgentState dataclass — single mutable object for a run
+│   │   ├── turn.py             Single LLM turn: prompt assembly, JSON schema, parse, retry
+│   │   ├── registry.py         Thin assembler: wires tool factories → runtime tool dict
+│   │   ├── phases.py           Phase detection; loads phase-to-tool map from phase_tools.yaml
+│   │   ├── prompts.py          System prompt builder; tool descriptions loaded from YAML
+│   │   ├── tool_policy.py      TOOL_GROUPS access control + allow/deny override merge
+│   │   ├── loop_guards.py      DuplicateActionGuard + ConsecutiveFailureGuard
+│   │   ├── param_resolver.py   PARAM_ALIASES + resolve_param() for LLM alias normalisation
+│   │   ├── llm_payload.py      Shared build_payload() used by turn.py + reflection.py
+│   │   ├── response_schema.py  build_response_schema() — dynamic JSON schema for LLM output
+│   │   └── reflection.py       Post-run reflection loop for learning mode
 │   ├── tools/
-│   │   └── tools.py            All tool implementations + surya OCR helpers
+│   │   ├── tool_wrappers.py    All tool closure factories (make_inspect, make_extract, …)
+│   │   └── tools.py            Low-level tool implementations + surya OCR helpers
 │   ├── config/
 │   │   └── loader.py           CSV config loader + ConfigStore + schema builder
 │   ├── output/
