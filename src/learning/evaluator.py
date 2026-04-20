@@ -27,6 +27,7 @@ Format:
 from __future__ import annotations
 
 import csv
+import difflib
 import json
 import logging
 import re
@@ -42,6 +43,8 @@ logger = logging.getLogger(__name__)
 
 NUMERIC_TOLERANCE = 0.02      # for amounts
 RATE_TOLERANCE = 0.001     # for percentages/rates
+STRING_SIMILARITY_THRESHOLD = 0.7  # SequenceMatcher ratio; 1.0 = identical
+STRING_SIMILARITY_MIN_LEN = 4      # both strings must be at least this long for similarity
 
 
 def _normalize_number_for_eval(v) -> Optional[float]:
@@ -312,6 +315,24 @@ def _normalize_string(v) -> str:
     return str(v).strip().lower()
 
 
+def _string_similarity_partial(
+    ext_s: str,
+    tru_s: str,
+    threshold: float = STRING_SIMILARITY_THRESHOLD,
+    min_len: int = STRING_SIMILARITY_MIN_LEN,
+) -> bool:
+    if not ext_s or not tru_s:
+        return False
+    # Fallback for very short tokens (currency codes, language tags, etc.)
+    if len(ext_s) < min_len or len(tru_s) < min_len:
+        return tru_s in ext_s or ext_s in tru_s
+    # Fast-path substring check
+    if tru_s in ext_s or ext_s in tru_s:
+        return True
+    ratio = difflib.SequenceMatcher(None, ext_s, tru_s).ratio()
+    return ratio >= threshold
+
+
 def _compare_pay_period(extracted, truth_val, *, date_parse: str, log: Optional[logging.Logger]) -> dict:
     """
     Pay periods are not scalars: bare month (8) must not be compared to year (2025) as numbers.
@@ -370,7 +391,7 @@ def _compare_pay_period(extracted, truth_val, *, date_parse: str, log: Optional[
     ext_s = _normalize_string(extracted)
     tru_s = _normalize_string(truth_val)
     exact = ext_s == tru_s
-    partial = (not exact) and (tru_s in ext_s or ext_s in tru_s)
+    partial = (not exact) and _string_similarity_partial(ext_s, tru_s)
     return {
         "match": exact,
         "partial": partial,
@@ -439,7 +460,7 @@ def _compare_value(
     ext_s = _normalize_string(extracted)
     tru_s = _normalize_string(truth_val)
     exact = ext_s == tru_s
-    partial = (not exact) and (tru_s in ext_s or ext_s in tru_s)
+    partial = (not exact) and _string_similarity_partial(ext_s, tru_s)
     note = "partial match" if partial else ("" if exact else "mismatch")
     if (
         field_name == "expense_category"
