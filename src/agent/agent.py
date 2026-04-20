@@ -432,6 +432,7 @@ class InvoiceAgent:
             logger.warning(f"Interrupted by user after turn {state.turn} — saving partial results")
             state.status = AgentStatus.INTERRUPTED
             state.finish_reason = "interrupted by user"
+            raise
 
         finally:
             if state.session_notes:

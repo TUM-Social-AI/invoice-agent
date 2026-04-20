@@ -1,0 +1,46 @@
+# Phase-to-tool mappings for the invoice agent loop.
+#
+# Each phase key (SCAN / EXTRACT / VALIDATE) lists the tool names the agent
+# is allowed to call during that phase.  Edit this file to add, remove, or
+# reassign tools without touching Python code.
+#
+# The always-available tools (note, install_package) are merged in by
+# phases.py automatically and do not need to be listed here unless you want
+# to remove one of them from a specific phase.
+
+SCAN:
+  - inspect_file
+  - compress_pages
+  - inventory_pages
+  - classify_document_type
+  - read_learnings
+  - note
+  - install_package
+
+EXTRACT:
+  - convert_pdf_to_images
+  - extract_fields_vision
+  - crop_region
+  - flag_for_human_review
+  - flag_fields_for_review
+  - read_learnings
+  - write_learning
+  - edit_learning
+  - delete_learning
+  - check_compliance
+  - note
+  - install_package
+
+VALIDATE:
+  - check_compliance
+  - check_compliance_visual
+  - extract_fields_vision
+  - crop_region
+  - flag_for_human_review
+  - flag_fields_for_review
+  - write_learning
+  - edit_learning
+  - delete_learning
+  - finish
+  - note
+  - install_package

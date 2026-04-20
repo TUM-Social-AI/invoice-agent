@@ -104,7 +104,7 @@ class ConfigStore(BaseModel):
         fields = self.get_fields(invoice_type_id)
         schema = {}
         for f in fields:
-            schema[f.field_name] = {
+            entry: dict = {
                 "field_id": f.field_id,
                 "type": f.data_type,
                 "label": f.field_label,
@@ -113,6 +113,9 @@ class ConfigStore(BaseModel):
                 "region": f.page_region,
                 "aliases": f.aliases,
             }
+            if f.allowed_values:
+                entry["enum"] = f.allowed_values
+            schema[f.field_name] = entry
         self.schema_cache[invoice_type_id] = schema
         return schema
 
@@ -138,9 +141,10 @@ class ConfigStore(BaseModel):
 
         for f in self.get_fields(invoice_type_id):
             req = "REQUIRED" if f.required else "optional"
+            allowed_suffix = f" | Allowed values: {', '.join(f.allowed_values)}" if f.allowed_values else ""
             lines.append(
                 f"- **{f.field_name}** ({f.field_label}, {req}, region={f.page_region}): "
-                f"{f.extraction_hint} | Aliases: {', '.join(f.aliases)}"
+                f"{f.extraction_hint} | Aliases: {', '.join(f.aliases)}{allowed_suffix}"
             )
 
         lines.append("\n### Compliance Rules to Satisfy")
@@ -152,6 +156,22 @@ class ConfigStore(BaseModel):
                 )
 
         return "\n".join(lines)
+
+def _load_allowed_values(base: Path) -> dict[tuple[str, str], list[str]]:
+    path = base / "allowed_values.csv"
+    if not path.exists():
+        logger.warning("Missing %s — no enum constraints will be applied to extracted fields", path.name)
+        return {}
+    lookup: dict[tuple[str, str], list[str]] = {}
+    with open(path, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            field_name = row["field_name"].strip()
+            type_id = row.get("invoice_type_id", "").strip()
+            value = row["value"].strip()
+            if value:
+                lookup.setdefault((field_name, type_id), []).append(value)
+    return lookup
+
 
 def load_config(config_dir: str = "config/csv") -> ConfigStore:
     store = ConfigStore()
@@ -173,6 +193,10 @@ def load_config(config_dir: str = "config/csv") -> ConfigStore:
             store.invoice_types[t.invoice_type_id] = t
     logger.info(f"Loaded {len(store.invoice_types)} invoice types")
 
+    # --- Allowed values (must load before extraction fields) ---
+    allowed_lookup = _load_allowed_values(base)
+    logger.info(f"Loaded allowed_values for {len(allowed_lookup)} (field_name, invoice_type_id) pairs")
+
     # --- Extraction fields ---
     fields_path = base / "extraction_fields.csv"
     with open(fields_path, newline="", encoding="utf-8") as f:
@@ -180,18 +204,25 @@ def load_config(config_dir: str = "config/csv") -> ConfigStore:
             type_id = row["invoice_type_id"].strip()
             if type_id not in store.invoice_types:
                 continue
+            field_name = row["field_name"].strip()
             aliases_raw = row.get("aliases", "")
             aliases = [a.strip() for a in aliases_raw.split(",") if a.strip()]
+            allowed = (
+                allowed_lookup.get((field_name, type_id))
+                or allowed_lookup.get((field_name, ""))
+                or []
+            )
             ef = ExtractionField(
                 field_id=row["field_id"].strip(),
                 invoice_type_id=type_id,
-                field_name=row["field_name"].strip(),
+                field_name=field_name,
                 field_label=row["field_label"].strip(),
                 data_type=row["data_type"].strip(),
                 required=row["required"].lower() == "true",
                 extraction_hint=row["extraction_hint"].strip(),
                 page_region=row["page_region"].strip(),
                 aliases=aliases,
+                allowed_values=allowed,
             )
             store.extraction_fields.setdefault(type_id, []).append(ef)
     total_fields = sum(len(v) for v in store.extraction_fields.values())

@@ -27,6 +27,7 @@ class ExtractionFieldModel(BaseModel):
     extraction_hint: str
     page_region: Literal["header", "footer", "body", "totals", "address_block", "line_items"]
     aliases: list[str] = Field(default_factory=list)
+    allowed_values: list[str] = Field(default_factory=list)
 
 
 class ComplianceRuleModel(BaseModel):
