@@ -113,6 +113,8 @@ class GeminiProvider:
         gen_cfg: dict[str, Any] = {"temperature": temperature}
         if response_format is not None:
             gen_cfg["responseMimeType"] = "application/json"
+            if isinstance(response_format, dict):
+                gen_cfg["responseSchema"] = response_format
 
         body: dict[str, Any] = {
             "contents": [{"role": "user", "parts": parts}],

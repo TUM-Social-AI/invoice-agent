@@ -127,6 +127,50 @@ def classify_document_type(
     except requests.RequestException as e:
         return {"success": False, "error": f"Ollama request failed: {e}"}
 
+def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict | None:
+    """Build a provider-specific JSON Schema to constrain the vision model's output.
+
+    Reads ``enum`` from each field's schema meta (populated from allowed_values.csv)
+    so enum constraints flow from config into the LLM's structured output without
+    any hardcoding here.  Returns None for unknown providers (falls back to json mode).
+    """
+    if provider_name == "ollama":
+        props: dict = {}
+        for field_name, meta in schema.items():
+            ftype = (meta.get("type") or "string").strip().lower()
+            allowed = meta.get("enum")
+            if ftype == "decimal":
+                prop: dict = {"anyOf": [{"type": "number"}, {"type": "null"}]}
+            elif ftype == "boolean":
+                prop = {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
+            elif allowed:
+                prop = {"anyOf": [{"type": "string", "enum": allowed}, {"type": "null"}]}
+            else:
+                prop = {"anyOf": [{"type": "string"}, {"type": "null"}]}
+            props[field_name] = prop
+            props[f"{field_name}_confidence"] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+        return {"type": "object", "properties": props}
+
+    if provider_name == "gemini":
+        props = {}
+        for field_name, meta in schema.items():
+            ftype = (meta.get("type") or "string").strip().lower()
+            allowed = meta.get("enum")
+            if ftype == "decimal":
+                prop = {"type": "NUMBER", "nullable": True}
+            elif ftype == "boolean":
+                prop = {"type": "BOOLEAN", "nullable": True}
+            elif allowed:
+                prop = {"type": "STRING", "enum": allowed, "nullable": True}
+            else:
+                prop = {"type": "STRING", "nullable": True}
+            props[field_name] = prop
+            props[f"{field_name}_confidence"] = {"type": "NUMBER", "nullable": False}
+        return {"type": "OBJECT", "properties": props}
+
+    return None
+
+
 def extract_fields_vision(
     state: AgentState,
     image_path: str,
@@ -148,10 +192,12 @@ def extract_fields_vision(
     for field_name, meta in schema.items():
         req = "REQUIRED" if meta.get("required") else "optional"
         aliases = ", ".join(meta.get("aliases", []))
+        allowed = meta.get("enum")
         field_descriptions.append(
             f'- "{field_name}" ({meta["label"]}, {req}, type={meta["type"]}): '
             f'{meta["hint"]}'
             + (f" | Also look for: {aliases}" if aliases else "")
+            + (f" | Must be one of: {', '.join(allowed)}" if allowed else "")
         )
 
     fields_text = "\n".join(field_descriptions)
@@ -178,21 +224,21 @@ def extract_fields_vision(
 
     try:
         if provider is not None:
-            # Gemini: responseMimeType application/json. Ollama: top-level format=json (see ollama_provider.generate_json).
             pname = getattr(provider, "provider_name", "")
-            if pname == "gemini":
-                extraction_json_mode: str | None = "application/json"
-            elif pname == "ollama":
-                extraction_json_mode = "json"
-            else:
-                extraction_json_mode = None
+            # Use a full JSON Schema (with enum constraints) when the provider supports it;
+            # fall back to plain JSON mode so _build_extraction_response_schema returning
+            # None still produces valid output.
+            extraction_response_format: Any = (
+                _build_extraction_response_schema(schema, pname)
+                or ("json" if pname == "ollama" else "application/json" if pname == "gemini" else None)
+            )
             llm_result = provider.generate_json(
                 model=model,
                 prompt=prompt,
                 images_b64=[img_b64],
                 temperature=EXTRACTION_TEMPERATURE,
                 timeout_s=timeout_s,
-                response_format=extraction_json_mode,
+                response_format=extraction_response_format,
             )
             raw = llm_result.content_text
             parsed = llm_result.content_json if llm_result.content_json is not None else json.loads(raw)
@@ -258,6 +304,12 @@ def merge_extracted_fields(
                     value = n
             else:
                 value = _sanitize_extracted_string_value(value, ftype)
+
+            # Enforce enum constraint: snap to canonical allowed value or reject.
+            allowed_enum = meta.get("enum")
+            if allowed_enum and isinstance(value, str):
+                _norm = lambda s: re.sub(r"[\s\-]+", "_", s.strip().lower())
+                value = next((v for v in allowed_enum if _norm(v) == _norm(value)), None)
 
         if value is None:
             # The model explicitly returned null for this field.

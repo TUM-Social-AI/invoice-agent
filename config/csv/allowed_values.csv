@@ -21,7 +21,6 @@ expense_category,EQUIPOS,consulting
 expense_category,EQUIPOS,works
 expense_category,EQUIPOS,other
 expense_category,CONSUMIBLES,office_supplies
-expense_category,CONSUMIBLES,printing
 expense_category,CONSUMIBLES,IT_consumables
 expense_category,CONSUMIBLES,cleaning_supplies
 expense_category,CONSUMIBLES,other_consumables

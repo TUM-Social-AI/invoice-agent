@@ -1,0 +1,37 @@
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Python caches / virtual envs
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+htmlcov/
+.venv/
+venv/
+env/
+
+# Local runtime data
+output/
+/*.pdf
+invoices/*.pdf
+invoices/*_truth.json
+invoices/*.jpg
+invoices/*.jpeg
+invoices/*.png
+tmp/
+logs/
+.cursor/debug-*.log
+
+# Local learnings/runtime files
+learnings/*.bak
+
+# Secrets (e.g. GOOGLE_API_KEY for Gemini)
+.env

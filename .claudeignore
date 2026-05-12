@@ -1,0 +1,18 @@
+# Secrets — do not include in AI context
+.env
+.env.*
+!.env.example
+
+# Virtual envs & caches
+.venv/
+venv/
+env/
+__pycache__/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local runtime output
+output/
+tmp/
+logs/

@@ -160,9 +160,11 @@ def process_invoice(
         invoice_type_id=state.invoice_type_id or None,
     )
     _last_score: dict | None = None
+    _last_field_results: dict | None = None
     if truth is not None:
         diff = evaluate(state, truth, store=agent.store, date_parse=date_parse)
         _last_score = diff["score"]
+        _last_field_results = diff["field_results"]
         diff_text = format_diff_for_agent(diff)
         s = diff["score"]
         ft = s.get("fields_total") or 0
@@ -204,11 +206,48 @@ def process_invoice(
             print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
 
     print(f"{'='*60}\n")
-    return state, _last_score
+    return state, _last_score, _last_field_results
+
+
+def _print_field_accuracy(field_results_list: list[dict]) -> None:
+    """Print a per-field accuracy breakdown aggregated across all scored invoices."""
+    from collections import defaultdict
+
+    stats: dict[str, dict] = defaultdict(lambda: {"compared": 0, "exact": 0, "partial": 0, "wrong": 0})
+    for fr in field_results_list:
+        for fname, r in fr.items():
+            if r.get("match") is None:
+                continue
+            stats[fname]["compared"] += 1
+            if r["match"] is True:
+                stats[fname]["exact"] += 1
+            elif r.get("partial"):
+                stats[fname]["partial"] += 1
+            else:
+                stats[fname]["wrong"] += 1
+
+    if not stats:
+        return
+
+    COL_FIELD = max(24, max(len(f) for f in stats) + 2)
+    header = f"{'Field':<{COL_FIELD}}{'Compared':>10}{'Exact':>7}{'Partial':>9}{'Wrong':>7}{'Strict%':>9}"
+    sep = "-" * len(header)
+    print(f"\n{'='*len(header)}\n  PER-FIELD ACCURACY\n{'='*len(header)}")
+    print(header)
+    print(sep)
+
+    for fname in sorted(stats, key=lambda f: stats[f]["exact"] / stats[f]["compared"] if stats[f]["compared"] else 1):
+        s = stats[fname]
+        n = s["compared"]
+        acc = f"{s['exact'] / n * 100:.0f}%" if n else "—"
+        print(f"{fname:<{COL_FIELD}}{n:>10}{s['exact']:>7}{s['partial']:>9}{s['wrong']:>7}{acc:>9}")
+
+    print(f"{'='*len(header)}\n")
 
 
 def _print_batch_summary(
     results: list[tuple[str, str, dict | None]],
+    field_results_list: list[dict] | None = None,
     csv_path: str | None = None,
 ) -> None:
     COL_FILE = max(30, max(len(r[0]) for r in results) + 2)
@@ -291,6 +330,9 @@ def _print_batch_summary(
             w.writeheader()
             w.writerows(csv_rows)
         print(f"  Batch summary written to: {csv_path}\n")
+
+    if field_results_list:
+        _print_field_accuracy(field_results_list)
 
 
 def main():
@@ -386,14 +428,17 @@ def main():
         logger.info(f"Batch mode: {len(pdfs)} PDFs found in {pdf_path}")
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
+        batch_field_results: list[dict] = []
         for pdf in pdfs:
             out_dir = Path(args.output) / pdf.stem
             try:
-                state, score = process_invoice(
+                state, score, field_results = process_invoice(
                     agent, str(pdf), str(out_dir),
                     invoice_type_id=args.type or "", learn=args.learn,
                 )
                 batch_results.append((pdf.name, state.invoice_type_id or "", score))
+                if field_results:
+                    batch_field_results.append(field_results)
             except KeyboardInterrupt:
                 raise
             except Exception as e:
@@ -407,7 +452,11 @@ def main():
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
         if batch_results:
-            _print_batch_summary(batch_results, csv_path=args.batch_summary_csv)
+            _print_batch_summary(
+                batch_results,
+                field_results_list=batch_field_results or None,
+                csv_path=args.batch_summary_csv,
+            )
     elif pdf_path.is_file():
         out_dir = Path(args.output) / pdf_path.stem
         process_invoice(agent, str(pdf_path), str(out_dir), invoice_type_id=args.type or "", learn=args.learn)

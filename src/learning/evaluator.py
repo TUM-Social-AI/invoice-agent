@@ -430,17 +430,21 @@ def _compare_value(
     if field_name == "pay_period":
         return _compare_pay_period(extracted, truth_val, date_parse=date_parse, log=log)
 
-    # Try numeric comparison
-    ext_num = _normalize_number(extracted)
-    tru_num = _normalize_number(truth_val)
-    if ext_num is not None and tru_num is not None:
-        tol = RATE_TOLERANCE if "rate" in field_name or "pct" in field_name else NUMERIC_TOLERANCE
-        ok = abs(ext_num - tru_num) <= tol
-        return {"match": ok, "partial": False, "extracted": ext_num, "truth": tru_num,
-                "note": f"numeric diff: {abs(ext_num - tru_num):.4f}"}
+    # Date fields must not enter numeric comparison — ISO dates like "2025-11-09" are
+    # spuriously parsed as the year 2025 by _normalize_number, producing false matches.
+    is_date_field = any(kw in field_name for kw in ("date", "fecha"))
+
+    if not is_date_field:
+        ext_num = _normalize_number(extracted)
+        tru_num = _normalize_number(truth_val)
+        if ext_num is not None and tru_num is not None:
+            tol = RATE_TOLERANCE if "rate" in field_name or "pct" in field_name else NUMERIC_TOLERANCE
+            ok = abs(ext_num - tru_num) <= tol
+            return {"match": ok, "partial": False, "extracted": ext_num, "truth": tru_num,
+                    "note": f"numeric diff: {abs(ext_num - tru_num):.4f}"}
 
     # Try date comparison
-    if any(kw in field_name for kw in ("date", "fecha", "period", "periodo")):
+    if is_date_field or any(kw in field_name for kw in ("period", "periodo")):
         ext_d = _normalize_date_value(extracted, slash_order=date_parse, log=log, field_name=field_name)
         tru_d = _normalize_date_value(truth_val, slash_order=date_parse, log=log, field_name=field_name)
         ok = ext_d == tru_d
