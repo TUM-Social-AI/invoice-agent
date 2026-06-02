@@ -1,0 +1,91 @@
+# Docker Compose ollama profile — same as config.yaml but points at the ollama service.
+llm:
+  provider: ollama
+  remote_guard:
+    max_chat_requests_per_run: 45
+    max_generate_requests_per_run: 150
+    max_llm_requests_per_run: 220
+    max_total_token_count_per_run: 400000
+    warn_token_threshold: 120000
+
+gemini:
+  api_key_env: GOOGLE_API_KEY
+  reasoning_model: gemini-2.5-flash
+  vision_model: gemini-2.5-pro
+  timeout_generate_s: 600
+
+ollama:
+  base_url: "http://ollama:11434"
+  vision_model: "qwen2.5vl:32b"
+  reasoning_model: "qwen3:1.7b"
+  timeout_chat_s: 240
+  timeout_generate_s: 420
+  num_ctx_chat: 8192
+  num_ctx_generate: 16384
+
+config_dir: "config/csv"
+
+learnings_path: "learnings/learnings.md"
+
+agent:
+  max_turns: 30
+  max_field_retries: 5
+  confidence_threshold: 0.65
+  batch_review_threshold: 0.85
+  planning_enabled: true
+  fallback_reasoning_model: null
+  orchestration: "loop"
+  loop_profile: "patterned"
+  tool_groups_enabled: ["pipeline"]
+  tools_extra_allow: []
+  tools_extra_deny: ["install_package"]
+  learnings_tools_enabled: false
+  prompt_profile: auto
+  learnings_inject_enabled: true
+  learnings_max_chars: 16000
+  planning_learnings_max_chars: null
+  log_line_max_chars: 250
+  history_preview_chars: 900
+  state_summary_max_page_lines: 28
+  state_summary_max_inventory_lines: 50
+  state_summary_inventory_desc_chars: 180
+  ocr_prompt_max_chars: 24000
+  visual_max_evidence_pages: 8
+  active_rule_groups:
+    - general
+  ground_truth_csv_path: "config/csv/ground_truth.csv"
+  ground_truth_csv_by_invoice_type: {}
+  ground_truth_source_column: "Source file"
+  ground_truth_column_map:
+    "Invoice Number": "invoice_number"
+    "Date": "invoice_date"
+    "Supplier/Issuer": "vendor_name"
+    "Items/Services": "item_description"
+    "Description": "travel_purpose"
+    "Total Amount": "total_amount"
+    "Currency": "currency"
+    "Payment Method": "payment_method"
+    "Expense Category": "expense_category"
+    "Client Name": "beneficiary"
+    "Employee": "employee_name"
+    "Pay period": "pay_period"
+  ground_truth_date_parse: "DMY"
+  micro_tools_phase2: false
+  batch_auto_expand: true
+  hybrid_extraction: false
+  page_dpi: 200
+  planning_timeout_s: 180
+  reflection_timeout_s: 120
+  max_consecutive_failures: 3
+  max_same_action_warn: 2
+  max_same_action_stop: 5
+
+ocr:
+  langs: ["es", "en", "fr"]
+
+output:
+  base_dir: "output"
+  include_page_crops: true
+
+logging:
+  level: "INFO"
