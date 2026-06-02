@@ -658,3 +658,5 @@ pytest tests/
 ```
 
 Tests cover config loading, all compliance check types, output CSV format, and learnings read/write. Ollama is not required to run tests.
+
+**CI:** `.github/workflows/ci.yml` runs `pytest tests/` on every pull request and push to `main`. No API keys required.
