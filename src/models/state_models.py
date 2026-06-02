@@ -7,6 +7,8 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.sources.models import RunIdentity, SourceProvenance
+
 
 class AgentStatus(str, Enum):
     RUNNING = "running"
@@ -103,6 +105,9 @@ class AgentStateModel(BaseModel):
     execution_plan: list[dict[str, Any]] = Field(default_factory=list)
     use_fallback_model: bool = False
     run_log_path: str | None = None
+    run_id: str = ""
+    source_provenance: SourceProvenance | None = None
+    run_identity: RunIdentity | None = None
 
     # Existing runtime dynamic flag now explicit.
     fallback_logged: bool = False
@@ -110,4 +115,3 @@ class AgentStateModel(BaseModel):
     @property
     def tmp_dir(self) -> str:
         return str(Path(self.output_dir) / "tmp")
-

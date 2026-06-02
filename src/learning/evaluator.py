@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Optional
 
 from src.agent.state import AgentState
+from src.sources.models import SourceProvenance
 
 if TYPE_CHECKING:
     from src.config.loader import ConfigStore
@@ -162,6 +163,7 @@ def load_ground_truth(
     pdf_path: str,
     config: dict | None = None,
     invoice_type_id: str | None = None,
+    source_provenance: SourceProvenance | None = None,
 ) -> Optional[dict]:
     """
     Find and load the ground truth.
@@ -170,8 +172,12 @@ def load_ground_truth(
     2) If missing, resolve CSV path from `ground_truth_csv_by_invoice_type[invoice_type_id]`
        or `ground_truth_csv_path`, then load a matching row.
     """
+    local_sibling_truth_allowed = (
+        source_provenance is None
+        or source_provenance.source_type == "local"
+    )
     truth_path = Path(pdf_path).with_name(Path(pdf_path).stem + "_truth.json")
-    if truth_path.exists():
+    if local_sibling_truth_allowed and truth_path.exists():
         try:
             return json.loads(truth_path.read_text(encoding="utf-8"))
         except Exception as e:
@@ -189,6 +195,8 @@ def load_ground_truth(
         return None
 
     source_col = str(cfg.get("ground_truth_source_column", "Source file"))
+    source_id_col = cfg.get("ground_truth_source_id_column")
+    revision_col = cfg.get("ground_truth_revision_column")
 
     pdf_key = _ground_truth_match_key(Path(pdf_path).name)
 
@@ -196,13 +204,34 @@ def load_ground_truth(
     try:
         with open(csv_file, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
-            if not reader.fieldnames or source_col not in reader.fieldnames:
+            fieldnames = reader.fieldnames or []
+            source_id_col_s = str(source_id_col) if source_id_col else ""
+            revision_col_s = str(revision_col) if revision_col else ""
+            has_source_file_col = source_col in fieldnames
+            has_source_id_col = bool(source_id_col_s and source_id_col_s in fieldnames)
+            if not fieldnames or (not has_source_file_col and not has_source_id_col):
                 logger.warning(
-                    f"Ground truth CSV missing source column '{source_col}'. "
+                    f"Ground truth CSV missing source column '{source_col}'"
+                    f"{f' or source id column {source_id_col_s!r}' if source_id_col_s else ''}. "
                     f"Found columns: {reader.fieldnames}"
                 )
                 return None
             for row in reader:
+                if source_provenance and has_source_id_col:
+                    row_source_id = (row.get(source_id_col_s) or "").strip()
+                    row_revision = (row.get(revision_col_s) or "").strip() if revision_col_s else ""
+                    revision_matches = (
+                        not revision_col_s
+                        or not row_revision
+                        or row_revision == (source_provenance.revision_id or "")
+                    )
+                    if row_source_id and row_source_id == source_provenance.source_id and revision_matches:
+                        matched_row = row
+                        break
+                    if row_source_id:
+                        continue
+                if not has_source_file_col:
+                    continue
                 v = row.get(source_col, "")
                 if not v:
                     continue
