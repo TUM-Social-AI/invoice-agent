@@ -6,7 +6,7 @@
 __pycache__
 .pytest_cache
 *.pyc
-output/
+/output/
 invoices/
 tests/
 .terraform

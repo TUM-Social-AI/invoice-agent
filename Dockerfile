@@ -19,19 +19,18 @@ WORKDIR /app
 
 COPY requirements.txt ./
 RUN pip install --upgrade pip \
-    && pip install -r requirements.txt \
-    && pip install "transformers>=4.56.1,<5"
+    && pip install -r requirements.txt
 
 COPY main.py ./
 COPY src/ src/
 COPY config/ config/
 COPY learnings/ learnings/
 
-RUN mkdir -p invoices output \
-    && python -c "from src.tools.ocr_layout import load_surya_models; assert load_surya_models() is not None"
-
 RUN useradd -m -u 1000 appuser \
     && chown -R appuser:appuser /app
 USER appuser
+
+RUN mkdir -p invoices output \
+    && python -c "from src.tools.ocr_layout import load_surya_models; assert load_surya_models() is not None"
 
 CMD ["python", "main.py", "--help"]
