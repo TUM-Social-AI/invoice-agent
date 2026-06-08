@@ -31,6 +31,31 @@ class ComplianceRule(ComplianceRuleModel):
     pass
 
 
+class ObservationFallback(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    invoice_type_id: str
+    source_rule_id: str
+    target_field: str
+    parser_kind: str
+
+
+_OBSERVATION_FALLBACKS: list[ObservationFallback] = [
+    ObservationFallback(
+        invoice_type_id="PERS_LOCAL",
+        source_rule_id="R_PL_011",
+        target_field="employee_name",
+        parser_kind="employee_name_quote",
+    ),
+    ObservationFallback(
+        invoice_type_id="PERS_LOCAL",
+        source_rule_id="R_PL_012",
+        target_field="payment_method",
+        parser_kind="payment_phrase",
+    ),
+]
+
+
 def _load_employee_name_role_denylist(base: Path) -> list[str]:
     path = base / "employee_name_role_denylist.txt"
     if not path.exists():
@@ -71,6 +96,9 @@ class ConfigStore(BaseModel):
     compliance_rules: dict[str, list[ComplianceRule]] = Field(default_factory=dict)     # keyed by invoice_type_id
     schema_cache: dict[str, dict] = Field(default_factory=dict, repr=False)            # cache for build_extraction_schema
     employee_name_role_denylist: list[str] = Field(default_factory=list, repr=False)
+
+    def observation_fallbacks_for(self, invoice_type_id: str) -> list[ObservationFallback]:
+        return [f for f in _OBSERVATION_FALLBACKS if f.invoice_type_id == invoice_type_id]
 
     def get_type(self, invoice_type_id: str) -> Optional[InvoiceType]:
         return self.invoice_types.get(invoice_type_id)

@@ -18,8 +18,8 @@ htmlcov/
 venv/
 env/
 
-# Local runtime data
-output/
+# Local runtime data (repo root only — not src/output package)
+/output/
 /*.pdf
 invoices/*.pdf
 invoices/*_truth.json
