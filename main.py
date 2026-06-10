@@ -37,6 +37,13 @@ from src.learning.evaluator import (
     ground_truth_csv_configured,
     load_ground_truth,
 )
+from src.sources.local import (
+    SourceError,
+    is_folder_batch,
+    legacy_local_output_dir,
+    materialize_local_input,
+)
+from src.sources.models import RunIdentity, SourceProvenance
 from src.tools.tools import reset_learnings
 
 logging.basicConfig(
@@ -123,12 +130,16 @@ def process_invoice(
     output_dir: str,
     invoice_type_id: str = "",
     learn: bool = False,
+    source_provenance: SourceProvenance | None = None,
+    run_identity: RunIdentity | None = None,
 ):
     logger.info(f"Processing: {pdf_path}")
     state = agent.run(
         pdf_path=pdf_path,
         output_dir=output_dir,
         invoice_type_id=invoice_type_id,
+        source_provenance=source_provenance,
+        run_identity=run_identity,
     )
     paths = write_results(state, output_dir)
 
@@ -155,10 +166,12 @@ def process_invoice(
     cfg = getattr(agent, "config", None) or {}
     agent_block = cfg.get("agent") or {}
     date_parse = str(agent_block.get("ground_truth_date_parse", "DMY")).strip().upper()
+    effective_source_provenance = state.source_provenance or source_provenance
     truth = load_ground_truth(
         pdf_path,
         config=cfg,
         invoice_type_id=state.invoice_type_id or None,
+        source_provenance=effective_source_provenance,
     )
     _last_score: dict | None = None
     _last_field_results: dict | None = None
@@ -424,22 +437,29 @@ def main():
 
     agent = InvoiceAgent(config=app_config, store=store)
 
-    pdf_path = Path(args.pdf)
-    if pdf_path.is_dir():
-        pdfs = sorted(pdf_path.glob("*.pdf"))
-        if not pdfs:
-            print(f"No PDFs found in {args.pdf}")
-            sys.exit(1)
-        logger.info(f"Batch mode: {len(pdfs)} PDFs found in {pdf_path}")
+    try:
+        materialized_docs = materialize_local_input(args.pdf)
+    except SourceError as e:
+        print(str(e))
+        sys.exit(1)
+
+    if is_folder_batch(materialized_docs):
+        logger.info(f"Batch mode: {len(materialized_docs)} PDFs found in {args.pdf}")
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []
-        for pdf in pdfs:
-            out_dir = Path(args.output) / pdf.stem
+        for doc in materialized_docs:
+            pdf = Path(doc.local_pdf_path)
+            out_dir = legacy_local_output_dir(doc, args.output)
             try:
                 state, score, field_results = process_invoice(
-                    agent, str(pdf), str(out_dir),
-                    invoice_type_id=args.type or "", learn=args.learn,
+                    agent,
+                    doc.local_pdf_path,
+                    str(out_dir),
+                    invoice_type_id=args.type or "",
+                    learn=args.learn,
+                    source_provenance=doc.provenance,
+                    run_identity=doc.run_identity,
                 )
                 batch_results.append((pdf.name, state.invoice_type_id or "", score))
                 if field_results:
@@ -462,12 +482,18 @@ def main():
                 field_results_list=batch_field_results or None,
                 csv_path=args.batch_summary_csv,
             )
-    elif pdf_path.is_file():
-        out_dir = Path(args.output) / pdf_path.stem
-        process_invoice(agent, str(pdf_path), str(out_dir), invoice_type_id=args.type or "", learn=args.learn)
     else:
-        print(f"PDF not found: {args.pdf}")
-        sys.exit(1)
+        doc = materialized_docs[0]
+        out_dir = legacy_local_output_dir(doc, args.output)
+        process_invoice(
+            agent,
+            doc.local_pdf_path,
+            str(out_dir),
+            invoice_type_id=args.type or "",
+            learn=args.learn,
+            source_provenance=doc.provenance,
+            run_identity=doc.run_identity,
+        )
 
 
 if __name__ == "__main__":
