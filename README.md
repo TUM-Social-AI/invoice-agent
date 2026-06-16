@@ -215,6 +215,47 @@ On startup, `main.py` loads a **`.env`** file from the **project root** (next to
 
 For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). For OpenAI, set `OPENAI_API_KEY=...` (or match `openai.api_key_env`). `.env` is gitignored.
 
+### Optional: Google Drive invoice source
+
+Google Drive ingestion uses OAuth for the first version. The app reads PDFs from a Drive folder, downloads each PDF temporarily for processing, and deletes the downloaded copy after the run. Normal outputs, logs, rendered pages, and CSV files are preserved.
+
+Setup:
+
+1. Enable the **Google Drive API** in your Google Cloud project.
+2. Configure an OAuth consent screen.
+3. Create an OAuth client of type **Desktop app**.
+4. Rename the downloaded JSON to:
+
+```bash
+.secrets/google-drive-oauth-client.json
+```
+
+The `.secrets/` folder and OAuth token files are gitignored. You can override the client JSON path with `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` or `--drive-oauth-client-secret`.
+
+Authenticate once:
+
+```bash
+python main.py --drive-auth
+```
+
+Process a Drive folder:
+
+```bash
+python main.py --google-drive-folder-id <folder-id>
+```
+
+Or set a default folder in `config/config.yaml` and omit the CLI folder flag:
+
+```yaml
+sources:
+  google_drive:
+    folder_url: "https://drive.google.com/drive/folders/<folder-id>"
+```
+
+When `--pdf` is provided, local PDF processing is used. When `--pdf` is omitted and a Drive folder is configured, Drive ingestion is used.
+
+OAuth access tokens refresh automatically. If the OAuth app remains in Google’s Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
+
 ### 1. Install Ollama
 ```
 https://ollama.com
