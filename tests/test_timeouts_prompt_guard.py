@@ -1,6 +1,7 @@
 """Unified LLM timeouts, prompt profiles, and metered remote guard."""
 
 import pytest
+from unittest.mock import patch
 
 from src.agent.loop_utils import timeout_cfg
 from src.llm.config_resolve import (
@@ -45,6 +46,28 @@ def test_llm_timeouts_ollama_precedence():
     assert t["generate_timeout_s"] == 200
 
 
+def test_llm_timeouts_openai_precedence():
+    cfg = {
+        "llm": {"provider": "openai", "timeout_chat_s": 111, "timeout_generate_s": 222},
+        "openai": {"timeout_chat_s": 999, "timeout_generate_s": 888},
+        "ollama": {"timeout_chat_s": 1, "timeout_generate_s": 2},
+    }
+    t = llm_timeouts(cfg)
+    assert t["chat_timeout_s"] == 999
+    assert t["generate_timeout_s"] == 888
+
+
+def test_llm_timeouts_openai_falls_back_llm_then_ollama():
+    cfg = {
+        "llm": {"provider": "openai", "timeout_chat_s": 50},
+        "openai": {},
+        "ollama": {"timeout_generate_s": 77},
+    }
+    t = llm_timeouts(cfg)
+    assert t["chat_timeout_s"] == 50
+    assert t["generate_timeout_s"] == 77
+
+
 def test_timeout_cfg_alias():
     cfg = {"llm": {"provider": "ollama"}, "ollama": {"timeout_chat_s": 55, "timeout_generate_s": 66}}
     assert timeout_cfg(cfg) == {"chat_timeout_s": 55, "generate_timeout_s": 66}
@@ -81,8 +104,33 @@ def test_prompt_limits_remote_profile():
 
 def test_remote_guard_config_merge():
     cfg = {
-        "llm": {"remote_guard": {"max_llm_requests_per_run": 10, "warn_token_threshold": 1}},
+        "llm": {
+            "provider": "gemini",
+            "remote_guard": {"max_llm_requests_per_run": 10, "warn_token_threshold": 1},
+        },
         "gemini": {"remote_guard": {"max_llm_requests_per_run": 20}},
+    }
+    g = remote_guard_config(cfg)
+    assert g["max_llm_requests_per_run"] == 20
+    assert g["warn_token_threshold"] == 1
+
+
+def test_remote_guard_config_ignores_inactive_openai_override():
+    cfg = {
+        "llm": {
+            "provider": "gemini",
+            "remote_guard": {"max_llm_requests_per_run": 10},
+        },
+        "openai": {"remote_guard": {"max_llm_requests_per_run": 99}},
+    }
+    g = remote_guard_config(cfg)
+    assert g["max_llm_requests_per_run"] == 10
+
+
+def test_remote_guard_config_merge_openai():
+    cfg = {
+        "llm": {"provider": "openai", "remote_guard": {"max_llm_requests_per_run": 10, "warn_token_threshold": 1}},
+        "openai": {"remote_guard": {"max_llm_requests_per_run": 20}},
     }
     g = remote_guard_config(cfg)
     assert g["max_llm_requests_per_run"] == 20
@@ -95,14 +143,33 @@ def test_remote_guard_is_active():
     assert remote_guard_is_active({"max_llm_requests_per_run": 5}) is True
 
 
-def test_build_llm_provider_gemini_wraps_metered(monkeypatch):
+@patch("src.llm.factory.GeminiProvider")
+def test_build_llm_provider_gemini_wraps_metered(mock_gemini_provider_cls, monkeypatch):
     monkeypatch.setenv("GOOGLE_API_KEY", "x")
+    fake_inner = type("FakeInner", (), {"provider_name": "gemini"})()
+    mock_gemini_provider_cls.from_config.return_value = fake_inner
     cfg = {
         "llm": {
             "provider": "gemini",
             "remote_guard": {"max_llm_requests_per_run": 5},
         },
         "gemini": {"api_key_env": "GOOGLE_API_KEY"},
+    }
+    p = build_llm_provider(cfg)
+    assert isinstance(p, MeteredLLMProvider)
+
+
+@patch("src.llm.factory.OpenAIProvider")
+def test_build_llm_provider_openai_wraps_metered(mock_openai_provider_cls, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    fake_inner = type("FakeInner", (), {"provider_name": "openai"})()
+    mock_openai_provider_cls.from_config.return_value = fake_inner
+    cfg = {
+        "llm": {
+            "provider": "openai",
+            "remote_guard": {"max_llm_requests_per_run": 5},
+        },
+        "openai": {"api_key_env": "OPENAI_API_KEY"},
     }
     p = build_llm_provider(cfg)
     assert isinstance(p, MeteredLLMProvider)
@@ -136,3 +203,26 @@ def test_metered_raises_after_max_llm(monkeypatch):
     m.chat_json(model="m", messages=[{"role": "user", "content": "a"}])
     with pytest.raises(RuntimeError, match="max_llm_requests_per_run"):
         m.chat_json(model="m", messages=[{"role": "user", "content": "b"}])
+
+
+def test_metered_parses_openai_total_tokens():
+    from src.llm.base import LLMResult
+
+    class FakeOpenAI:
+        provider_name = "openai"
+
+        def chat_json(self, **kwargs):
+            return LLMResult(
+                content_text="{}",
+                content_json={},
+                raw={"usage": {"total_tokens": 123}},
+                model="m",
+                provider="openai",
+            )
+
+        def generate_json(self, **kwargs):
+            raise AssertionError("not used")
+
+    m = MeteredLLMProvider(FakeOpenAI(), {"max_total_token_count_per_run": 100})
+    with pytest.raises(RuntimeError, match="max_total_token_count_per_run"):
+        m.chat_json(model="m", messages=[{"role": "user", "content": "a"}])

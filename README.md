@@ -213,7 +213,7 @@ conda run -n invoice-agent python main.py --pdf invoices/
 
 On startup, `main.py` loads a **`.env`** file from the **project root** (next to `main.py`), then from the **current working directory** (only variables not already set are filled in from the second file).
 
-For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). `.env` is gitignored.
+For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). For OpenAI, set `OPENAI_API_KEY=...` (or match `openai.api_key_env`). `.env` is gitignored.
 
 ### 1. Install Ollama
 ```
@@ -238,7 +238,7 @@ Then update `config/config.yaml` to use the larger model names.
 pip install -r requirements.txt
 ```
 
-Includes `google-genai` for optional / future SDK use; the built-in **Gemini** backend calls the REST API via `requests` (no extra runtime wiring required beyond the API key).
+Includes `google-genai` and `openai` SDKs for remote **Gemini** and **OpenAI** backends (API keys via `.env` or env vars).
 
 ### 4. Install surya OCR (optional but recommended)
 ```bash
@@ -325,15 +325,15 @@ Agent tool-selection, per-phase tool availability, and orchestration diagrams ar
 
 ```yaml
 llm:
-  provider: ollama   # or gemini (Google AI — set GOOGLE_API_KEY; see gemini.* below)
-  # remote_guard: per-run caps when provider is gemini (see config/config.yaml for defaults)
+  provider: ollama   # or gemini (GOOGLE_API_KEY) or openai (OPENAI_API_KEY)
+  # remote_guard: per-run caps for remote providers (see config/config.yaml for defaults)
 
 ollama:
   base_url: "http://localhost:11434"
   vision_model: "qwen2.5vl:32b"    # used for extraction, inventory, visual checks
   reasoning_model: "qwen3:1.7b"    # used for the agent reasoning loop only
 
-# gemini: block lives in config/config.yaml (Flash defaults); set llm.provider: gemini to use.
+# gemini / openai: blocks live in config/config.yaml; set llm.provider accordingly.
 
 agent:
   # Orchestration mode:

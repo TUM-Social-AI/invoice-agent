@@ -11,23 +11,42 @@ logger = logging.getLogger(__name__)
 
 
 def _usage_total_tokens(raw: Any) -> int:
+    if raw is None:
+        return 0
     if not isinstance(raw, dict):
+        if hasattr(raw, "model_dump"):
+            raw = raw.model_dump()
+        elif hasattr(raw, "usage"):
+            usage = getattr(raw, "usage", None)
+            if usage is not None:
+                total = getattr(usage, "total_tokens", None)
+                if total is not None:
+                    try:
+                        return int(total)
+                    except (TypeError, ValueError):
+                        pass
         return 0
     um = raw.get("usageMetadata") or raw.get("usage_metadata")
-    if not isinstance(um, dict):
-        return 0
-    for key in ("totalTokenCount", "total_token_count"):
-        if um.get(key) is not None:
-            try:
-                return int(um[key])
-            except (TypeError, ValueError):
-                pass
-    try:
-        pt = int(um.get("promptTokenCount") or 0)
-        ct = int(um.get("candidatesTokenCount") or 0)
-        return pt + ct
-    except (TypeError, ValueError):
-        return 0
+    if isinstance(um, dict):
+        for key in ("totalTokenCount", "total_token_count"):
+            if um.get(key) is not None:
+                try:
+                    return int(um[key])
+                except (TypeError, ValueError):
+                    pass
+        try:
+            pt = int(um.get("promptTokenCount") or 0)
+            ct = int(um.get("candidatesTokenCount") or 0)
+            return pt + ct
+        except (TypeError, ValueError):
+            pass
+    usage = raw.get("usage")
+    if isinstance(usage, dict) and usage.get("total_tokens") is not None:
+        try:
+            return int(usage["total_tokens"])
+        except (TypeError, ValueError):
+            pass
+    return 0
 
 
 def remote_guard_is_active(guard: dict[str, Any]) -> bool:

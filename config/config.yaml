@@ -1,6 +1,6 @@
-# LLM backend: ollama (local) or gemini (Google AI API key).
+# LLM backend: ollama (local), gemini (Google AI API key), or openai (OpenAI API key).
 llm:
-  provider: gemini
+  provider: openai
   # Optional shared HTTP timeouts (seconds); provider blocks can override (see ollama / gemini).
   # timeout_chat_s: 300
   # timeout_generate_s: 600
@@ -23,6 +23,15 @@ gemini:
   vision_model: gemini-2.5-pro
   timeout_generate_s: 600
   # Optional: merge/override llm.remote_guard for Gemini-only stricter caps, e.g. max_generate_requests_per_run: 120
+
+# OpenAI. Set llm.provider: openai and OPENAI_API_KEY (or openai.api_key_env).
+openai:
+  api_key_env: OPENAI_API_KEY
+  reasoning_model: gpt-4.1-mini
+  vision_model: gpt-4.1
+  timeout_generate_s: 600
+  # base_url: https://api.openai.com/v1
+  # remote_guard: { ... }
 
 ollama:
   base_url: "http://localhost:11434"
