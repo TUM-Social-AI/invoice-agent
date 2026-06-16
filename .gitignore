@@ -33,5 +33,9 @@ logs/
 # Local learnings/runtime files
 learnings/*.bak
 
-# Secrets (e.g. GOOGLE_API_KEY for Gemini)
+# Secrets (e.g. GOOGLE_API_KEY for Gemini, Google Drive OAuth client/token files)
 .env
+.secrets/
+client_secret*.json
+google-drive-oauth*.json
+google-drive-token*.json

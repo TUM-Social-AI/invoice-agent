@@ -42,6 +42,17 @@ from src.sources.local import (
     legacy_local_output_dir,
     materialize_local_input,
 )
+from src.sources.google_drive import (
+    GoogleDriveSourceError,
+    build_google_drive_service,
+    cleanup_materialized_google_drive_document,
+    discover_google_drive_documents,
+    google_drive_cleanup_enabled,
+    google_drive_output_dir,
+    materialize_google_drive_document,
+    resolve_google_drive_credentials,
+    resolve_google_drive_folder_id,
+)
 from src.sources.models import RunIdentity, SourceProvenance
 from src.tools.tools import reset_learnings
 
@@ -350,7 +361,15 @@ def _print_batch_summary(
 
 def main():
     parser = argparse.ArgumentParser(description="Invoice Compliance Agent")
-    parser.add_argument("--pdf", default="invoices/", help="Path to PDF file or folder of PDFs (default: invoices/)")
+    parser.add_argument("--pdf", default=None, help="Path to PDF file or folder of PDFs (default: invoices/)")
+    parser.add_argument("--google-drive-folder-id", default=None, help="Google Drive folder ID to process PDFs from")
+    parser.add_argument("--drive-auth", action="store_true", help="Authenticate Google Drive OAuth and save token")
+    parser.add_argument(
+        "--drive-oauth-client-secret",
+        default=None,
+        metavar="PATH",
+        help="Path to Google Drive OAuth client JSON (default: config/env)",
+    )
     parser.add_argument("--type", help="Invoice type ID (e.g. EU_VAT, DE_INVOICE)")
     parser.add_argument("--output", default="output", help="Output directory (default: output/)")
     parser.add_argument("--config", default="config/config.yaml", help="Config file path")
@@ -374,6 +393,9 @@ def main():
     )
     args = parser.parse_args()
     _load_dotenv_files()
+
+    if args.pdf and args.google_drive_folder_id:
+        parser.error("--pdf and --google-drive-folder-id cannot be used together")
 
     # --reset-learnings handling (runs before anything else, no agent needed)
     if args.reset_learnings is not None:
@@ -414,6 +436,26 @@ def main():
 
     app_config = load_app_config(args.config)
     apply_configured_log_level(app_config)
+
+    if args.drive_auth:
+        try:
+            creds = resolve_google_drive_credentials(
+                app_config,
+                oauth_client_secret_path=args.drive_oauth_client_secret,
+                force_interactive=True,
+            )
+        except GoogleDriveSourceError as e:
+            print(str(e))
+            sys.exit(1)
+        drive_cfg = ((app_config or {}).get("sources") or {}).get("google_drive") or {}
+        token_path = drive_cfg.get("token_path", ".secrets/google-drive-token.json")
+        granted = sorted(getattr(creds, "scopes", None) or drive_cfg.get("scopes", []) or [])
+        print("Google Drive OAuth token saved.")
+        print(f"  Token : {token_path}")
+        if granted:
+            print(f"  Scopes: {', '.join(granted)}")
+        return
+
     store = load_config(app_config.get("config_dir", "config/csv"))
 
     if args.list_types:
@@ -430,16 +472,99 @@ def main():
         print(f"Available: {', '.join(store.invoice_types.keys())}")
         sys.exit(1)
 
+    drive_folder_id = ""
+    if not args.pdf:
+        try:
+            drive_folder_id = resolve_google_drive_folder_id(app_config, override=args.google_drive_folder_id)
+        except GoogleDriveSourceError as e:
+            if args.google_drive_folder_id:
+                print(str(e))
+                sys.exit(1)
+            drive_folder_id = ""
+
+    using_google_drive = bool(drive_folder_id)
+    drive_refs = []
+    drive_service = None
+    if using_google_drive:
+        try:
+            drive_creds = resolve_google_drive_credentials(
+                app_config,
+                oauth_client_secret_path=args.drive_oauth_client_secret,
+            )
+            drive_service = build_google_drive_service(drive_creds, app_config)
+            drive_refs = discover_google_drive_documents(
+                drive_folder_id,
+                app_config,
+                service=drive_service,
+            )
+        except GoogleDriveSourceError as e:
+            print(str(e))
+            sys.exit(1)
+        if not drive_refs:
+            print(f"No PDF files found in Google Drive folder: {drive_folder_id}")
+            return
+        materialized_docs = []
+    else:
+        pdf_input = args.pdf or "invoices/"
+        try:
+            materialized_docs = materialize_local_input(pdf_input)
+        except SourceError as e:
+            print(str(e))
+            sys.exit(1)
+
     agent = InvoiceAgent(config=app_config, store=store)
 
-    try:
-        materialized_docs = materialize_local_input(args.pdf)
-    except SourceError as e:
-        print(str(e))
-        sys.exit(1)
-
-    if is_folder_batch(materialized_docs):
-        logger.info(f"Batch mode: {len(materialized_docs)} PDFs found in {args.pdf}")
+    if using_google_drive:
+        logger.info(f"Batch mode: {len(drive_refs)} PDFs found in Google Drive folder {drive_folder_id}")
+        print(f"Google Drive: found {len(drive_refs)} PDF(s) in folder {drive_folder_id}", flush=True)
+        failed_pdfs = []
+        batch_results: list[tuple[str, str, dict | None]] = []
+        batch_field_results: list[dict] = []
+        for idx, ref in enumerate(drive_refs, start=1):
+            doc = None
+            try:
+                print(f"Google Drive: processing {idx}/{len(drive_refs)} — {ref.display_name}", flush=True)
+                doc = materialize_google_drive_document(ref, app_config, service=drive_service)
+                pdf = Path(doc.local_pdf_path)
+                out_dir = google_drive_output_dir(doc, args.output)
+                state, score, field_results = process_invoice(
+                    agent,
+                    doc.local_pdf_path,
+                    str(out_dir),
+                    invoice_type_id=args.type or "",
+                    learn=args.learn,
+                    source_provenance=doc.provenance,
+                    run_identity=doc.run_identity,
+                )
+                batch_results.append((ref.display_name, state.invoice_type_id or "", score))
+                if field_results:
+                    batch_field_results.append(field_results)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to process {ref.display_name}: {e}", exc_info=True)
+                failed_pdfs.append((ref.display_name, str(e)))
+                batch_results.append((ref.display_name, "", None))
+            finally:
+                if doc is not None and google_drive_cleanup_enabled(app_config):
+                    cleanup_materialized_google_drive_document(doc)
+        if failed_pdfs:
+            print(f"\n{'='*60}")
+            print(f"  Batch complete — {len(failed_pdfs)} PDF(s) failed:")
+            for name, err in failed_pdfs:
+                print(f"    ✗ {name}: {err}")
+            print(f"{'='*60}\n")
+        if batch_results:
+            _print_batch_summary(
+                batch_results,
+                field_results_list=batch_field_results or None,
+                csv_path=args.batch_summary_csv,
+            )
+    elif is_folder_batch(materialized_docs):
+        batch_label = (
+            args.pdf or "invoices/"
+        )
+        logger.info(f"Batch mode: {len(materialized_docs)} PDFs found in {batch_label}")
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []

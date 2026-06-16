@@ -31,14 +31,14 @@ ollama:
   # qwen2.5vl:32b  → ~24 GB RAM  | strong invoice/OCR accuracy, fits with reasoning model  ← RECOMMENDED
   # qwen2.5vl:72b  → ~57 GB RAM  | best accuracy, run alone or with a tiny reasoning model
   # qwen2.5vl:7b   → ~6 GB RAM   | current default, weakest on dense tables
-  vision_model: "qwen2.5vl:32b"         # ollama pull qwen2.5vl:32b
+  vision_model: "qwen2.5vl:7b" # ollama pull qwen2.5vl:7b
 
   # Reasoning model — used only for the agentic loop (tool selection, JSON routing).
   # Speed and JSON reliability matter more than raw intelligence here.
   # qwen3:1.7b     → ~2 GB RAM   | #1 tool-calling accuracy in class (score 0.960)  ← RECOMMENDED
   # qwen3:4b       → ~2.5 GB RAM | slightly higher accuracy ceiling, more headroom
   # qwen2.5:7b     → ~5 GB RAM   | current default, older generation
-  reasoning_model: "qwen3:1.7b"         # ollama pull qwen3:1.7b
+  reasoning_model: "qwen3:1.7b" # ollama pull qwen3:1.7b
 
   # Total RAM with both loaded: ~26 GB (fits easily in 96 GB)
   #
@@ -57,10 +57,10 @@ learnings_path: "learnings/learnings.md"
 agent:
   max_turns: 30
   max_field_retries: 5
-  confidence_threshold: 0.65      # below this → blocking human-review flag
-  batch_review_threshold: 0.85    # between confidence_threshold and this → non-blocking batch review
-  planning_enabled: true          # generate an execution plan before the main loop
-  fallback_reasoning_model: null  # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
+  confidence_threshold: 0.65 # below this → blocking human-review flag
+  batch_review_threshold: 0.85 # between confidence_threshold and this → non-blocking batch review
+  planning_enabled: true # generate an execution plan before the main loop
+  fallback_reasoning_model: null # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
   # Processing orchestration:
   # - "loop":     primary agentic mode (LLM chooses next tool call)
   # - "pipeline": deterministic debug fallback
@@ -155,9 +155,9 @@ agent:
   page_dpi: 200
   planning_timeout_s: 180
   reflection_timeout_s: 120
-  max_consecutive_failures: 3    # hard-stop a tool after this many back-to-back failures
-  max_same_action_warn: 2        # warn after this many identical consecutive tool calls
-  max_same_action_stop: 5        # hard-stop the loop after this many identical calls
+  max_consecutive_failures: 3 # hard-stop a tool after this many back-to-back failures
+  max_same_action_warn: 2 # warn after this many identical consecutive tool calls
+  max_same_action_stop: 5 # hard-stop the loop after this many identical calls
 
 ocr:
   # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
@@ -167,7 +167,24 @@ ocr:
 
 output:
   base_dir: "output"
-  include_page_crops: true               # save region crops for debugging
+  include_page_crops: true # save region crops for debugging
+
+sources:
+  google_drive:
+    auth_mode: oauth
+    # Set one of these to make Drive ingestion the default source when --pdf is omitted.
+    folder_url: "https://drive.google.com/drive/folders/1dd3Rlq_zMF9NG0j9zQTTfiiocQhQ5QVO?usp=drive_link"
+    # folder_id: ""
+    scopes:
+      # Use drive now so the same consent can support future result uploads/moves.
+      - https://www.googleapis.com/auth/drive
+    oauth_client_secret_path: ".secrets/google-drive-oauth-client.json"
+    oauth_client_secret_path_env: GOOGLE_DRIVE_OAUTH_CLIENT_SECRET
+    token_path: ".secrets/google-drive-token.json"
+    materialized_root: "output/materialized"
+    cleanup_downloads: true
+    include_shared_drives: true
+    page_size: 100
 
 logging:
-  level: "INFO"                          # DEBUG for verbose tool traces
+  level: "INFO" # DEBUG for verbose tool traces
