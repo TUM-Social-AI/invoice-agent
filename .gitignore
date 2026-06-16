@@ -19,7 +19,7 @@ venv/
 env/
 
 # Local runtime data
-output/
+/output/
 /*.pdf
 invoices/*.pdf
 invoices/*_truth.json
@@ -27,7 +27,7 @@ invoices/*.jpg
 invoices/*.jpeg
 invoices/*.png
 tmp/
-logs/
+/logs/
 .cursor/debug-*.log
 
 # Local learnings/runtime files
@@ -35,3 +35,4 @@ learnings/*.bak
 
 # Secrets (e.g. GOOGLE_API_KEY for Gemini)
 .env
+/.secrets/

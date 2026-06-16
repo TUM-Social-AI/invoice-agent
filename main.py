@@ -29,6 +29,7 @@ from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
 from src.agent.state import rule_verdict_summary
 from src.output.writer import write_results
+from src.output.presenter import NullPresenter, RunPresenter
 from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
 from src.learning.evaluator import (
     evaluate,
@@ -84,15 +85,18 @@ _install_url_query_key_redaction()
 logger = logging.getLogger("main")
 
 
-def apply_configured_log_level(app_config: dict) -> None:
+def apply_configured_log_level(app_config: dict, *, presentation: bool = False) -> None:
     """
     Make logging level configurable via config/config.yaml.
 
     main.py initializes logging at import time to keep early prints consistent,
     but we override the level once we have loaded the YAML config.
     """
-    lvl_raw = (app_config.get("logging", {}) or {}).get("level", "INFO")
-    lvl = _LOG_LEVELS.get(str(lvl_raw).strip().upper(), logging.INFO)
+    if presentation:
+        lvl = logging.WARNING
+    else:
+        lvl_raw = (app_config.get("logging", {}) or {}).get("level", "INFO")
+        lvl = _LOG_LEVELS.get(str(lvl_raw).strip().upper(), logging.INFO)
 
     root = logging.getLogger()
     root.setLevel(lvl)
@@ -102,6 +106,12 @@ def apply_configured_log_level(app_config: dict) -> None:
             h.setLevel(lvl)
         except Exception:
             pass
+
+
+def presentation_enabled(app_config: dict, cli_flag: bool) -> bool:
+    if cli_flag:
+        return True
+    return bool((app_config.get("logging", {}) or {}).get("presentation", False))
 
 
 def _load_dotenv_files() -> None:
@@ -131,25 +141,27 @@ def process_invoice(
     )
     paths = write_results(state, output_dir)
 
-    print(f"\n{'='*60}")
-    print(f"  {Path(pdf_path).name}")
-    print(f"  Status   : {state.status.value.upper()}")
-    print(f"  Turns    : {state.turn}")
-    print(f"  Fields   : {len(state.extracted_fields)} extracted")
-    _rv = rule_verdict_summary(state.rule_results)
-    print(
-        f"  Rules    : {len(state.passed_rules)} passed | "
-        f"blocking errors: {len(_rv['error_failed_rule_ids'])} | "
-        f"warnings: {len(_rv['warning_failed_rule_ids'])}"
-    )
-    if _rv["error_failed_rule_ids"]:
-        print(f"  Errors   : {', '.join(_rv['error_failed_rule_ids'])}")
-    if _rv["warning_failed_rule_ids"]:
-        print(f"  Warnings : {', '.join(_rv['warning_failed_rule_ids'])}")
-    flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
-    if flagged:
-        print(f"  Review   : {', '.join(flagged)}")
-    print(f"  Output   : {paths['fields_csv']}")
+    presenter = getattr(agent, "presenter", NullPresenter())
+    if not presenter.active:
+        print(f"\n{'='*60}")
+        print(f"  {Path(pdf_path).name}")
+        print(f"  Status   : {state.status.value.upper()}")
+        print(f"  Turns    : {state.turn}")
+        print(f"  Fields   : {len(state.extracted_fields)} extracted")
+        _rv = rule_verdict_summary(state.rule_results)
+        print(
+            f"  Rules    : {len(state.passed_rules)} passed | "
+            f"blocking errors: {len(_rv['error_failed_rule_ids'])} | "
+            f"warnings: {len(_rv['warning_failed_rule_ids'])}"
+        )
+        if _rv["error_failed_rule_ids"]:
+            print(f"  Errors   : {', '.join(_rv['error_failed_rule_ids'])}")
+        if _rv["warning_failed_rule_ids"]:
+            print(f"  Warnings : {', '.join(_rv['warning_failed_rule_ids'])}")
+        flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
+        if flagged:
+            print(f"  Review   : {', '.join(flagged)}")
+        print(f"  Output   : {paths['fields_csv']}")
 
     cfg = getattr(agent, "config", None) or {}
     agent_block = cfg.get("agent") or {}
@@ -161,6 +173,9 @@ def process_invoice(
     )
     _last_score: dict | None = None
     _last_field_results: dict | None = None
+    learn_ran = False
+    no_ground_truth = False
+    ground_truth_csv_only = False
     if truth is not None:
         diff = evaluate(state, truth, store=agent.store, date_parse=date_parse)
         _last_score = diff["score"]
@@ -168,44 +183,63 @@ def process_invoice(
         diff_text = format_diff_for_agent(diff)
         s = diff["score"]
         ft = s.get("fields_total") or 0
-        if ft:
-            print(
-                f"  Ground truth: {ft} field(s) compared | "
-                f"exact {s.get('fields_exact', 0)} · partial {s.get('fields_partial', 0)} · "
-                f"wrong {s.get('fields_wrong', 0)} "
-                f"(missing {s.get('fields_not_extracted', 0)} · mismatch {s.get('fields_wrong_value', 0)})"
-            )
-            if s.get("field_accuracy") is not None:
-                exa = s.get("exact_accuracy")
+        if not presenter.active:
+            if ft:
                 print(
-                    f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
-                    f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
+                    f"  Ground truth: {ft} field(s) compared | "
+                    f"exact {s.get('fields_exact', 0)} · partial {s.get('fields_partial', 0)} · "
+                    f"wrong {s.get('fields_wrong', 0)} "
+                    f"(missing {s.get('fields_not_extracted', 0)} · mismatch {s.get('fields_wrong_value', 0)})"
                 )
-        else:
-            print("  Ground truth: no overlapping fields to score")
-        if s.get("rule_accuracy") is not None:
-            rt = s.get("rules_total") or 0
-            print(
-                f"                 compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
-                f"({s['rule_accuracy']:.0%})"
-            )
+                if s.get("field_accuracy") is not None:
+                    exa = s.get("exact_accuracy")
+                    print(
+                        f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
+                        f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
+                    )
+            else:
+                print("  Ground truth: no overlapping fields to score")
+            if s.get("rule_accuracy") is not None:
+                rt = s.get("rules_total") or 0
+                print(
+                    f"                 compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
+                    f"({s['rule_accuracy']:.0%})"
+                )
         rt = parse_agent_runtime_settings(cfg)
         max_c = int(rt.get("log_line_max_chars", 120))
         for line in diff_text.splitlines():
             logger.info(clip_for_log(line, max_c))
         if learn:
-            print(f"  Learn    : running reflection loop...")
+            if not presenter.active:
+                print(f"  Learn    : running reflection loop...")
             agent.run_reflection(state, diff_text)
-            print(f"             Learnings written to learnings.md")
+            learn_ran = True
+            if not presenter.active:
+                print(f"             Learnings written to learnings.md")
     else:
         if learn:
             stem = Path(pdf_path).stem
-            print(f"  Learn    : no ground truth — skipping reflection")
-            print(f"             (add {stem}_truth.json or a matching CSV row)")
+            no_ground_truth = True
+            if not presenter.active:
+                print(f"  Learn    : no ground truth — skipping reflection")
+                print(f"             (add {stem}_truth.json or a matching CSV row)")
         elif ground_truth_csv_configured(cfg):
-            print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
+            ground_truth_csv_only = True
+            if not presenter.active:
+                print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
 
-    print(f"{'='*60}\n")
+    if presenter.active:
+        presenter.run_complete(
+            state,
+            paths=paths,
+            ground_truth_score=_last_score,
+            learn=learn,
+            learn_ran=learn_ran,
+            no_ground_truth=no_ground_truth,
+            ground_truth_csv_only=ground_truth_csv_only,
+        )
+    else:
+        print(f"{'='*60}\n")
     return state, _last_score, _last_field_results
 
 
@@ -359,6 +393,11 @@ def main():
         "--batch-summary-csv", default=None, metavar="PATH",
         help="Write batch accuracy summary to CSV file (batch mode only)",
     )
+    parser.add_argument(
+        "--presentation",
+        action="store_true",
+        help="Live demo mode: Rich-formatted phase-aware output (suppresses INFO logs)",
+    )
     args = parser.parse_args()
     _load_dotenv_files()
 
@@ -369,7 +408,10 @@ def main():
         category = reset_args[1] if len(reset_args) > 1 else ""
 
         app_config_early = load_app_config(args.config)
-        apply_configured_log_level(app_config_early)
+        apply_configured_log_level(
+            app_config_early,
+            presentation=presentation_enabled(app_config_early, args.presentation),
+        )
         learnings_path = app_config_early.get("learnings_path", "learnings/learnings.md")
 
         # Describe what we're about to delete
@@ -400,8 +442,11 @@ def main():
         sys.exit(0)
 
     app_config = load_app_config(args.config)
-    apply_configured_log_level(app_config)
+    pres_on = presentation_enabled(app_config, args.presentation)
+    apply_configured_log_level(app_config, presentation=pres_on)
     store = load_config(app_config.get("config_dir", "config/csv"))
+
+    presenter = RunPresenter() if pres_on else NullPresenter()
 
     if args.list_types:
         print("\nConfigured invoice types:")
@@ -417,7 +462,7 @@ def main():
         print(f"Available: {', '.join(store.invoice_types.keys())}")
         sys.exit(1)
 
-    agent = InvoiceAgent(config=app_config, store=store)
+    agent = InvoiceAgent(config=app_config, store=store, presenter=presenter)
 
     pdf_path = Path(args.pdf)
     if pdf_path.is_dir():

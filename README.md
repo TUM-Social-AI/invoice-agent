@@ -265,9 +265,23 @@ python main.py --pdf invoices/my_invoice.pdf --learn
 
 # List all configured invoice types
 python main.py --list-types
+
+# Live demo — Rich phase-aware output (suppresses INFO logs)
+python main.py --pdf invoices/my_invoice.pdf --presentation
 ```
 
 Press `Ctrl+C` at any time to interrupt gracefully — partial results and the per-run log are saved.
+
+### Presentation mode
+
+For live demos or screen recordings, use `--presentation` (or set `logging.presentation: true` in `config/config.yaml`). This:
+
+- Streams **phase banners** (SCAN → EXTRACT → VALIDATE) and human-readable tool labels to stdout
+- Shows agent **reasoning** and per-step **elapsed time**
+- Renders a **Rich summary panel** at the end instead of ASCII `===` boxes
+- Sets console logging to **WARNING** so developer traces (`src.agent.*`, `src.tools.*`) stay quiet
+
+The JSONL run log under `output/<invoice>/logs/` is unchanged — presentation mode only affects live terminal output.
 
 ---
 

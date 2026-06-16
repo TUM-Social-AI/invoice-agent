@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from src.agent.agent_settings import clip_for_log
 from src.agent.state import AgentState, AgentStatus
+from src.output.presenter import PresenterProtocol, NullPresenter
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,27 @@ def _dispatch(
     reasoning: str,
     log_handle: Any,
     log_line_max_chars: int,
+    *,
+    last_phase: list[str | None],
+    log_turn_start: Callable[..., None] | None = None,
+    log_tool_result_fn: Callable[..., None] | None = None,
+    presenter: PresenterProtocol | None = None,
 ) -> Any:
     turn_start = _time.monotonic()
+    if log_turn_start is not None:
+        log_turn_start(state, last_phase, tool_name, reasoning, params)
+    elif presenter and presenter.active:
+        from src.agent.phases import current_phase
+
+        phase = current_phase(state)
+        if phase != last_phase[0]:
+            presenter.phase_change(phase)
+            last_phase[0] = phase
+        presenter.tool_start(state.turn, tool_name, reasoning, params)
+    else:
+        logger.info(
+            f"Pipeline | {tool_name} | {clip_for_log(reasoning, log_line_max_chars)}"
+        )
     result = tools[tool_name](state, **params)
     elapsed_ms = int((_time.monotonic() - turn_start) * 1000)
     state.record_action(tool_name, params, result, reasoning)
@@ -57,9 +77,12 @@ def _dispatch(
         )
     except Exception:
         pass
-    logger.info(
-        f"Pipeline | {tool_name} | {clip_for_log(reasoning, log_line_max_chars)}"
-    )
+    if log_tool_result_fn is not None:
+        log_tool_result_fn(tool_name, result, elapsed_ms)
+    else:
+        from src.agent.loop_utils import log_tool_result
+
+        log_tool_result(tool_name, result, log_line_max_chars)
     return result
 
 
@@ -71,18 +94,32 @@ def run_fixed_pipeline(
     log_line_max_chars: int,
     planning_enabled: bool,
     generate_plan_fn: Callable[[AgentState], list] | None,
+    presenter: PresenterProtocol | None = None,
+    log_turn_start: Callable[..., None] | None = None,
+    log_tool_result_fn: Callable[..., None] | None = None,
 ) -> None:
     """
     Mutates `state` until finish, error, or unrecoverable tool failure.
     Caller opens log_handle and sets state.run_log_path.
     """
-    from src.agent.loop_utils import log_tool_result
+    last_phase: list[str | None] = [None]
+    pres = presenter or NullPresenter()
 
     def _run(name: str, params: dict | None = None, reason: str = "") -> Any:
         p = params or {}
-        res = _dispatch(state, tools, name, p, reason or f"pipeline:{name}", log_handle, log_line_max_chars)
-        log_tool_result(name, res, log_line_max_chars)
-        return res
+        return _dispatch(
+            state,
+            tools,
+            name,
+            p,
+            reason or f"pipeline:{name}",
+            log_handle,
+            log_line_max_chars,
+            last_phase=last_phase,
+            log_turn_start=log_turn_start,
+            log_tool_result_fn=log_tool_result_fn,
+            presenter=pres,
+        )
 
     _run("inspect_file", {}, "pipeline: file metadata")
     if state.status != AgentStatus.RUNNING:

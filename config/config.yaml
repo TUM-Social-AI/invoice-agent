@@ -1,6 +1,6 @@
 # LLM backend: ollama (local) or gemini (Google AI API key).
 llm:
-  provider: gemini
+  provider: ollama
   # Optional shared HTTP timeouts (seconds); provider blocks can override (see ollama / gemini).
   # timeout_chat_s: 300
   # timeout_generate_s: 600
@@ -171,3 +171,4 @@ output:
 
 logging:
   level: "INFO"                          # DEBUG for verbose tool traces
+  presentation: true                    # Rich live demo output (or use --presentation)

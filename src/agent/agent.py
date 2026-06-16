@@ -21,6 +21,7 @@ import json
 import logging
 import time as _time
 from pathlib import Path
+from typing import Any
 
 from src.agent.state import AgentState, AgentStatus
 from src.config.loader import ConfigStore
@@ -37,7 +38,14 @@ from src.agent.fallbacks import (
 from src.agent.registry import build_tool_registry
 from src.agent.turn import agent_turn
 from src.agent.reflection import reflect
-from src.agent.loop_utils import open_run_log as _open_run_log, append_log_entry as _append_log_entry, timeout_cfg as _timeout_cfg, log_tool_result
+from src.agent.loop_utils import (
+    open_run_log as _open_run_log,
+    append_log_entry as _append_log_entry,
+    timeout_cfg as _timeout_cfg,
+    log_tool_result,
+)
+from src.agent.phases import current_phase
+from src.output.presenter import NullPresenter, PresenterProtocol
 from src.agent.tool_policy import merge_exposed_tool_names
 from src.agent.loop_guards import DuplicateActionGuard, ConsecutiveFailureGuard
 from src.agent.param_resolver import resolve_sig_params
@@ -68,7 +76,12 @@ def _phase_tool_names(state: AgentState, all_tools: list[str]) -> list[str]:
 
 
 class InvoiceAgent:
-    def __init__(self, config: dict, store: ConfigStore):
+    def __init__(
+        self,
+        config: dict,
+        store: ConfigStore,
+        presenter: PresenterProtocol | None = None,
+    ):
         self.config = config
         self.store = store
         cfg = _agent_cfg(config)
@@ -111,6 +124,47 @@ class InvoiceAgent:
             tools_extra_deny=tools_extra_deny,
             registry_keys=set(self.tools.keys()),
         )
+        self.presenter: PresenterProtocol = presenter or NullPresenter()
+
+    def _effective_log_line_max_chars(self) -> int:
+        return 0 if self.presenter.active else self.log_line_max_chars
+
+    def _on_phase_maybe_changed(self, state: AgentState, last_phase: list[str | None]) -> None:
+        phase = current_phase(state)
+        if phase != last_phase[0]:
+            self.presenter.phase_change(phase)
+            last_phase[0] = phase
+
+    def _log_turn_start(
+        self,
+        state: AgentState,
+        last_phase: list[str | None],
+        tool_name: str,
+        reasoning: str,
+        params: dict,
+    ) -> None:
+        self._on_phase_maybe_changed(state, last_phase)
+        if self.presenter.active:
+            self.presenter.tool_start(state.turn, tool_name, reasoning, params)
+            return
+        logger.info(f"Turn {state.turn} | tool={tool_name}")
+        max_c = self._effective_log_line_max_chars()
+        if max_c > 0:
+            logger.info(f"  reasoning: {reasoning[:max_c]}")
+        else:
+            logger.info(f"  reasoning: {reasoning}")
+        if params:
+            if max_c > 0:
+                logger.info(f"  params:    {str(params)[:max_c]}")
+            else:
+                logger.info(f"  params:    {str(params)}")
+
+    def _log_tool_result(self, tool_name: str, result: Any, elapsed_ms: int) -> None:
+        max_c = self._effective_log_line_max_chars()
+        if self.presenter.active:
+            self.presenter.tool_result(tool_name, result, elapsed_ms)
+        else:
+            log_tool_result(tool_name, result, max_c)
 
     def run_reflection(self, state: AgentState, diff_text: str):
         """Run the reflection loop against a finished state + ground truth diff."""
@@ -218,6 +272,7 @@ class InvoiceAgent:
         dup_guard = DuplicateActionGuard(self.max_same_action_warn, self.max_same_action_stop)
         fail_guard = ConsecutiveFailureGuard(self.max_consecutive_failures)
         null_extract_streak_by_key: dict[str, int] = {}
+        last_phase: list[str | None] = [None]
 
         try:
             while state.status == AgentStatus.RUNNING and state.turn < self.max_turns:
@@ -269,16 +324,7 @@ class InvoiceAgent:
                 params = action.get("params", {})
                 reasoning = action.get("reasoning", "")
 
-                logger.info(f"Turn {state.turn} | tool={tool_name}")
-                if self.log_line_max_chars > 0:
-                    logger.info(f"  reasoning: {reasoning[:self.log_line_max_chars]}")
-                else:
-                    logger.info(f"  reasoning: {reasoning}")
-                if params:
-                    if self.log_line_max_chars > 0:
-                        logger.info(f"  params:    {str(params)[:self.log_line_max_chars]}")
-                    else:
-                        logger.info(f"  params:    {str(params)}")
+                self._log_turn_start(state, last_phase, tool_name, reasoning, params)
 
                 if tool_name not in self.tools:
                     logger.warning(
@@ -317,7 +363,7 @@ class InvoiceAgent:
                     result = {"success": False, "error": str(e)}
 
                 elapsed_ms = int((_time.monotonic() - turn_start) * 1000)
-                log_tool_result(tool_name, result, self.log_line_max_chars)
+                self._log_tool_result(tool_name, result, elapsed_ms)
                 state.record_action(tool_name, params, result, reasoning)
 
                 _append_log_entry(log_handle, {
@@ -482,6 +528,7 @@ class InvoiceAgent:
             f"Agent starting | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
             f"| log={log_path}"
         )
+        self.presenter.run_start(pdf_path)
 
         if hasattr(self.provider, "reset_meters"):
             self.provider.reset_meters()  # type: ignore[attr-defined]
@@ -495,9 +542,12 @@ class InvoiceAgent:
                     state=state,
                     tools=self.tools,
                     log_handle=log_handle,
-                    log_line_max_chars=self.log_line_max_chars,
+                    log_line_max_chars=self._effective_log_line_max_chars(),
                     planning_enabled=self.planning_enabled,
                     generate_plan_fn=self._generate_plan if self.planning_enabled else None,
+                    presenter=self.presenter,
+                    log_turn_start=self._log_turn_start if self.presenter.active else None,
+                    log_tool_result_fn=self._log_tool_result if self.presenter.active else None,
                 )
             except KeyboardInterrupt:
                 raise
