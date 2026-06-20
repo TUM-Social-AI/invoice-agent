@@ -27,10 +27,11 @@ gemini:
 # OpenAI. Set llm.provider: openai and OPENAI_API_KEY (or openai.api_key_env).
 openai:
   api_key_env: OPENAI_API_KEY
-  reasoning_model: gpt-4.1-mini
-  vision_model: gpt-4.1
+  reasoning_model: o3-mini
+  vision_model: gpt-4.1-mini
   timeout_generate_s: 600
   # base_url: https://api.openai.com/v1
+  # Rate-limit retries (429) are handled automatically with exponential backoff (up to 5 attempts, max 60s wait).
   # remote_guard: { ... }
 
 ollama:
@@ -150,6 +151,13 @@ agent:
   # Optional phase 2 hooks (advanced recovery / more granular extraction).
   # Keep OFF for patterned profile.
   micro_tools_phase2: false
+
+  # Page inventory batching: how many page images to send in one vision call during inventory_pages.
+  #   1  — one call per page (safe for Ollama and small models)
+  #   0  — all pages in a single call (fewest requests, but risks TPM rate limits on large docs)
+  #   N  — at most N pages per call — good middle ground for OpenAI/Gemini (recommended: 5)
+  # Ollama should stay at 1 (local models have limited context and can't handle many images at once).
+  inventory_batch_size: 5
 
   # Batch auto-expansion: when true the agent silently adds un-attempted fields to every
   # extract_fields_vision call so they get a free ride in the same vision request.

@@ -561,14 +561,20 @@ def main():
 
     if using_google_drive:
         logger.info(f"Batch mode: {len(drive_refs)} PDFs found in Google Drive folder {drive_folder_id}")
-        print(f"Google Drive: found {len(drive_refs)} PDF(s) in folder {drive_folder_id}", flush=True)
+        if presenter.active:
+            presenter.batch_drive_start(len(drive_refs), drive_folder_id)
+        else:
+            print(f"Google Drive: found {len(drive_refs)} PDF(s) in folder {drive_folder_id}", flush=True)
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []
         for idx, ref in enumerate(drive_refs, start=1):
             doc = None
             try:
-                print(f"Google Drive: processing {idx}/{len(drive_refs)} — {ref.display_name}", flush=True)
+                if presenter.active:
+                    presenter.batch_drive_item(idx, len(drive_refs), ref.display_name)
+                else:
+                    print(f"Google Drive: processing {idx}/{len(drive_refs)} — {ref.display_name}", flush=True)
                 doc = materialize_google_drive_document(ref, app_config, service=drive_service)
                 pdf = Path(doc.local_pdf_path)
                 out_dir = google_drive_output_dir(doc, args.output)
@@ -599,7 +605,7 @@ def main():
             for name, err in failed_pdfs:
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
-        if batch_results:
+        if batch_results and any(s is not None for _, _, s in batch_results):
             _print_batch_summary(
                 batch_results,
                 field_results_list=batch_field_results or None,
@@ -641,7 +647,7 @@ def main():
             for name, err in failed_pdfs:
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
-        if batch_results:
+        if batch_results and any(s is not None for _, _, s in batch_results):
             _print_batch_summary(
                 batch_results,
                 field_results_list=batch_field_results or None,

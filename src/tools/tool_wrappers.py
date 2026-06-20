@@ -87,6 +87,8 @@ class ToolContext:
     store: ConfigStore
     provider: LLMProvider | None
     surya_models: Any
+    inventory_batch_size: int = 1
+    ocr_silent: bool = False
 
     # -- helpers ----------------------------------------------------------------
 
@@ -435,7 +437,7 @@ def make_extract(ctx: ToolContext):
         def _run_extract_on_image(img_path: str) -> dict:
             # ── OCR-guided extraction ─────────────────────────────────────────
             OCR_DIRECT_THRESHOLD = 0.80
-            ocr = _ocr_with_layout(img_path, surya_models=ctx.surya_models)
+            ocr = _ocr_with_layout(img_path, surya_models=ctx.surya_models, silent=ctx.ocr_silent)
             if not ocr.is_empty():
                 logger.debug(f"  OCR layout: {len(ocr.lines)} lines, {len(ocr.full_text)} chars")
 
@@ -707,6 +709,7 @@ def make_inventory(ctx: ToolContext):
             model=ctx.vision_model,
             provider=ctx.provider,
             timeout_s=ctx.timeouts["generate_timeout_s"],
+            batch_size=ctx.inventory_batch_size,
         )
     return _inventory
 

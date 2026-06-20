@@ -110,7 +110,12 @@ class InvoiceAgent:
         # Takes ~5-15s on first call; subsequent calls use cached weights.
         # If surya-ocr is not installed, this returns None and OCR is silently skipped.
         self.surya_models = load_surya_models()
-        self.tools = build_tool_registry(config, store, surya_models=self.surya_models, provider=self.provider)
+        self.tools = build_tool_registry(
+            config, store,
+            surya_models=self.surya_models,
+            provider=self.provider,
+            ocr_silent=bool(getattr(presenter, "active", False)),
+        )
 
         # LLM tool exposure (loop mode only). This filters both:
         # - the tool enum used by `agent_turn`

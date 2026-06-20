@@ -2,16 +2,43 @@
 
 from __future__ import annotations
 
+import logging
+import random
+import time
 from typing import Any
 
 try:
-    from openai import OpenAI  # type: ignore
+    from openai import OpenAI, RateLimitError  # type: ignore
 except ModuleNotFoundError:  # pragma: no cover
     OpenAI = None  # type: ignore
+    RateLimitError = Exception  # type: ignore
 
 from src.llm.base import LLMResult
 from src.llm.config_resolve import openai_api_key, openai_base_url
 from src.llm.response_format import clean_json_text, parse_json_result, to_openai_response_format
+
+logger = logging.getLogger(__name__)
+
+_RETRY_BASE_S = 2.0
+_RETRY_MAX_S = 60.0
+_RETRY_ATTEMPTS = 5
+
+# o-series models (o1, o3, o4, …) reject the temperature parameter.
+def _is_o_series(model: str) -> bool:
+    return bool(model) and model.split("-")[0].lower() in ("o1", "o3", "o4")
+
+
+def _call_with_backoff(fn, *args, **kwargs):
+    """Call fn(*args, **kwargs), retrying on RateLimitError with exponential + jitter backoff."""
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return fn(*args, **kwargs)
+        except RateLimitError as e:
+            if attempt == _RETRY_ATTEMPTS - 1:
+                raise
+            wait = min(_RETRY_BASE_S * (2 ** attempt) + random.uniform(0, 1), _RETRY_MAX_S)
+            logger.warning("OpenAI rate limit hit (attempt %d/%d) — retrying in %.1fs", attempt + 1, _RETRY_ATTEMPTS, wait)
+            time.sleep(wait)
 
 
 def _response_to_raw(response: Any) -> Any:
@@ -63,13 +90,14 @@ class OpenAIProvider:
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": messages,
-            "temperature": temperature,
             "timeout": float(timeout_s),
         }
+        if not _is_o_series(model):
+            kwargs["temperature"] = temperature
         rf = to_openai_response_format(response_format)
         if rf is not None:
             kwargs["response_format"] = rf
-        raw_response = self._client.chat.completions.create(**kwargs)
+        raw_response = _call_with_backoff(self._client.chat.completions.create, **kwargs)
         text = clean_json_text(_extract_message_content(raw_response))
         return LLMResult(
             content_text=text,
@@ -102,13 +130,14 @@ class OpenAIProvider:
         kwargs: dict[str, Any] = {
             "model": model,
             "messages": [{"role": "user", "content": content}],
-            "temperature": temperature,
             "timeout": float(timeout_s),
         }
+        if not _is_o_series(model):
+            kwargs["temperature"] = temperature
         rf = to_openai_response_format(response_format)
         if rf is not None:
             kwargs["response_format"] = rf
-        raw_response = self._client.chat.completions.create(**kwargs)
+        raw_response = _call_with_backoff(self._client.chat.completions.create, **kwargs)
         text = clean_json_text(_extract_message_content(raw_response))
         return LLMResult(
             content_text=text,

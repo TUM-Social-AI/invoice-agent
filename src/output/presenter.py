@@ -46,6 +46,10 @@ class PresenterProtocol(Protocol):
     @property
     def active(self) -> bool: ...
 
+    def batch_drive_start(self, total: int, folder_id: str) -> None: ...
+
+    def batch_drive_item(self, idx: int, total: int, name: str) -> None: ...
+
     def run_start(self, pdf_path: str, page_count: int | None = None) -> None: ...
 
     def phase_change(self, phase: str) -> None: ...
@@ -74,6 +78,12 @@ class NullPresenter:
 
     active = False
 
+    def batch_drive_start(self, total: int, folder_id: str) -> None:
+        pass
+
+    def batch_drive_item(self, idx: int, total: int, name: str) -> None:
+        pass
+
     def run_start(self, pdf_path: str, page_count: int | None = None) -> None:
         pass
 
@@ -100,6 +110,9 @@ class NullPresenter:
         ground_truth_csv_only: bool = False,
     ) -> None:
         pass
+
+
+_VALIDATE_TOOLS = {"check_compliance", "check_compliance_visual", "finish"}
 
 
 def _tool_label(tool: str, params: dict | None) -> str:
@@ -136,15 +149,28 @@ class RunPresenter:
         self._run_start_time: float | None = None
         self._page_count: int | None = None
 
+    def batch_drive_start(self, total: int, folder_id: str) -> None:
+        self._console.print()
+        self._console.print(
+            Panel(
+                f"[bold]Google Drive[/] · [cyan]{total}[/] PDF{'s' if total != 1 else ''} found\n"
+                f"{folder_id}",
+                title="Invoice Compliance Agent",
+                border_style="blue",
+            )
+        )
+        self._console.print()
+
+    def batch_drive_item(self, idx: int, total: int, name: str) -> None:
+        self._console.print(Rule(f"[bold blue]{idx}/{total}[/]  {name}", style="blue"))
+        self._console.print()
+
     def run_start(self, pdf_path: str, page_count: int | None = None) -> None:
         self._run_start_time = _time.monotonic()
         self._last_phase = None
         self._page_count = page_count
         name = Path(pdf_path).name
-        subtitle_parts = []
-        if page_count is not None:
-            subtitle_parts.append(f"{page_count} pages")
-        body = name if not subtitle_parts else f"{name}\n{' · '.join(subtitle_parts)}"
+        body = name if page_count is None else f"{name}\n[cyan]{page_count}[/] pages"
         self._console.print()
         self._console.print(
             Panel(body, title="Invoice Compliance Agent", border_style="blue")
@@ -157,21 +183,21 @@ class RunPresenter:
         self._last_phase = phase
         label = PHASE_LABELS.get(phase, phase)
         self._console.print()
-        self._console.print(
-            Rule(f"[bold blue]{phase}[/] · {label}", style="blue")
-        )
+        self._console.print(Rule(f"[bold blue]{phase}[/]  {label}", style="blue"))
         self._console.print()
 
     def tool_start(
         self, turn: int, tool: str, reasoning: str, params: dict | None = None
     ) -> None:
+        if tool in _VALIDATE_TOOLS and self._last_phase != "VALIDATE":
+            self.phase_change("VALIDATE")
         label = _tool_label(tool, params)
         self._console.print(f"  [bold]▸[/] {label}")
         if reasoning and reasoning.strip():
             reason = reasoning.strip()
             if self._log_line_max_chars > 0:
                 reason = reason[: self._log_line_max_chars]
-            self._console.print(f"    [dim italic]{reason}[/]")
+            self._console.print(f"    [italic]{reason}[/]")
 
     def tool_result(self, tool: str, result: Any, elapsed_ms: int) -> None:
         summary = summarize_tool_result(tool, result, self._log_line_max_chars)
@@ -179,25 +205,23 @@ class RunPresenter:
 
         if tool == "classify_document_type" and summary.success:
             self._console.print(
-                f"    [green]✓[/] Document type: [bold]{summary.primary}[/]  [dim]({elapsed})[/]"
+                f"    [green]✓[/] Document type: [bold]{summary.primary}[/]  [cyan]({elapsed})[/]"
             )
             return
 
         if tool == "finish":
-            self._console.print(f"    [dim]{summary.primary} ({elapsed})[/]")
+            self._console.print(f"    {summary.primary}  [cyan]({elapsed})[/]")
             return
 
         style = "green" if summary.success else "red"
         marker = "✓" if summary.success else "✗"
-        self._console.print(f"    [{style}]{marker}[/] {summary.primary}  [dim]({elapsed})[/]")
+        self._console.print(f"    [{style}]{marker}[/] {summary.primary}  [cyan]({elapsed})[/]")
 
         for line in summary.details:
             if line.startswith("ERROR:"):
                 self._console.print(f"      [red]{line}[/]")
             elif line.startswith("WARN:"):
                 self._console.print(f"      [yellow]{line}[/]")
-            elif line.startswith("p") and "  " in line:
-                self._console.print(f"      [dim]{line}[/]")
             else:
                 self._console.print(f"      {line}")
 
@@ -214,7 +238,7 @@ class RunPresenter:
     ) -> None:
         elapsed_s = ""
         if self._run_start_time is not None:
-            elapsed_s = f" · {_format_elapsed(int((_time.monotonic() - self._run_start_time) * 1000))}"
+            elapsed_s = f" · [cyan]{_format_elapsed(int((_time.monotonic() - self._run_start_time) * 1000))}[/]"
 
         _rv = rule_verdict_summary(state.rule_results)
         status = state.status.value.upper()
@@ -226,25 +250,31 @@ class RunPresenter:
             "INTERRUPTED": "yellow",
         }.get(status, "white")
 
+        n_fields = len(state.extracted_fields)
+        n_turns = state.turn
+        n_passed = len(state.passed_rules)
+        n_errors = len(_rv["error_failed_rule_ids"])
+        n_warnings = len(_rv["warning_failed_rule_ids"])
+
         lines = [
             f"[bold {status_style}]Status: {status}[/]",
             (
-                f"{len(state.extracted_fields)} fields extracted · "
-                f"{state.turn} turns{elapsed_s}"
+                f"[cyan]{n_fields}[/] fields extracted · "
+                f"[cyan]{n_turns}[/] turns{elapsed_s}"
             ),
             (
-                f"{len(state.passed_rules)} rules passed · "
-                f"{len(_rv['error_failed_rule_ids'])} blocking error(s) · "
-                f"{len(_rv['warning_failed_rule_ids'])} warning(s)"
+                f"[cyan]{n_passed}[/] rules passed · "
+                f"[{'red' if n_errors else 'white'}]{n_errors} blocking error(s)[/] · "
+                f"[{'yellow' if n_warnings else 'white'}]{n_warnings} warning(s)[/]"
             ),
         ]
         if _rv["error_failed_rule_ids"]:
-            lines.append(f"Errors: {', '.join(_rv['error_failed_rule_ids'])}")
+            lines.append(f"[red]Errors:[/] {', '.join(_rv['error_failed_rule_ids'])}")
         if _rv["warning_failed_rule_ids"]:
-            lines.append(f"Warnings: {', '.join(_rv['warning_failed_rule_ids'])}")
+            lines.append(f"[yellow]Warnings:[/] {', '.join(_rv['warning_failed_rule_ids'])}")
         flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
         if flagged:
-            lines.append(f"Review: {', '.join(flagged)}")
+            lines.append(f"[yellow]Review:[/] {', '.join(flagged)}")
         lines.append(f"Output: {paths.get('fields_csv', '')}")
 
         if ground_truth_score:
@@ -252,21 +282,23 @@ class RunPresenter:
             ft = s.get("fields_total") or 0
             if ft:
                 gt_line = (
-                    f"Ground truth: {ft} field(s) · exact {s.get('fields_exact', 0)} · "
-                    f"partial {s.get('fields_partial', 0)} · wrong {s.get('fields_wrong', 0)}"
+                    f"Ground truth: [cyan]{ft}[/] field(s) · "
+                    f"exact [cyan]{s.get('fields_exact', 0)}[/] · "
+                    f"partial [cyan]{s.get('fields_partial', 0)}[/] · "
+                    f"wrong [cyan]{s.get('fields_wrong', 0)}[/]"
                 )
                 if s.get("field_accuracy") is not None:
                     exa = s.get("exact_accuracy")
                     gt_line += (
-                        f" · lenient {s['field_accuracy']:.0%}"
-                        f" · strict {(exa if exa is not None else 0):.0%}"
+                        f" · lenient [cyan]{s['field_accuracy']:.0%}[/]"
+                        f" · strict [cyan]{(exa if exa is not None else 0):.0%}[/]"
                     )
                 lines.append(gt_line)
             if s.get("rule_accuracy") is not None:
                 rt = s.get("rules_total") or 0
                 lines.append(
-                    f"Compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
-                    f"({s['rule_accuracy']:.0%})"
+                    f"Compliance vs truth: [cyan]{s.get('rules_correct', 0)}/{rt}[/] "
+                    f"([cyan]{s['rule_accuracy']:.0%}[/])"
                 )
         elif no_ground_truth and learn:
             stem = Path(state.pdf_path).stem
