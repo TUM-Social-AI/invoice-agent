@@ -43,6 +43,8 @@ from src.agent.loop_guards import DuplicateActionGuard, ConsecutiveFailureGuard
 from src.agent.param_resolver import resolve_sig_params
 from src.tools.tools import load_ocr_engine
 from src.prompts.llm_prompts import PLANNING_SYSTEM_MESSAGE, build_planning_user_prompt
+from src.sources.models import RunIdentity, SourceProvenance
+from src.sources.run_identity import build_run_identity
 
 logger = logging.getLogger(__name__)
 
@@ -446,8 +448,30 @@ class InvoiceAgent:
                 })
             log_handle.close()
 
-    def run(self, pdf_path: str, output_dir: str, invoice_type_id: str = "") -> AgentState:
+    def run(
+        self,
+        pdf_path: str,
+        output_dir: str,
+        invoice_type_id: str = "",
+        *,
+        source_provenance: SourceProvenance | None = None,
+        run_identity: RunIdentity | None = None,
+    ) -> AgentState:
         _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
+        if source_provenance is None:
+            source_provenance = SourceProvenance.from_local_path_minimal(pdf_path)
+        if run_identity is None:
+            from src.sources.models import DocumentRef
+
+            ref = DocumentRef(
+                source_type=source_provenance.source_type,
+                display_name=source_provenance.display_name,
+                uri=source_provenance.source_uri,
+                source_id=source_provenance.source_id,
+                revision_id=source_provenance.revision_id,
+                metadata=source_provenance.metadata,
+            )
+            run_identity = build_run_identity(ref, source_provenance)
         state = AgentState(
             pdf_path=pdf_path,
             output_dir=output_dir,
@@ -455,6 +479,9 @@ class InvoiceAgent:
             confidence_threshold=self.confidence_threshold,
             batch_review_threshold=self.batch_review_threshold,
             page_render_dpi=_page_dpi,
+            run_id=run_identity.run_id,
+            source_provenance=source_provenance,
+            run_identity=run_identity,
         )
 
         # Learnings hydration: load prior insights into state BEFORE the agent
@@ -470,6 +497,18 @@ class InvoiceAgent:
         # Open per-run JSONL log before the loop — partial runs still get a log
         log_path, log_handle = _open_run_log(output_dir)
         state.run_log_path = log_path
+        _append_log_entry(log_handle, {
+            "turn": 0,
+            "timestamp": _time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "tool": "__run_start__",
+            "params": {},
+            "reasoning": "",
+            "result": {
+                "run_id": state.run_id,
+                "source_provenance": source_provenance.model_dump(mode="json"),
+            },
+            "elapsed_ms": 0,
+        })
 
         if invoice_type_id and not self.store.get_type(invoice_type_id):
             state.status = AgentStatus.ERROR
@@ -478,7 +517,7 @@ class InvoiceAgent:
             return state
 
         logger.info(
-            f"Agent starting | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
+            f"Agent starting | run_id={state.run_id} | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
             f"| log={log_path}"
         )
 

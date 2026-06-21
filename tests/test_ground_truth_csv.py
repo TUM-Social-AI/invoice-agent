@@ -1,4 +1,5 @@
 import csv
+from datetime import datetime, timezone
 from pathlib import Path
 
 from src.agent.state import AgentState, FieldResult
@@ -11,6 +12,7 @@ from src.learning.evaluator import (
     ground_truth_csv_configured,
     load_ground_truth,
 )
+from src.sources.models import SourceProvenance
 
 
 def test_ground_truth_match_key_multidot_without_pdf_suffix():
@@ -134,6 +136,162 @@ def test_load_ground_truth_prefers_csv_per_invoice_type(tmp_path: Path):
     pdf = str(tmp_path / "doc.pdf")
     assert load_ground_truth(pdf, config=config, invoice_type_id="CONSUMIBLES")["fields"]["invoice_number"] == "1"
     assert load_ground_truth(pdf, config=config, invoice_type_id="VIAJES")["fields"]["invoice_number"] == "2"
+
+
+def test_load_ground_truth_sibling_json_only_for_local_sources(tmp_path: Path):
+    pdf = tmp_path / "cached_drive_file.pdf"
+    pdf.write_bytes(b"%PDF")
+    (tmp_path / "cached_drive_file_truth.json").write_text(
+        '{"fields": {"invoice_number": "local-only"}}',
+        encoding="utf-8",
+    )
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id="drive-file-1",
+        source_uri="gdrive://drive-file-1",
+        display_name="cached_drive_file.pdf",
+        original_filename="drive-source.pdf",
+        revision_id="rev-1",
+        source_hash="abc123",
+        discovered_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialized_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialization_method="download",
+    )
+
+    assert load_ground_truth(str(pdf), source_provenance=provenance) is None
+
+
+def test_load_ground_truth_csv_can_match_source_id_and_revision(tmp_path: Path):
+    csv_path = tmp_path / "ground_truth.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=["Source file", "Source ID", "Revision ID", "Invoice Num"],
+        )
+        w.writeheader()
+        w.writerow({
+            "Source file": "wrong.pdf",
+            "Source ID": "drive-file-1",
+            "Revision ID": "rev-1",
+            "Invoice Num": "6538",
+        })
+    config = {
+        "agent": {
+            "ground_truth_csv_path": str(csv_path),
+            "ground_truth_source_column": "Source file",
+            "ground_truth_source_id_column": "Source ID",
+            "ground_truth_revision_column": "Revision ID",
+            "ground_truth_column_map": {"Invoice Num": "invoice_number"},
+        }
+    }
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id="drive-file-1",
+        source_uri="gdrive://drive-file-1",
+        display_name="cached.pdf",
+        original_filename="drive-source.pdf",
+        revision_id="rev-1",
+        source_hash="abc123",
+        discovered_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialized_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialization_method="download",
+    )
+
+    truth = load_ground_truth(
+        str(tmp_path / "cached.pdf"),
+        config=config,
+        source_provenance=provenance,
+    )
+
+    assert truth is not None
+    assert truth["fields"]["invoice_number"] == "6538"
+
+
+def test_load_ground_truth_csv_source_id_revision_mismatch_does_not_fallback_to_filename(tmp_path: Path):
+    csv_path = tmp_path / "ground_truth.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=["Source file", "Source ID", "Revision ID", "Invoice Num"],
+        )
+        w.writeheader()
+        w.writerow({
+            "Source file": "cached.pdf",
+            "Source ID": "drive-file-1",
+            "Revision ID": "old-rev",
+            "Invoice Num": "stale",
+        })
+    config = {
+        "agent": {
+            "ground_truth_csv_path": str(csv_path),
+            "ground_truth_source_column": "Source file",
+            "ground_truth_source_id_column": "Source ID",
+            "ground_truth_revision_column": "Revision ID",
+            "ground_truth_column_map": {"Invoice Num": "invoice_number"},
+        }
+    }
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id="drive-file-1",
+        source_uri="gdrive://drive-file-1",
+        display_name="cached.pdf",
+        original_filename="drive-source.pdf",
+        revision_id="new-rev",
+        source_hash="abc123",
+        discovered_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialized_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialization_method="download",
+    )
+
+    assert load_ground_truth(
+        str(tmp_path / "cached.pdf"),
+        config=config,
+        source_provenance=provenance,
+    ) is None
+
+
+def test_load_ground_truth_csv_can_match_source_id_without_source_file_column(tmp_path: Path):
+    csv_path = tmp_path / "ground_truth.csv"
+    with open(csv_path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(
+            f,
+            fieldnames=["Source ID", "Revision ID", "Invoice Num"],
+        )
+        w.writeheader()
+        w.writerow({
+            "Source ID": "drive-file-1",
+            "Revision ID": "rev-1",
+            "Invoice Num": "6538",
+        })
+    config = {
+        "agent": {
+            "ground_truth_csv_path": str(csv_path),
+            "ground_truth_source_id_column": "Source ID",
+            "ground_truth_revision_column": "Revision ID",
+            "ground_truth_column_map": {"Invoice Num": "invoice_number"},
+        }
+    }
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id="drive-file-1",
+        source_uri="gdrive://drive-file-1",
+        display_name="cached.pdf",
+        original_filename="drive-source.pdf",
+        revision_id="rev-1",
+        source_hash="abc123",
+        discovered_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialized_at_utc=datetime(2026, 5, 31, tzinfo=timezone.utc),
+        materialization_method="download",
+    )
+
+    truth = load_ground_truth(
+        str(tmp_path / "cached.pdf"),
+        config=config,
+        source_provenance=provenance,
+    )
+
+    assert truth is not None
+    assert truth["fields"]["invoice_number"] == "6538"
 
 
 def test_normalize_date_iso_and_slashes():
@@ -278,4 +436,3 @@ def test_evaluate_score_splits_missing_vs_mismatch():
     assert s["fields_wrong"] == 2
     assert s["fields_not_extracted"] == 1
     assert s["fields_wrong_value"] == 1
-

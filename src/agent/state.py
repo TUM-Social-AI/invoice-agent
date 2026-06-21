@@ -10,6 +10,8 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.sources.models import RunIdentity, SourceProvenance
+
 
 class AgentStatus(Enum):
     RUNNING = "running"
@@ -154,6 +156,11 @@ class AgentState(BaseModel):
 
     # --- Per-run log ---
     run_log_path: Optional[str] = None
+
+    # --- Source/provenance ---
+    run_id: str = ""
+    source_provenance: Optional[SourceProvenance] = None
+    run_identity: Optional[RunIdentity] = None
 
     @property
     def tmp_dir(self) -> str:
