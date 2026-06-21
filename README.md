@@ -326,6 +326,45 @@ The JSONL run log under `output/<invoice>/logs/` is unchanged — presentation m
 
 ---
 
+## Docker
+
+Run the agent in a container without installing Python on the host. First build downloads PyTorch and Surya OCR weights (~3–5 GB image; may take several minutes).
+
+```bash
+docker build -t invoice-agent .
+```
+
+**Gemini (recommended for quick testing):**
+
+```bash
+cp .env.example .env   # set GOOGLE_API_KEY
+docker compose --profile gemini build
+docker compose --profile gemini run --rm agent python main.py --pdf invoices/your.pdf
+```
+
+**Plain `docker run` (without Compose):**
+
+```bash
+docker run --rm -e GOOGLE_API_KEY=your-key \
+  -v "${PWD}/invoices:/app/invoices" \
+  -v "${PWD}/output:/app/output" \
+  -v "${PWD}/learnings:/app/learnings" \
+  invoice-agent python main.py --pdf invoices/your.pdf
+```
+
+**Ollama profile** (requires NVIDIA GPU + [Compose GPU support](https://docs.docker.com/compose/how-tos/gpu-support/)):
+
+```bash
+docker compose --profile ollama up -d ollama
+docker exec -it $(docker compose --profile ollama ps -q ollama) ollama pull qwen3:1.7b
+docker exec -it $(docker compose --profile ollama ps -q ollama) ollama pull qwen2.5vl:32b
+docker compose --profile ollama run --rm agent-ollama python main.py --pdf invoices/your.pdf
+```
+
+Results land in `./output/` on the host. Ollama is for local dev only — AWS deployment uses Gemini.
+
+---
+
 ## Run configurations
 
 The agent behavior is controlled primarily by `agent.orchestration` in `config/config.yaml`.
@@ -674,3 +713,5 @@ pytest tests/
 ```
 
 Tests cover config loading, all compliance check types, output CSV format, and learnings read/write. Ollama is not required to run tests.
+
+**CI:** `.github/workflows/ci.yml` runs `pytest tests/` on every pull request and push to `main`. No API keys required.

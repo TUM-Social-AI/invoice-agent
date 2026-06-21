@@ -116,6 +116,42 @@ def _is_short_date_fragment(s: str) -> bool:
     return bool(re.match(r"^\d{1,2}[/.\-]\d{1,2}([/.\-]\d{2,4})?$", str(s).strip()))
 
 
+def _parse_employee_name_from_visual_observation(text: str, store: ConfigStore) -> str | None:
+    """Extract a quoted employee name from visual-check observation prose."""
+    if not text or not str(text).strip():
+        return None
+    patterns = (
+        r"employee\s+name\s+'([^']+)'",
+        r"name\s+'([^']+)'",
+    )
+    for pat in patterns:
+        match = re.search(pat, str(text), flags=re.IGNORECASE)
+        if not match:
+            continue
+        name = match.group(1).strip()
+        if _reject_employee_name_role_like(name, store.employee_name_role_denylist):
+            return None
+        return name
+    return None
+
+
+def _parse_payment_phrase_from_visual_observation(text: str) -> str | None:
+    """Extract a short payment-evidence phrase from visual-check observation prose."""
+    if not text or not str(text).strip():
+        return None
+    patterns = (
+        r"(Payé par[^,.;)]*)",
+        r"(Paid by[^,.;)]*)",
+        r"(pagado por[^,.;)]*)",
+        r"(payment method[^,.;)]*)",
+    )
+    for pat in patterns:
+        match = re.search(pat, str(text), flags=re.IGNORECASE)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
 def check_compliance_visual(
     state: AgentState,
     image_path: str,

@@ -18,6 +18,7 @@ Learning mode:
 import argparse
 import json
 import logging
+import os
 import re
 import sys
 from pathlib import Path
@@ -406,7 +407,11 @@ def main():
     )
     parser.add_argument("--type", help="Invoice type ID (e.g. EU_VAT, DE_INVOICE)")
     parser.add_argument("--output", default="output", help="Output directory (default: output/)")
-    parser.add_argument("--config", default="config/config.yaml", help="Config file path")
+    parser.add_argument(
+        "--config",
+        default=os.environ.get("CONFIG_PATH", "config/config.yaml"),
+        help="Config file path",
+    )
     parser.add_argument("--list-types", action="store_true", help="List available invoice types")
     parser.add_argument("--learn", action="store_true",
                         help="Learning mode: after processing, compare to *_truth.json and write learnings")
