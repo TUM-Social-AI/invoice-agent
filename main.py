@@ -49,8 +49,10 @@ from src.sources.google_drive import (
     build_google_drive_service,
     cleanup_materialized_google_drive_document,
     discover_google_drive_documents,
+    google_drive_config_folder_enabled,
     google_drive_cleanup_enabled,
     google_drive_output_dir,
+    materialize_google_drive_config_folder,
     materialize_google_drive_document,
     resolve_google_drive_credentials,
     resolve_google_drive_folder_id,
@@ -143,6 +145,19 @@ def _load_dotenv_files() -> None:
 def load_app_config(path: str = "config/config.yaml") -> dict:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def load_config_store(app_config: dict):
+    if not google_drive_config_folder_enabled(app_config):
+        return load_config(app_config.get("config_dir", "config/csv"))
+
+    try:
+        config_dir = materialize_google_drive_config_folder(app_config)
+    except GoogleDriveSourceError as e:
+        print(str(e))
+        sys.exit(1)
+    print(f"Google Drive config: loaded CSVs from {config_dir}")
+    return load_config(str(config_dir))
 
 
 def process_invoice(
@@ -504,7 +519,7 @@ def main():
             print(f"  Scopes: {', '.join(granted)}")
         return
 
-    store = load_config(app_config.get("config_dir", "config/csv"))
+    store = load_config_store(app_config)
 
     presenter = RunPresenter() if pres_on else NullPresenter()
 
