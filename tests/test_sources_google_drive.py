@@ -133,6 +133,141 @@ def test_resolve_google_drive_folder_id_uses_override_then_config_url(tmp_path: 
     assert gd.resolve_google_drive_folder_id(config) == "from-config"
 
 
+def test_resolve_google_drive_config_folder_id_uses_config_folder_url(tmp_path: Path):
+    config = _app_config(tmp_path)
+    config["sources"]["google_drive"]["config_folder"] = {
+        "enabled": True,
+        "folder_url": "https://drive.google.com/drive/folders/config-folder",
+    }
+
+    assert gd.google_drive_config_folder_enabled(config) is True
+    assert gd.resolve_google_drive_config_folder_id(config) == "config-folder"
+
+
+def test_discover_google_drive_config_files_lists_folder_contents(tmp_path: Path):
+    service = FakeService([
+        {
+            "files": [
+                {
+                    "id": "rules",
+                    "name": "compliance_rules.csv",
+                    "mimeType": "text/csv",
+                    "modifiedTime": "2026-06-01T12:00:00.000Z",
+                },
+                {
+                    "id": "notes",
+                    "name": "notes.md",
+                    "mimeType": "text/markdown",
+                    "modifiedTime": "2026-06-01T12:00:00.000Z",
+                },
+            ],
+        },
+    ])
+
+    refs = gd.discover_google_drive_config_files("folder-1", _app_config(tmp_path), service=service)
+
+    assert [r.display_name for r in refs] == ["compliance_rules.csv", "notes.md"]
+    first_call = service.files().list_calls[0]
+    assert first_call["supportsAllDrives"] is True
+    assert first_call["includeItemsFromAllDrives"] is True
+    assert "mimeType = 'application/pdf'" not in first_call["q"]
+
+
+def test_materialize_google_drive_config_folder_requires_core_csvs(tmp_path: Path):
+    config = _app_config(tmp_path)
+    config["sources"]["google_drive"]["config_folder"] = {"folder_id": "folder-1"}
+    service = FakeService([
+        {
+            "files": [
+                {"id": "types", "name": "invoice_types.csv", "mimeType": "text/csv"},
+                {"id": "fields", "name": "extraction_fields.csv", "mimeType": "text/csv"},
+            ],
+        },
+    ])
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="compliance_rules.csv"):
+        gd.materialize_google_drive_config_folder(config, service=service)
+
+
+def test_materialize_google_drive_config_folder_rejects_duplicate_config_names(tmp_path: Path):
+    config = _app_config(tmp_path)
+    config["sources"]["google_drive"]["config_folder"] = {"folder_id": "folder-1"}
+    service = FakeService([
+        {
+            "files": [
+                {"id": "types-a", "name": "invoice_types.csv", "mimeType": "text/csv"},
+                {"id": "types-b", "name": "invoice_types.csv", "mimeType": "text/csv"},
+                {"id": "fields", "name": "extraction_fields.csv", "mimeType": "text/csv"},
+                {"id": "rules", "name": "compliance_rules.csv", "mimeType": "text/csv"},
+            ],
+        },
+    ])
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="duplicate"):
+        gd.materialize_google_drive_config_folder(config, service=service)
+
+
+def test_materialize_google_drive_config_folder_downloads_loadable_config(
+    tmp_path: Path,
+    monkeypatch,
+):
+    from src.config.loader import load_config
+
+    config = _app_config(tmp_path)
+    config["sources"]["google_drive"]["config_folder"] = {
+        "folder_id": "folder-1",
+        "materialized_root": str(tmp_path / "drive-config"),
+    }
+    service = FakeService([
+        {
+            "files": [
+                {"id": "types", "name": "invoice_types.csv", "mimeType": "text/csv", "headRevisionId": "1"},
+                {"id": "fields", "name": "extraction_fields.csv", "mimeType": "text/csv", "headRevisionId": "1"},
+                {"id": "rules", "name": "compliance_rules.csv", "mimeType": "text/csv", "headRevisionId": "1"},
+                {"id": "allowed", "name": "allowed_values.csv", "mimeType": "text/csv", "headRevisionId": "1"},
+                {"id": "deny", "name": "employee_name_role_denylist.txt", "mimeType": "text/plain", "headRevisionId": "1"},
+            ],
+        },
+    ])
+    payloads = {
+        "types": (
+            "invoice_type_id,display_name,description,agent_context,enabled\n"
+            "TEST,Test Invoice,Test description,Test context,true\n"
+        ),
+        "fields": (
+            "field_id,invoice_type_id,field_name,field_label,data_type,required,extraction_hint,page_region,aliases\n"
+            "F_TEST,TEST,vendor_name,Vendor,string,true,Find vendor,header,Supplier\n"
+        ),
+        "rules": (
+            "rule_id,invoice_type_id,rule_name,field_id,check_type,check_value,severity,agent_hint,error_message,page_region,enabled,rule_group\n"
+            "R_TEST,TEST,vendor_required,F_TEST,required,,error,Vendor is required,Missing vendor,header,true,general\n"
+        ),
+        "allowed": "field_name,invoice_type_id,value\nvendor_name,TEST,ACME\n",
+        "deny": "manager\n",
+    }
+
+    def fake_download(_request, path):
+        file_id = service.files().media_calls[-1]["fileId"]
+        path.write_text(payloads[file_id], encoding="utf-8")
+
+    monkeypatch.setattr(gd, "_download_media_to_path", fake_download)
+
+    config_dir = gd.materialize_google_drive_config_folder(config, service=service)
+    store = load_config(str(config_dir))
+
+    assert sorted(p.name for p in config_dir.iterdir()) == [
+        "allowed_values.csv",
+        "compliance_rules.csv",
+        "employee_name_role_denylist.txt",
+        "extraction_fields.csv",
+        "invoice_types.csv",
+    ]
+    assert "TEST" in store.invoice_types
+    assert store.get_fields("TEST")[0].allowed_values == ["ACME"]
+    assert store.get_rules("TEST")[0].rule_id == "R_TEST"
+    assert store.employee_name_role_denylist == ["manager"]
+
+
 def test_materialize_google_drive_document_downloads_and_builds_provenance(
     tmp_path: Path,
     monkeypatch,
