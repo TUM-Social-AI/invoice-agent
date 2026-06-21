@@ -81,7 +81,13 @@ agent:
   max_same_action_stop: 5
 
 ocr:
+  backend: "paddleocr"
+  auto_install: false
   langs: ["es", "en", "fr"]
+  paddleocr:
+    lang: "latin"
+    engine: "paddle"
+    use_textline_orientation: false
 
 output:
   base_dir: "output"

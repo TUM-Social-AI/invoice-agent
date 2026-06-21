@@ -98,7 +98,7 @@ agent:
   state_summary_max_inventory_lines: 50
   state_summary_inventory_desc_chars: 180
 
-  # Max characters of Surya OCR text injected into vision extraction prompts (full page + crops).
+  # Max characters of OCR text injected into vision extraction prompts (full page + crops).
   ocr_prompt_max_chars: 24000
   # Multi-page visual compliance: max page images sent in one visual call.
   visual_max_evidence_pages: 8
@@ -160,10 +160,18 @@ agent:
   max_same_action_stop: 5        # hard-stop the loop after this many identical calls
 
 ocr:
-  # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
+  # OCR backend used before every vision extraction call: paddleocr, surya, auto, or disabled.
+  backend: "paddleocr"
+  # Runtime package installation is off by default; install the selected backend explicitly.
+  auto_install: false
+  # Languages used by OCR pre-pass. PaddleOCR accepts one model language, configured below.
   # Uses BCP-47 codes. Add languages that appear in your invoices.
-  # Install surya: pip install surya-ocr  (models ~300MB, downloaded on first run)
   langs: ["es", "en", "fr"]
+  paddleocr:
+    # Broad Latin model for Spanish/French/English invoice text.
+    lang: "latin"
+    engine: "paddle"
+    use_textline_orientation: false
 
 output:
   base_dir: "output"

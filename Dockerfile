@@ -1,5 +1,5 @@
 # Invoice Compliance Agent — local CLI and (Phase 2) AWS worker image.
-# Expect ~3–5 GB with surya-ocr + PyTorch CPU wheels on first build.
+# OCR backend is selected in config/config.yaml.
 
 FROM python:3.11-slim-bookworm
 
@@ -31,6 +31,6 @@ RUN useradd -m -u 1000 appuser \
 USER appuser
 
 RUN mkdir -p invoices output \
-    && python -c "from src.tools.ocr_layout import load_surya_models; assert load_surya_models() is not None"
+    && python -c "import yaml; from src.tools.ocr_layout import load_ocr_engine; cfg=yaml.safe_load(open('config/config.yaml', encoding='utf-8')); load_ocr_engine(cfg)"
 
 CMD ["python", "main.py", "--help"]

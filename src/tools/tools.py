@@ -9,7 +9,7 @@ from src.tools.pdf_pages import (
     crop_region,
     _image_to_base64,
 )
-from src.tools.ocr_layout import SuryaModels, load_surya_models, OcrLine, OcrResult, FieldLocalization, _ocr_with_layout, _localize_field_in_ocr, _union_bboxes, _save_image_crop
+from src.tools.ocr_layout import SuryaModels, PaddleOcrModels, OcrEngine, load_surya_models, load_paddleocr_models, load_ocr_engine, OcrLine, OcrResult, FieldLocalization, _ocr_with_layout, _localize_field_in_ocr, _union_bboxes, _save_image_crop
 from src.tools.vision_llm import classify_document_type, extract_fields_vision, merge_extracted_fields
 from src.tools.compliance_eval import _extract_entities_from_text, _policy_refs_for_rule, _normalize_numeric, _safe_eval_numeric, _get_field_value, _evaluate_rule, _field_name_for_id, check_compliance
 from src.tools.compliance_visual import check_compliance_visual

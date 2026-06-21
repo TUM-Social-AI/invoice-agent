@@ -5,8 +5,12 @@ pypdfium2>=4.30.0
 requests>=2.31.0
 google-genai>=1.0.0
 pydantic>=2.0.0
-surya-ocr
-transformers>=4.56.1,<5
+paddleocr>=3.0.0
+paddlepaddle>=3.0.0
+
+# Optional OCR backend (only needed when ocr.backend: "surya")
+# surya-ocr
+# transformers>=4.56.1,<5
 
 # Dev / test
 pytest>=7.0

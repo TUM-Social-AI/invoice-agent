@@ -43,7 +43,7 @@ from src.tools.tool_wrappers import (
 )
 
 if TYPE_CHECKING:
-    from src.tools.tools import SuryaModels
+    from src.tools.tools import OcrEngine, SuryaModels
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +65,7 @@ def _resolve_ollama_url(provider: "LLMProvider | None", config: dict) -> str:
 def build_tool_registry(
     config: dict,
     store: ConfigStore,
+    ocr_engine: "Optional[OcrEngine]" = None,
     surya_models: "Optional[SuryaModels]" = None,
     provider: "LLMProvider | None" = None,
 ) -> dict:
@@ -77,7 +78,8 @@ def build_tool_registry(
     Args:
         config:        Full application config dict.
         store:         ConfigStore for invoice-type schemas and compliance rules.
-        surya_models:  Pre-loaded Surya OCR models (None → loaded on first use).
+        ocr_engine:    Pre-loaded OCR backend selected from config.
+        surya_models:  Backward-compatible Surya OCR models argument.
         provider:      Active LLM provider (None → raw Ollama requests fallback).
 
     Returns:
@@ -86,6 +88,13 @@ def build_tool_registry(
     """
     agent_cfg = config.get("agent", {})
     _plim = prompt_limits_for_config(config)
+    if ocr_engine is None and surya_models is not None:
+        from src.tools.tools import OcrEngine
+        ocr_engine = OcrEngine(
+            backend="surya",
+            models=surya_models,
+            langs=config.get("ocr", {}).get("langs", ["es", "en"]),
+        )
 
     ctx = ToolContext(
         ollama_url=_resolve_ollama_url(provider, config),
@@ -100,7 +109,7 @@ def build_tool_registry(
         active_rule_groups=active_rule_groups_from_config(config),
         store=store,
         provider=provider,
-        surya_models=surya_models,
+        ocr_engine=ocr_engine,
     )
 
     return {

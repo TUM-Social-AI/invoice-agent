@@ -189,7 +189,7 @@ add_rect(s, 0, 0, Inches(0.25), H, fill=RGBColor(0x85, 0x29, 0xFF))
 slide_title(s, "Phase 2 — Extract", x=Inches(0.55))
 bullet(s, [
     "convert_pdf_to_images   →   200 DPI render",
-    "extract_fields_vision   →   Vision LLM + Surya OCR pre-pass",
+    "extract_fields_vision   →   Vision LLM + configured OCR pre-pass",
     "crop_region   →   zoom into missed areas and retry",
     "check_compliance   →   deterministic rule pass (no LLM)",
     "check_compliance_visual   →   stamps, seals, signatures",

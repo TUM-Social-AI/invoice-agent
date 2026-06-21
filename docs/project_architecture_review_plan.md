@@ -161,8 +161,8 @@ Resolution strategy:
 ## P2 - Dependency and Environment Story Needs Pinning
 
 Evidence:
-- `requirements.txt` uses broad lower bounds and includes heavy optional `surya-ocr` as a normal dependency.
-- Runtime behavior changes substantially depending on local Ollama/Gemini model versions and Surya availability.
+- `requirements.txt` uses broad lower bounds and includes OCR backend packages without tight version pinning.
+- Runtime behavior changes substantially depending on local Ollama/Gemini model versions and OCR backend availability.
 
 Impact:
 - Reproducibility is weak across machines.

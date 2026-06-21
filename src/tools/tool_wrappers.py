@@ -86,7 +86,7 @@ class ToolContext:
     active_rule_groups: list
     store: ConfigStore
     provider: LLMProvider | None
-    surya_models: Any
+    ocr_engine: Any
 
     # -- helpers ----------------------------------------------------------------
 
@@ -435,7 +435,7 @@ def make_extract(ctx: ToolContext):
         def _run_extract_on_image(img_path: str) -> dict:
             # ── OCR-guided extraction ─────────────────────────────────────────
             OCR_DIRECT_THRESHOLD = 0.80
-            ocr = _ocr_with_layout(img_path, surya_models=ctx.surya_models)
+            ocr = _ocr_with_layout(img_path, ocr_engine=ctx.ocr_engine)
             if not ocr.is_empty():
                 logger.debug(f"  OCR layout: {len(ocr.lines)} lines, {len(ocr.full_text)} chars")
 

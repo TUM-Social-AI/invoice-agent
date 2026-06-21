@@ -41,7 +41,7 @@ from src.agent.loop_utils import open_run_log as _open_run_log, append_log_entry
 from src.agent.tool_policy import merge_exposed_tool_names
 from src.agent.loop_guards import DuplicateActionGuard, ConsecutiveFailureGuard
 from src.agent.param_resolver import resolve_sig_params
-from src.tools.tools import load_surya_models
+from src.tools.tools import load_ocr_engine
 from src.prompts.llm_prompts import PLANNING_SYSTEM_MESSAGE, build_planning_user_prompt
 
 logger = logging.getLogger(__name__)
@@ -91,11 +91,10 @@ class InvoiceAgent:
         self.max_same_action_warn = cfg["max_same_action_warn"]
         self.max_same_action_stop = cfg["max_same_action_stop"]
         self.provider: LLMProvider = build_llm_provider(config)
-        # Load surya OCR models once here — shared across all runs in this session.
-        # Takes ~5-15s on first call; subsequent calls use cached weights.
-        # If surya-ocr is not installed, this returns None and OCR is silently skipped.
-        self.surya_models = load_surya_models()
-        self.tools = build_tool_registry(config, store, surya_models=self.surya_models, provider=self.provider)
+        # Load the configured OCR backend once here and share it across all runs.
+        # If the selected OCR package is not installed, this returns None and OCR is skipped.
+        self.ocr_engine = load_ocr_engine(config)
+        self.tools = build_tool_registry(config, store, ocr_engine=self.ocr_engine, provider=self.provider)
 
         # LLM tool exposure (loop mode only). This filters both:
         # - the tool enum used by `agent_turn`

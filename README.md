@@ -79,11 +79,11 @@ finish() + write_learning()
 
 ### OCR pre-pass
 
-Before every `extract_fields_vision` call, the already-rendered page image is passed through **surya OCR**. The extracted text is injected into the vision model prompt as a "primary reference", so the model cross-checks its pixel reading against the OCR output. Especially useful for numbers, IBANs, and dates where visual misreads are common.
+Before every `extract_fields_vision` call, the already-rendered page image is passed through the configured OCR backend (`paddleocr`, `surya`, `auto`, or `disabled`). The extracted text is injected into the vision model prompt as a "primary reference", so the model cross-checks its pixel reading against the OCR output. Especially useful for numbers, IBANs, and dates where visual misreads are common.
 
-OCR languages are configured via `ocr.langs` in `config/config.yaml`. If you have French invoices, include `fr` (e.g. `["es", "en", "fr"]`).
+OCR is configured in `config/config.yaml` under `ocr`. The default backend is `paddleocr` with the broad Latin OCR model for Spanish/French/English invoices. To use Surya instead, set `ocr.backend: "surya"` and install the optional Surya package.
 
-Silently skipped if `surya-ocr` is not installed — install with `pip install surya-ocr`.
+Silently skipped if the selected OCR package is not installed.
 
 ### Batch field extraction
 
@@ -240,11 +240,19 @@ pip install -r requirements.txt
 
 Includes `google-genai` for optional / future SDK use; the built-in **Gemini** backend calls the REST API via `requests` (no extra runtime wiring required beyond the API key).
 
-### 4. Install surya OCR (optional but recommended)
+### 4. OCR backend
 ```bash
-pip install surya-ocr
+pip install paddleocr paddlepaddle
 ```
-Model weights (~300 MB) are downloaded automatically on first use.
+
+The default config uses PaddleOCR. Surya remains supported as an optional backend:
+
+```yaml
+ocr:
+  backend: "surya"
+```
+
+Then install it with `pip install surya-ocr`.
 
 ---
 
@@ -273,7 +281,7 @@ Press `Ctrl+C` at any time to interrupt gracefully — partial results and the p
 
 ## Docker
 
-Run the agent in a container without installing Python on the host. First build downloads PyTorch and Surya OCR weights (~3–5 GB image; may take several minutes).
+Run the agent in a container without installing Python on the host. First build installs the OCR backend selected in `config/config.yaml` and may download OCR model weights.
 
 ```bash
 docker build -t invoice-agent .
@@ -412,7 +420,10 @@ agent:
   ground_truth_column_map: {}
 
 ocr:
-  langs: ["es", "en", "fr"]       # surya OCR languages for the pre-pass
+  backend: "paddleocr"            # paddleocr, surya, auto, or disabled
+  langs: ["es", "en", "fr"]
+  paddleocr:
+    lang: "latin"
 ```
 
 ### Customizing tool descriptions and phase mappings
@@ -487,7 +498,7 @@ The agent has access to these tools. It decides which to call at each turn.
 | `classify_document_type()` | Send the first page to the vision model with all known type descriptions. Sets `state.invoice_type_id`. |
 | `convert_pdf_to_images(dpi)` | Render all pages at full quality into `output/pages/`. Used in phase 2 for accurate extraction. |
 | `crop_region(image_path, region, page_num)` | Crop a named region (`header`, `footer`, `totals`, `line_items`, `address_block`, `body`) or a custom bounding box from a page image. Useful when full-page extraction misses a specific area. |
-| `extract_fields_vision(image_path, page_num, region, hints, field_subset)` | Send a page image to the vision model with the field schema. Returns values + per-field confidence scores. Automatically runs OCR pre-pass (surya) and expands `field_subset` to include all un-attempted fields. Merges results into state (only updates if new confidence is higher). Accepts any common alias for the image path (`page_path`, `page_image_path`, `image`, `path`, `file_path`) and for the page number (`page_index`, `page`, `page_number`). If only a page number is given and no path, the path is derived from the rendered page list automatically. |
+| `extract_fields_vision(image_path, page_num, region, hints, field_subset)` | Send a page image to the vision model with the field schema. Returns values + per-field confidence scores. Automatically runs the configured OCR pre-pass and expands `field_subset` to include all un-attempted fields. Merges results into state (only updates if new confidence is higher). Accepts any common alias for the image path (`page_path`, `page_image_path`, `image`, `path`, `file_path`) and for the page number (`page_index`, `page`, `page_number`). If only a page number is given and no path, the path is derived from the rendered page list automatically. |
 | `check_compliance()` | Evaluate all field-based rules against current extracted values. Returns pass/fail per rule, failed error/warning lists, skipped checks (cross-field rules that couldn't evaluate due to missing fields), and any `visual_checks_pending`. |
 | `check_compliance_visual(image_path, page_num)` | Evaluate all `visual_check` rules against a page image in a single vision model call. Returns per-rule verdicts with observations. Should be called after `check_compliance()` if `visual_checks_pending` is non-empty. |
 | `flag_for_human_review(field_name, reason)` | Mark a field as needing human review. Called when max retries are exhausted or extraction is fundamentally ambiguous. |
@@ -598,7 +609,7 @@ invoice-agent/
 │   │   └── reflection.py       Post-run reflection loop for learning mode
 │   ├── tools/
 │   │   ├── tool_wrappers.py    All tool closure factories (make_inspect, make_extract, …)
-│   │   └── tools.py            Low-level tool implementations + surya OCR helpers
+│   │   └── tools.py            Low-level tool implementations + OCR helpers
 │   ├── config/
 │   │   └── loader.py           CSV config loader + ConfigStore + schema builder
 │   ├── output/

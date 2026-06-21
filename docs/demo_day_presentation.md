@@ -119,7 +119,7 @@ Full-quality rendering + field extraction using vision AI and OCR in parallel.
 | Step | Tool | What happens |
 |------|------|-------------|
 | Render | `convert_pdf_to_images` | 200 DPI per page |
-| Extract | `extract_fields_vision` | Vision LLM + Surya OCR pre-pass per page |
+| Extract | `extract_fields_vision` | Vision LLM + configured OCR pre-pass per page |
 | Retry | `crop_region` | Zoom into header / footer / totals if a field was missed |
 | Note | `note` | Agent records private observations for this session |
 | Compliance | `check_compliance` | Deterministic rule evaluation — no LLM needed |
@@ -258,4 +258,3 @@ To add a new invoice type: add a row to each CSV. No Python required.
 Automated, auditable, extensible grant invoice processing
 
 Questions?
-
