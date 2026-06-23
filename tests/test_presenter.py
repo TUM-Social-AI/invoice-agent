@@ -11,8 +11,8 @@ import pytest
 from rich.console import Console
 
 from src.agent.loop_utils import summarize_tool_result
-from src.agent.state import AgentState, AgentStatus
-from src.output.presenter import NullPresenter, RunPresenter, _tool_label
+from src.agent.state import AgentState, AgentStatus, RuleResult
+from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter, _tool_label
 
 
 def test_summarize_inspect_file():
@@ -85,10 +85,44 @@ def test_run_presenter_phase_banner():
     presenter.phase_change("SCAN")
     presenter.phase_change("EXTRACT")
     out = buf.getvalue()
-    assert "Invoice Compliance Agent" in out
+    assert "Document" in out
     assert "travel_invoice.pdf" in out
     assert "SCAN" in out
     assert "EXTRACT" in out
+
+
+def test_startup_context_shows_config_models_and_rule_groups():
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=140, color_system=None)
+    presenter = RunPresenter(console=console)
+    summary = ConfigLoadSummary(
+        source="Google Drive config folder",
+        path="/tmp/config",
+        invoice_types=5,
+        extraction_fields=62,
+        compliance_rules=103,
+        allowed_value_sets=7,
+        denylist_phrases=3,
+    )
+    presenter.startup_context(
+        summary,
+        {
+            "llm": {"provider": "openai"},
+            "openai": {"reasoning_model": "o3-mini", "vision_model": "gpt-4.1-mini"},
+            "agent": {"active_rule_groups": ["general"]},
+        },
+        ocr_enabled=True,
+    )
+    out = buf.getvalue()
+    assert "Google Drive config folder" in out
+    assert "5" in out
+    assert "62" in out
+    assert "103" in out
+    assert "openai" in out
+    assert "o3-mini" in out
+    assert "gpt-4.1-mini" in out
+    assert "general" in out
+    assert "Surya enabled" in out
 
 
 def test_run_presenter_tool_flow():
@@ -105,6 +139,38 @@ def test_run_presenter_tool_flow():
     out = buf.getvalue()
     assert "Inspecting file" in out
     assert "3 pages" in out
+    assert "Checking file metadata" not in out
+
+
+def test_run_presenter_can_show_reasoning_when_enabled():
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=120, color_system=None)
+    presenter = RunPresenter(console=console, show_reasoning=True)
+    presenter.tool_start(1, "inspect_file", "Checking file metadata", {})
+    assert "Checking file metadata" in buf.getvalue()
+
+
+def test_run_presenter_extract_retry_and_model_metadata():
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=140, color_system=None)
+    presenter = RunPresenter(console=console)
+    summary = ConfigLoadSummary("local config/csv", "config/csv", 5, 62, 103, 7, 3)
+    presenter.startup_context(
+        summary,
+        {
+            "llm": {"provider": "openai"},
+            "openai": {"reasoning_model": "o3-mini", "vision_model": "gpt-4.1-mini"},
+        },
+        ocr_enabled=True,
+    )
+    params = {"page_num": 1, "region": "header"}
+    presenter.tool_start(1, "extract_fields_vision", "long internal reasoning", params)
+    presenter.tool_start(2, "extract_fields_vision", "long internal reasoning", params)
+    out = buf.getvalue()
+    assert "Model: gpt-4.1-mini" in out
+    assert "OCR: Surya pre-pass" in out
+    assert "Retry 2" in out
+    assert "long internal reasoning" not in out
 
 
 def test_null_presenter_is_inactive():
@@ -135,3 +201,53 @@ def test_run_complete_panel():
     assert "Result" in out
     assert "PASSED" in out
     assert "results.csv" in out
+
+
+def test_finish_result_uses_computed_error_list_not_reasoning_text():
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=140, color_system=None)
+    presenter = RunPresenter(console=console)
+    presenter.tool_result(
+        "finish",
+        {
+            "finished": True,
+            "status": "needs_review",
+            "error_failures": ["R_VIA_002"],
+            "warning_failures": ["R_VIA_004"],
+            "status_explanation": "Run status reflects blocking error-severity rule failures.",
+        },
+        1200,
+    )
+    out = buf.getvalue()
+    assert "Decision: NEEDS_REVIEW" in out
+    assert "Blocking errors:" in out
+    assert "R_VIA_002" in out
+    assert "status=needs_review" not in out
+
+
+def test_run_complete_panel_lists_blocking_errors():
+    buf = io.StringIO()
+    console = Console(file=buf, force_terminal=False, width=140, color_system=None)
+    presenter = RunPresenter(console=console)
+    state = AgentState(
+        pdf_path="/tmp/invoice.pdf",
+        output_dir="/tmp/out",
+        status=AgentStatus.NEEDS_REVIEW,
+        turn=5,
+        finish_reason="all blocking errors resolved",
+    )
+    state.rule_results = [
+        RuleResult(
+            rule_id="R_VIA_002",
+            rule_name="total_required",
+            field_id="F_TOTAL",
+            status="failed",
+            severity="error",
+            message="Missing total",
+        )
+    ]
+    presenter.run_complete(state, paths={"fields_csv": "/tmp/out/results.csv"})
+    out = buf.getvalue()
+    assert "Decision: NEEDS_REVIEW" in out
+    assert "Blocking errors:" in out
+    assert "R_VIA_002" in out

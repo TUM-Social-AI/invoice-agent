@@ -16,6 +16,7 @@ Learning mode:
 """
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -30,7 +31,7 @@ from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
 from src.agent.state import rule_verdict_summary
 from src.output.writer import write_results
-from src.output.presenter import NullPresenter, RunPresenter
+from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter
 from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
 from src.learning.evaluator import (
     evaluate,
@@ -147,17 +148,46 @@ def load_app_config(path: str = "config/config.yaml") -> dict:
         return yaml.safe_load(f)
 
 
+def _count_allowed_value_sets(config_dir: str | Path) -> int:
+    path = Path(config_dir) / "allowed_values.csv"
+    if not path.exists():
+        return 0
+    pairs: set[tuple[str, str]] = set()
+    with path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            field_name = str(row.get("field_name", "")).strip()
+            type_id = str(row.get("invoice_type_id", "")).strip()
+            value = str(row.get("value", "")).strip()
+            if field_name and value:
+                pairs.add((field_name, type_id))
+    return len(pairs)
+
+
+def _config_summary(source: str, config_dir: str | Path, store) -> ConfigLoadSummary:
+    return ConfigLoadSummary(
+        source=source,
+        path=str(config_dir),
+        invoice_types=len(store.invoice_types),
+        extraction_fields=sum(len(v) for v in store.extraction_fields.values()),
+        compliance_rules=sum(len(v) for v in store.compliance_rules.values()),
+        allowed_value_sets=_count_allowed_value_sets(config_dir),
+        denylist_phrases=len(store.employee_name_role_denylist),
+    )
+
+
 def load_config_store(app_config: dict):
     if not google_drive_config_folder_enabled(app_config):
-        return load_config(app_config.get("config_dir", "config/csv"))
+        config_dir = app_config.get("config_dir", "config/csv")
+        store = load_config(config_dir)
+        return store, _config_summary("local config/csv", config_dir, store)
 
     try:
         config_dir = materialize_google_drive_config_folder(app_config)
     except GoogleDriveSourceError as e:
         print(str(e))
         sys.exit(1)
-    print(f"Google Drive config: loaded CSVs from {config_dir}")
-    return load_config(str(config_dir))
+    store = load_config(str(config_dir))
+    return store, _config_summary("Google Drive config folder", config_dir, store)
 
 
 def process_invoice(
@@ -519,11 +549,16 @@ def main():
             print(f"  Scopes: {', '.join(granted)}")
         return
 
-    store = load_config_store(app_config)
-
-    presenter = RunPresenter() if pres_on else NullPresenter()
+    logging_cfg = app_config.get("logging", {}) or {}
+    presenter = (
+        RunPresenter(show_reasoning=bool(logging_cfg.get("presentation_show_reasoning", False)))
+        if pres_on else NullPresenter()
+    )
+    store, config_summary = load_config_store(app_config)
 
     if args.list_types:
+        if presenter.active:
+            presenter.startup_context(config_summary, app_config, ocr_enabled=None)
         print("\nConfigured invoice types:")
         for tid, t in store.invoice_types.items():
             fields = len(store.get_fields(tid))
@@ -578,6 +613,12 @@ def main():
             sys.exit(1)
 
     agent = InvoiceAgent(config=app_config, store=store, presenter=presenter)
+    if presenter.active:
+        presenter.startup_context(
+            config_summary,
+            app_config,
+            ocr_enabled=getattr(agent, "surya_models", None) is not None,
+        )
 
     if using_google_drive:
         logger.info(f"Batch mode: {len(drive_refs)} PDFs found in Google Drive folder {drive_folder_id}")

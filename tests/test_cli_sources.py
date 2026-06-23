@@ -8,11 +8,102 @@ from src.sources.models import DocumentRef, MaterializedDocument, RunIdentity, S
 
 
 def _patch_cli_runtime(monkeypatch):
+    store = SimpleNamespace(invoice_types={})
+    summary = cli.ConfigLoadSummary(
+        source="local config/csv",
+        path="config/csv",
+        invoice_types=0,
+        extraction_fields=0,
+        compliance_rules=0,
+        allowed_value_sets=0,
+        denylist_phrases=0,
+    )
     monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
     monkeypatch.setattr(cli, "load_app_config", lambda path: {})
-    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config: None)
-    monkeypatch.setattr(cli, "load_config", lambda config_dir: SimpleNamespace(invoice_types={}))
-    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store: object())
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(cli, "load_config_store", lambda config: (store, summary))
+    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store, presenter=None: object())
+
+
+def test_config_summary_counts_loaded_store_and_allowed_values(tmp_path: Path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\n"
+        "currency,,EUR\n"
+        "currency,,USD\n"
+        "expense_category,VIAJES,hotel\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object(), "EQUIPOS": object()},
+        extraction_fields={"VIAJES": [object(), object()], "EQUIPOS": [object()]},
+        compliance_rules={"VIAJES": [object()], "EQUIPOS": [object(), object()]},
+        employee_name_role_denylist=["manager"],
+    )
+
+    summary = cli._config_summary("local config/csv", config_dir, store)
+
+    assert summary.source == "local config/csv"
+    assert summary.invoice_types == 2
+    assert summary.extraction_fields == 3
+    assert summary.compliance_rules == 3
+    assert summary.allowed_value_sets == 2
+    assert summary.denylist_phrases == 1
+
+
+def test_load_config_store_local_returns_summary(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object()]},
+        compliance_rules={"VIAJES": [object(), object()]},
+        employee_name_role_denylist=[],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: False)
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({"config_dir": str(config_dir)})
+
+    assert loaded is store
+    assert summary.source == "local config/csv"
+    assert summary.path == str(config_dir)
+    assert summary.allowed_value_sets == 1
+
+
+def test_load_config_store_google_drive_returns_summary(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "drive-csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object(), object()]},
+        compliance_rules={"VIAJES": [object(), object(), object()]},
+        employee_name_role_denylist=["manager", "director"],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: True)
+    monkeypatch.setattr(cli, "materialize_google_drive_config_folder", lambda config: config_dir)
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({})
+
+    assert loaded is store
+    assert summary.source == "Google Drive config folder"
+    assert summary.path == str(config_dir)
+    assert summary.invoice_types == 1
+    assert summary.extraction_fields == 2
+    assert summary.compliance_rules == 3
+    assert summary.denylist_phrases == 2
 
 
 def test_main_single_pdf_routes_through_sources_as_single_run(tmp_path: Path, monkeypatch):
@@ -24,7 +115,11 @@ def test_main_single_pdf_routes_through_sources_as_single_run(tmp_path: Path, mo
 
     def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
         calls.append((pdf_path, output_dir, kwargs))
-        return SimpleNamespace(invoice_type_id=""), None, None
+        return (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        )
 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(
@@ -55,7 +150,11 @@ def test_main_one_pdf_folder_routes_as_batch_and_preserves_output_stem(tmp_path:
 
     def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
         calls.append((pdf_path, output_dir, kwargs))
-        return SimpleNamespace(invoice_type_id=""), None, None
+        return (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        )
 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))

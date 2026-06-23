@@ -202,6 +202,10 @@ sources:
     cleanup_downloads: true
     include_shared_drives: true
     page_size: 100
+    config_folder:
+      enabled: true
+      folder_url: "https://drive.google.com/drive/folders/1xAQA6AAS3kjcY_YcDmckA21bPbEM2deK?usp=drive_link"
+      materialized_root: "output/materialized/google_drive_config"
 
 logging:
   level: "INFO"                          # DEBUG for verbose tool traces
