@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from src.agent.state import AgentState, AgentStatus, FieldResult, RuleResult
-from src.output.writer import write_results
+from src.output.writer import write_canonical_results, write_results
 from src.tools.tools import read_learnings, write_learning
 
 
@@ -122,6 +122,19 @@ class TestWriteResults:
             vat_row = next(r for r in rows if r["field_name"] == "vendor_vat_id")
             assert vat_row["flagged_for_review"] == "True"
             assert "3 attempts" in vat_row["review_reason"]
+
+    def test_write_canonical_results_wrapper_coexists_with_legacy_outputs(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state = make_complete_state()
+            legacy_paths = write_results(state, tmpdir)
+            canonical_paths = write_canonical_results([state], tmpdir)
+
+            assert set(legacy_paths) == {"fields_csv", "compliance_csv", "summary_csv"}
+            assert Path(canonical_paths["invoice_summary_csv"]).name == "invoice_summary.csv"
+            assert Path(canonical_paths["compliance_results_csv"]).name == "compliance_results.csv"
+            assert Path(legacy_paths["summary_csv"]).exists()
+            assert Path(canonical_paths["invoice_summary_csv"]).exists()
+
 
 
 class TestLearnings:

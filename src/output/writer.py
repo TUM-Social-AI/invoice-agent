@@ -170,3 +170,11 @@ def write_results(state: AgentState, output_dir: str | Path) -> dict[str, str]:
         "compliance_csv": str(compliance_path),
         "summary_csv": str(summary_path),
     }
+
+
+def write_canonical_results(states: Any, output_dir: str | Path) -> dict[str, str]:
+    """Write additive canonical batch CSVs without changing legacy outputs."""
+
+    from src.output.canonical_csv import write_canonical_csvs
+
+    return write_canonical_csvs(states, output_dir)
