@@ -66,3 +66,34 @@ def write_canonical_csvs(
         "invoice_summary_csv": str(invoice_summary_path),
         "compliance_results_csv": str(compliance_results_path),
     }
+
+
+def _workbook_filename(table_name: str) -> str:
+    return f"{table_name.strip().lower().replace(' ', '_')}.csv"
+
+
+def write_workbook_csvs(
+    tables: Iterable[object],
+    output_dir: str | Path,
+) -> dict[str, str]:
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+
+    paths: dict[str, str] = {}
+    for table in tables:
+        name = getattr(table, "name")
+        headers = getattr(table, "headers")
+        rows = getattr(table, "rows")
+        path = out / _workbook_filename(name)
+        _write_csv(path, headers, rows)
+        paths[name] = str(path)
+    return paths
+
+
+def write_canonical_workbook_csvs(
+    states: Iterable[AgentState],
+    output_dir: str | Path,
+) -> dict[str, str]:
+    from src.output.workbook import build_workbook_from_states
+
+    return write_workbook_csvs(build_workbook_from_states(states), output_dir)
