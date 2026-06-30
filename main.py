@@ -29,7 +29,8 @@ from dotenv import load_dotenv
 
 from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
-from src.agent.state import rule_verdict_summary
+from src.agent.state import AgentState, rule_verdict_summary
+from src.output.canonical_csv import write_workbook_csvs
 from src.output.writer import write_results
 from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter
 from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
@@ -44,6 +45,11 @@ from src.output.google_sheets import (
     GoogleSheetsWorkbookWriter,
     load_workbook_tables_from_csv_dir,
     parse_google_sheets_target,
+)
+from src.output.workbook import (
+    RAW_COMPLIANCE_RESULTS_TABLE,
+    RAW_INVOICE_SUMMARY_TABLE,
+    build_workbook_from_states,
 )
 from src.sources.local import (
     SourceError,
@@ -445,6 +451,44 @@ def _print_batch_summary(
         _print_field_accuracy(field_results_list)
 
 
+def _write_batch_workbook_outputs(
+    states: list[AgentState],
+    output_dir: str | Path,
+    app_config: dict,
+) -> None:
+    successful_states = list(states)
+    if not successful_states:
+        return
+
+    tables = build_workbook_from_states(successful_states)
+    workbook_output_dir = Path(output_dir) / "canonical_workbook"
+    csv_paths = write_workbook_csvs(tables, workbook_output_dir)
+
+    print("Canonical workbook CSVs written.")
+    print(f"  Directory     : {workbook_output_dir}")
+    print(f"  Managed tables: {len(csv_paths)} table(s)")
+    if csv_paths:
+        print(f"  Table names   : {', '.join(csv_paths.keys())}")
+
+    target = parse_google_sheets_target(app_config)
+    if not target.enabled:
+        return
+
+    sheets_tables = tables
+    if not target.include_generated_views:
+        raw_table_names = {RAW_INVOICE_SUMMARY_TABLE, RAW_COMPLIANCE_RESULTS_TABLE}
+        sheets_tables = [table for table in tables if table.name in raw_table_names]
+
+    result = GoogleSheetsWorkbookWriter(app_config=app_config).write_workbook(sheets_tables, target)
+    print("Google Sheets workbook sync complete.")
+    print(f"  Spreadsheet ID : {result.spreadsheet_id}")
+    print(f"  Spreadsheet URL: {result.spreadsheet_url}")
+    print(f"  Managed tabs   : {len(result.managed_tabs)} managed tab(s)")
+    if result.managed_tabs:
+        print(f"  Tab names      : {', '.join(result.managed_tabs)}")
+    print(f"  Updated cells  : {result.updated_cells}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Invoice Compliance Agent")
     parser.add_argument("--pdf", default=None, help="Path to PDF file or folder of PDFs (default: invoices/)")
@@ -678,6 +722,7 @@ def main():
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []
+        successful_states: list[AgentState] = []
         for idx, ref in enumerate(drive_refs, start=1):
             doc = None
             try:
@@ -698,6 +743,7 @@ def main():
                     run_identity=doc.run_identity,
                 )
                 batch_results.append((ref.display_name, state.invoice_type_id or "", score))
+                successful_states.append(state)
                 if field_results:
                     batch_field_results.append(field_results)
             except KeyboardInterrupt:
@@ -715,6 +761,11 @@ def main():
             for name, err in failed_pdfs:
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
+        try:
+            _write_batch_workbook_outputs(successful_states, args.output, app_config)
+        except GoogleSheetsOutputError as e:
+            print(str(e))
+            sys.exit(1)
         if batch_results and any(s is not None for _, _, s in batch_results):
             _print_batch_summary(
                 batch_results,
@@ -729,6 +780,7 @@ def main():
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []
+        successful_states: list[AgentState] = []
         for doc in materialized_docs:
             pdf = Path(doc.local_pdf_path)
             out_dir = legacy_local_output_dir(doc, args.output)
@@ -743,6 +795,7 @@ def main():
                     run_identity=doc.run_identity,
                 )
                 batch_results.append((pdf.name, state.invoice_type_id or "", score))
+                successful_states.append(state)
                 if field_results:
                     batch_field_results.append(field_results)
             except KeyboardInterrupt:
@@ -757,6 +810,11 @@ def main():
             for name, err in failed_pdfs:
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
+        try:
+            _write_batch_workbook_outputs(successful_states, args.output, app_config)
+        except GoogleSheetsOutputError as e:
+            print(str(e))
+            sys.exit(1)
         if batch_results and any(s is not None for _, _, s in batch_results):
             _print_batch_summary(
                 batch_results,

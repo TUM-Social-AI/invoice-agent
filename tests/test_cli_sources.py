@@ -6,7 +6,14 @@ import pytest
 import main as cli
 
 from src.agent.state import AgentState, AgentStatus
+from src.output.workbook import (
+    COMPLIANCE_MATRIX_TABLE,
+    RAW_COMPLIANCE_RESULTS_TABLE,
+    RAW_INVOICE_SUMMARY_TABLE,
+    WorkbookTable,
+)
 from src.sources.models import DocumentRef, MaterializedDocument, RunIdentity, SourceProvenance
+from tests.test_canonical_output import make_passed_state, make_needs_review_state
 
 
 def _patch_cli_runtime(monkeypatch):
@@ -160,6 +167,7 @@ def test_main_one_pdf_folder_routes_as_batch_and_preserves_output_stem(tmp_path:
 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))
+    monkeypatch.setattr(cli, "_write_batch_workbook_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(folder), "--output", str(output)])
 
     cli.main()
@@ -169,6 +177,177 @@ def test_main_one_pdf_folder_routes_as_batch_and_preserves_output_stem(tmp_path:
     assert calls[0][1] == str(output / "Only")
     assert calls[0][2]["source_provenance"].metadata["discovered_via"] == "folder"
     assert len(summaries) == 1
+
+
+def test_main_local_folder_batch_writes_canonical_workbook_after_legacy_outputs(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    folder = tmp_path / "invoices"
+    folder.mkdir()
+    first_pdf = folder / "Alpha.pdf"
+    second_pdf = folder / "Beta.pdf"
+    first_pdf.write_bytes(b"%PDF")
+    second_pdf.write_bytes(b"%PDF")
+    output = tmp_path / "output"
+    process_calls = []
+    workbook_calls = []
+    csv_calls = []
+    states = [make_passed_state(), make_needs_review_state()]
+
+    def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
+        process_calls.append((pdf_path, output_dir, kwargs))
+        state = states[len(process_calls) - 1]
+        state.pdf_path = pdf_path
+        state.output_dir = output_dir
+        state.source_provenance = kwargs["source_provenance"]
+        state.run_identity = kwargs["run_identity"]
+        return state, {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}, None
+
+    def fake_build_workbook_from_states(successful_states):
+        captured_states = list(successful_states)
+        workbook_calls.append(captured_states)
+        return [
+            WorkbookTable(
+                RAW_INVOICE_SUMMARY_TABLE,
+                ["invoice_id", "source_type", "run_id"],
+                [
+                    {
+                        "invoice_id": state.run_identity.safe_document_stem,
+                        "source_type": state.source_provenance.source_type,
+                        "run_id": state.run_identity.run_id,
+                    }
+                    for state in captured_states
+                ],
+            )
+        ]
+
+    monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "build_workbook_from_states", fake_build_workbook_from_states, raising=False)
+    monkeypatch.setattr(
+        cli,
+        "write_workbook_csvs",
+        lambda tables, output_dir: csv_calls.append((list(tables), Path(output_dir))) or {"Invoice Summary": str(Path(output_dir) / "invoice_summary.csv")},
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "parse_google_sheets_target", lambda config: SimpleNamespace(enabled=False), raising=False)
+    monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(folder), "--output", str(output)])
+
+    cli.main()
+
+    assert [Path(call[1]).name for call in process_calls] == ["Alpha", "Beta"]
+    assert workbook_calls == [states]
+    assert csv_calls[0][1] == output / "canonical_workbook"
+    assert csv_calls[0][0][0].rows == [
+        {
+            "invoice_id": states[0].run_identity.safe_document_stem,
+            "source_type": "local",
+            "run_id": states[0].run_identity.run_id,
+        },
+        {
+            "invoice_id": states[1].run_identity.safe_document_stem,
+            "source_type": "local",
+            "run_id": states[1].run_identity.run_id,
+        },
+    ]
+
+
+def test_main_local_folder_sheets_sync_filters_generated_views_when_disabled(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    folder = tmp_path / "invoices"
+    folder.mkdir()
+    pdf = folder / "Alpha.pdf"
+    pdf.write_bytes(b"%PDF")
+    output = tmp_path / "output"
+    config = {"output": {"google_sheets": {"enabled": True}}}
+    state = make_passed_state()
+    uploaded = {}
+    all_tables = [
+        WorkbookTable(RAW_INVOICE_SUMMARY_TABLE, ["invoice_id"], [{"invoice_id": "alpha"}]),
+        WorkbookTable(RAW_COMPLIANCE_RESULTS_TABLE, ["rule_id"], [{"rule_id": "R1"}]),
+        WorkbookTable(COMPLIANCE_MATRIX_TABLE, ["invoice_id", "R1"], [{"invoice_id": "alpha", "R1": "passed"}]),
+    ]
+
+    class FakeWriter:
+        def __init__(self, **kwargs):
+            uploaded["writer_kwargs"] = kwargs
+
+        def write_workbook(self, tables, target):
+            uploaded["tables"] = list(tables)
+            uploaded["target"] = target
+            return SimpleNamespace(
+                spreadsheet_id="sheet-123",
+                spreadsheet_url="https://docs.google.com/spreadsheets/d/sheet-123",
+                managed_tabs=[table.name for table in uploaded["tables"]],
+                updated_ranges=len(uploaded["tables"]),
+                updated_cells=8,
+            )
+
+    def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
+        state.pdf_path = pdf_path
+        state.output_dir = output_dir
+        state.source_provenance = kwargs["source_provenance"]
+        state.run_identity = kwargs["run_identity"]
+        return state, {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}, None
+
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "build_workbook_from_states", lambda states: all_tables, raising=False)
+    monkeypatch.setattr(cli, "write_workbook_csvs", lambda tables, output_dir: {"ok": str(Path(output_dir) / "ok.csv")}, raising=False)
+    monkeypatch.setattr(
+        cli,
+        "parse_google_sheets_target",
+        lambda cfg: SimpleNamespace(enabled=True, include_generated_views=False),
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "GoogleSheetsWorkbookWriter", FakeWriter, raising=False)
+    monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(folder), "--output", str(output)])
+
+    cli.main()
+
+    assert [table.name for table in uploaded["tables"]] == [
+        RAW_INVOICE_SUMMARY_TABLE,
+        RAW_COMPLIANCE_RESULTS_TABLE,
+    ]
+    assert uploaded["writer_kwargs"] == {"app_config": config}
+
+
+def test_main_single_pdf_does_not_write_batch_workbook_or_sheets(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    pdf = tmp_path / "single.pdf"
+    pdf.write_bytes(b"%PDF")
+    output = tmp_path / "output"
+    state = make_passed_state()
+    calls = []
+
+    def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
+        calls.append((pdf_path, output_dir, kwargs))
+        return state, {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}, None
+
+    monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
+    monkeypatch.setattr(
+        cli,
+        "build_workbook_from_states",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("single-file run should not build batch workbook")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "write_workbook_csvs",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("single-file run should not write batch workbook")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "GoogleSheetsWorkbookWriter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("single-file run should not sync Sheets")),
+        raising=False,
+    )
+    monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(pdf), "--output", str(output)])
+
+    cli.main()
+
+    assert len(calls) == 1
 
 
 def test_process_invoice_uses_state_provenance_from_agent_fallback(tmp_path: Path, monkeypatch):
@@ -239,6 +418,41 @@ def _drive_doc(tmp_path: Path) -> MaterializedDocument:
     )
 
 
+def _drive_doc_named(tmp_path: Path, name: str, source_id: str, revision_id: str, source_hash: str) -> MaterializedDocument:
+    pdf = tmp_path / f"{Path(name).stem}.pdf"
+    pdf.write_bytes(b"%PDF")
+    ref = DocumentRef(
+        source_type="google_drive",
+        display_name=name,
+        uri=f"gdrive://{source_id}",
+        source_id=source_id,
+        revision_id=revision_id,
+        mime_type="application/pdf",
+    )
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id=source_id,
+        source_uri=f"gdrive://{source_id}",
+        display_name=name,
+        original_filename=name,
+        revision_id=revision_id,
+        source_hash=source_hash,
+        materialization_method="download",
+    )
+    run_identity = RunIdentity(
+        run_id=f"20260608T000000000000Z-{Path(name).stem.lower()}-{source_hash}",
+        created_at_utc=provenance.materialized_at_utc,
+        safe_document_stem=Path(name).stem.lower().replace(" ", "-"),
+        source_hash=source_hash,
+    )
+    return MaterializedDocument(
+        ref=ref,
+        local_pdf_path=str(pdf),
+        provenance=provenance,
+        run_identity=run_identity,
+    )
+
+
 def test_main_drive_auth_saves_token_without_constructing_agent(tmp_path: Path, monkeypatch):
     _patch_cli_runtime(monkeypatch)
     calls = []
@@ -280,6 +494,7 @@ def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(cli, "cleanup_materialized_google_drive_document", lambda d: cleaned.append(d))
     monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))
+    monkeypatch.setattr(cli, "_write_batch_workbook_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr(
         "sys.argv",
         ["main.py", "--google-drive-folder-id", "folder-1", "--output", str(output)],
@@ -294,6 +509,90 @@ def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: 
     assert calls[0][2]["run_identity"].safe_document_stem == "drive-invoice"
     assert cleaned == [doc]
     assert len(summaries) == 1
+
+
+def test_main_google_drive_batch_writes_workbook_from_successes_and_keeps_failure_summary(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    output = tmp_path / "output"
+    success_doc = _drive_doc_named(tmp_path, "Drive Success.pdf", "drive-success", "rev-1", "hashsuccess")
+    failed_doc = _drive_doc_named(tmp_path, "Drive Failure.pdf", "drive-failure", "rev-2", "hashfailure")
+    docs_by_id = {
+        success_doc.ref.source_id: success_doc,
+        failed_doc.ref.source_id: failed_doc,
+    }
+    success_state = make_needs_review_state()
+    workbook_states = []
+    csv_calls = []
+    summaries = []
+
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "discover_google_drive_documents", lambda *args, **kwargs: [success_doc.ref, failed_doc.ref])
+    monkeypatch.setattr(cli, "materialize_google_drive_document", lambda ref, *args, **kwargs: docs_by_id[ref.source_id])
+    monkeypatch.setattr(cli, "cleanup_materialized_google_drive_document", lambda doc: None)
+
+    def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
+        if Path(pdf_path).name == "Drive Failure.pdf":
+            raise RuntimeError("processing failed")
+        success_state.pdf_path = pdf_path
+        success_state.output_dir = output_dir
+        success_state.source_provenance = kwargs["source_provenance"]
+        success_state.run_identity = kwargs["run_identity"]
+        return success_state, {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}, None
+
+    def fake_build_workbook_from_states(states):
+        captured = list(states)
+        workbook_states.append(captured)
+        return [
+            WorkbookTable(
+                RAW_INVOICE_SUMMARY_TABLE,
+                ["invoice_id", "source_type", "source_id", "revision_id", "run_id"],
+                [
+                    {
+                        "invoice_id": state.run_identity.safe_document_stem,
+                        "source_type": state.source_provenance.source_type,
+                        "source_id": state.source_provenance.source_id,
+                        "revision_id": state.source_provenance.revision_id,
+                        "run_id": state.run_identity.run_id,
+                    }
+                    for state in captured
+                ],
+            )
+        ]
+
+    monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
+    monkeypatch.setattr(cli, "build_workbook_from_states", fake_build_workbook_from_states, raising=False)
+    monkeypatch.setattr(
+        cli,
+        "write_workbook_csvs",
+        lambda tables, output_dir: csv_calls.append((list(tables), Path(output_dir))) or {"Invoice Summary": str(Path(output_dir) / "invoice_summary.csv")},
+        raising=False,
+    )
+    monkeypatch.setattr(cli, "parse_google_sheets_target", lambda config: SimpleNamespace(enabled=False), raising=False)
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--google-drive-folder-id", "folder-1", "--output", str(output)],
+    )
+
+    cli.main()
+
+    assert workbook_states == [[success_state]]
+    assert csv_calls[0][1] == output / "canonical_workbook"
+    assert csv_calls[0][0][0].rows == [
+        {
+            "invoice_id": "drive-success",
+            "source_type": "google_drive",
+            "source_id": "drive-success",
+            "revision_id": "rev-1",
+            "run_id": success_state.run_identity.run_id,
+        }
+    ]
+    summary_results = summaries[0][0][0]
+    assert summary_results == [
+        ("Drive Success.pdf", success_state.invoice_type_id, {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}),
+        ("Drive Failure.pdf", "", None),
+    ]
 
 
 def test_main_google_drive_folder_empty_exits_without_agent(tmp_path: Path, monkeypatch, capsys):
@@ -338,6 +637,7 @@ def test_main_uses_configured_google_drive_folder_when_pdf_is_omitted(tmp_path: 
     monkeypatch.setattr(cli, "process_invoice", lambda *args, **kwargs: (SimpleNamespace(invoice_type_id=""), None, None))
     monkeypatch.setattr(cli, "cleanup_materialized_google_drive_document", lambda d: None)
     monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_write_batch_workbook_outputs", lambda *args, **kwargs: None)
     monkeypatch.setattr("sys.argv", ["main.py"])
 
     cli.main()
