@@ -185,6 +185,13 @@ ocr:
 output:
   base_dir: "output"
   include_page_crops: true # save region crops for debugging
+  google_sheets:
+    enabled: false
+    spreadsheet_id: ""
+    create_title: ""
+    mode: "replace"
+    value_input_option: "RAW"
+    include_generated_views: true
 
 sources:
   google_drive:
