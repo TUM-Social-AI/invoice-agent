@@ -1,12 +1,24 @@
 from __future__ import annotations
 
+import csv
 import socket
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from src.output.canonical import _stringify_cell
-from src.output.workbook import WorkbookTable
+from src.output.canonical_csv import _workbook_filename
+from src.output.workbook import (
+    COMPLIANCE_MATRIX_TABLE,
+    DASHBOARD_RULE_COUNTS_TABLE,
+    DASHBOARD_SEVERITY_COUNTS_TABLE,
+    DASHBOARD_STATUS_COUNTS_TABLE,
+    RAW_COMPLIANCE_RESULTS_TABLE,
+    RAW_INVOICE_SUMMARY_TABLE,
+    REVIEW_QUEUE_TABLE,
+    WorkbookTable,
+)
 from src.sources.google_drive import GoogleDriveSourceError, resolve_google_drive_credentials
 
 
@@ -21,6 +33,27 @@ TRANSIENT_EXCEPTIONS = (
 
 class GoogleSheetsOutputError(ValueError):
     """Raised when Google Sheets output config or upload behavior is invalid."""
+
+
+WORKBOOK_TABLE_ORDER = [
+    RAW_INVOICE_SUMMARY_TABLE,
+    RAW_COMPLIANCE_RESULTS_TABLE,
+    COMPLIANCE_MATRIX_TABLE,
+    REVIEW_QUEUE_TABLE,
+    DASHBOARD_STATUS_COUNTS_TABLE,
+    DASHBOARD_RULE_COUNTS_TABLE,
+    DASHBOARD_SEVERITY_COUNTS_TABLE,
+]
+
+_RAW_FIXTURE_FILENAME_FALLBACKS = {
+    RAW_INVOICE_SUMMARY_TABLE: "canonical_invoice_summary.csv",
+    RAW_COMPLIANCE_RESULTS_TABLE: "canonical_compliance_results.csv",
+    COMPLIANCE_MATRIX_TABLE: "workbook_compliance_matrix.csv",
+    REVIEW_QUEUE_TABLE: "workbook_review_queue.csv",
+    DASHBOARD_STATUS_COUNTS_TABLE: "workbook_dashboard_status_counts.csv",
+    DASHBOARD_RULE_COUNTS_TABLE: "workbook_dashboard_rule_counts.csv",
+    DASHBOARD_SEVERITY_COUNTS_TABLE: "workbook_dashboard_severity_counts.csv",
+}
 
 
 @dataclass(frozen=True)
@@ -104,6 +137,46 @@ def build_google_sheets_service(app_config: dict, credentials: Any = None):
             "Google Sheets API dependency is missing. Run `pip install -r requirements.txt`."
         ) from e
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
+    fixture_dir = Path(path)
+    if not fixture_dir.is_dir():
+        raise GoogleSheetsOutputError(f"Workbook CSV fixture directory does not exist: {fixture_dir}")
+
+    resolved_paths: dict[str, Path] = {}
+    missing: list[str] = []
+    for table_name in WORKBOOK_TABLE_ORDER:
+        candidates = [fixture_dir / _workbook_filename(table_name)]
+        fallback = _RAW_FIXTURE_FILENAME_FALLBACKS.get(table_name)
+        if fallback:
+            candidates.append(fixture_dir / fallback)
+        csv_path = next((candidate for candidate in candidates if candidate.exists()), None)
+        if csv_path is None:
+            missing.append(_workbook_filename(table_name))
+        else:
+            resolved_paths[table_name] = csv_path
+
+    if missing:
+        raise GoogleSheetsOutputError(
+            "Workbook CSV fixture directory is missing required files: "
+            + ", ".join(missing)
+        )
+
+    return [
+        _load_workbook_table_csv(table_name, resolved_paths[table_name])
+        for table_name in WORKBOOK_TABLE_ORDER
+    ]
+
+
+def _load_workbook_table_csv(table_name: str, path: Path) -> WorkbookTable:
+    with path.open(newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        headers = list(reader.fieldnames or [])
+        if not headers:
+            raise GoogleSheetsOutputError(f"Workbook CSV fixture has no header row: {path}")
+        rows = [{header: row.get(header, "") for header in headers} for row in reader]
+    return WorkbookTable(table_name, headers, rows)
 
 
 def _error_status(exc: BaseException) -> int | None:

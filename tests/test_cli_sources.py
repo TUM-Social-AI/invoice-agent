@@ -1,6 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 import main as cli
 
 from src.agent.state import AgentState, AgentStatus
@@ -356,3 +358,204 @@ def test_main_rejects_pdf_and_google_drive_folder_together(tmp_path: Path, monke
         assert e.code == 2
     else:
         raise AssertionError("Expected parser SystemExit")
+
+
+def test_main_uploads_workbook_fixture_csv_dir_without_invoice_processing(monkeypatch, capsys):
+    from src.output.workbook import WorkbookTable
+
+    fixture_dir = Path("tests/fixtures/output")
+    config = {
+        "output": {
+            "google_sheets": {
+                "enabled": False,
+                "spreadsheet_id": "",
+                "create_title": "",
+                "mode": "replace",
+                "value_input_option": "RAW",
+            }
+        }
+    }
+    tables = [
+        WorkbookTable("Invoice Summary", ["invoice_id"], [{"invoice_id": "SECRET_ROW_VALUE"}]),
+        WorkbookTable("Compliance Results", ["rule_id"], [{"rule_id": "R_TOTAL_PRESENT"}]),
+    ]
+    captured = {}
+
+    class FakeWriter:
+        def __init__(self, **kwargs):
+            captured["writer_kwargs"] = kwargs
+
+        def write_workbook(self, workbook_tables, target):
+            captured["tables"] = list(workbook_tables)
+            captured["target"] = target
+            return SimpleNamespace(
+                spreadsheet_id="sheet-123",
+                spreadsheet_url="https://docs.google.com/spreadsheets/d/sheet-123",
+                managed_tabs=[table.name for table in captured["tables"]],
+                updated_ranges=len(captured["tables"]),
+                updated_cells=42,
+            )
+
+    monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(cli, "load_workbook_tables_from_csv_dir", lambda path: tables, raising=False)
+    monkeypatch.setattr(cli, "GoogleSheetsWorkbookWriter", FakeWriter, raising=False)
+
+    forbidden = AssertionError("fixture upload must bypass invoice processing")
+    monkeypatch.setattr(cli, "load_config_store", lambda config: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "InvoiceAgent", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "process_invoice", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "materialize_local_input", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "discover_google_drive_documents", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(cli, "materialize_google_drive_document", lambda *args, **kwargs: (_ for _ in ()).throw(forbidden))
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--upload-workbook-csv-dir",
+            str(fixture_dir),
+            "--sheets-spreadsheet-id",
+            "sheet-123",
+        ],
+    )
+
+    cli.main()
+
+    assert captured["tables"] == tables
+    assert captured["target"].enabled is True
+    assert captured["target"].spreadsheet_id == "sheet-123"
+    assert captured["target"].create_title is None
+    assert captured["writer_kwargs"] == {"app_config": config}
+
+    output = capsys.readouterr().out
+    assert "sheet-123" in output
+    assert "2 managed tab" in output
+    assert "SECRET_ROW_VALUE" not in output
+    assert "R_TOTAL_PRESENT" not in output
+
+
+def test_main_upload_workbook_csv_dir_rejects_ambiguous_target_overrides(monkeypatch, capsys):
+    fixture_dir = Path("tests/fixtures/output")
+    config = {
+        "output": {
+            "google_sheets": {
+                "enabled": False,
+                "spreadsheet_id": "",
+                "create_title": "",
+                "mode": "replace",
+            }
+        }
+    }
+
+    monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "load_workbook_tables_from_csv_dir",
+        lambda path: (_ for _ in ()).throw(AssertionError("ambiguous target should fail before loading")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        cli,
+        "GoogleSheetsWorkbookWriter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer should not be constructed")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--upload-workbook-csv-dir",
+            str(fixture_dir),
+            "--sheets-spreadsheet-id",
+            "sheet-123",
+            "--sheets-create-title",
+            "Invoice Review",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1
+    assert "both spreadsheet_id and create_title" in capsys.readouterr().out
+
+
+def test_load_workbook_tables_from_csv_dir_reads_expected_fixture_tabs():
+    from src.output.google_sheets import load_workbook_tables_from_csv_dir
+    from src.output.workbook import (
+        COMPLIANCE_MATRIX_TABLE,
+        DASHBOARD_RULE_COUNTS_TABLE,
+        DASHBOARD_SEVERITY_COUNTS_TABLE,
+        DASHBOARD_STATUS_COUNTS_TABLE,
+        RAW_COMPLIANCE_RESULTS_TABLE,
+        RAW_INVOICE_SUMMARY_TABLE,
+        REVIEW_QUEUE_TABLE,
+    )
+
+    tables = load_workbook_tables_from_csv_dir("tests/fixtures/output")
+
+    assert [table.name for table in tables] == [
+        RAW_INVOICE_SUMMARY_TABLE,
+        RAW_COMPLIANCE_RESULTS_TABLE,
+        COMPLIANCE_MATRIX_TABLE,
+        REVIEW_QUEUE_TABLE,
+        DASHBOARD_STATUS_COUNTS_TABLE,
+        DASHBOARD_RULE_COUNTS_TABLE,
+        DASHBOARD_SEVERITY_COUNTS_TABLE,
+    ]
+    assert tables[0].headers[:4] == ["schema_version", "run_id", "invoice_id", "invoice_file"]
+    assert tables[0].rows[0]["invoice_id"] == "invoice-alpha"
+    assert list(tables[0].rows[0]) == tables[0].headers
+    assert tables[2].headers[-1] == "R_VAT_REQUIRED"
+    alpha_matrix_row = next(row for row in tables[2].rows if row["invoice_id"] == "invoice-alpha")
+    assert alpha_matrix_row["R_VAT_REQUIRED"] == "passed"
+
+
+def test_main_upload_workbook_csv_dir_refuses_partial_fixture_before_writer(tmp_path: Path, monkeypatch):
+    complete_fixture_dir = Path("tests/fixtures/output")
+    partial_dir = tmp_path / "partial-workbook"
+    partial_dir.mkdir()
+    (partial_dir / "invoice_summary.csv").write_text(
+        (complete_fixture_dir / "canonical_invoice_summary.csv").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    config = {
+        "output": {
+            "google_sheets": {
+                "enabled": False,
+                "spreadsheet_id": "",
+                "create_title": "",
+                "mode": "replace",
+            }
+        }
+    }
+
+    monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(
+        cli,
+        "GoogleSheetsWorkbookWriter",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("writer should not be constructed")),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "main.py",
+            "--upload-workbook-csv-dir",
+            str(partial_dir),
+            "--sheets-spreadsheet-id",
+            "sheet-123",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main()
+
+    assert exc.value.code == 1

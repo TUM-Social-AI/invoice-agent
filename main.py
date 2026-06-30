@@ -39,6 +39,12 @@ from src.learning.evaluator import (
     ground_truth_csv_configured,
     load_ground_truth,
 )
+from src.output.google_sheets import (
+    GoogleSheetsOutputError,
+    GoogleSheetsWorkbookWriter,
+    load_workbook_tables_from_csv_dir,
+    parse_google_sheets_target,
+)
 from src.sources.local import (
     SourceError,
     is_folder_batch,
@@ -480,6 +486,24 @@ def main():
         action="store_true",
         help="Live demo mode: Rich-formatted phase-aware output (suppresses INFO logs)",
     )
+    parser.add_argument(
+        "--upload-workbook-csv-dir",
+        default=None,
+        metavar="PATH",
+        help="Upload an existing canonical workbook CSV directory to Google Sheets without processing invoices",
+    )
+    parser.add_argument(
+        "--sheets-spreadsheet-id",
+        default=None,
+        metavar="ID",
+        help="Google Sheets spreadsheet ID for --upload-workbook-csv-dir",
+    )
+    parser.add_argument(
+        "--sheets-create-title",
+        default=None,
+        metavar="TITLE",
+        help="Create a new Google Sheets spreadsheet with this title for --upload-workbook-csv-dir",
+    )
     args = parser.parse_args()
     _load_dotenv_files()
 
@@ -529,6 +553,31 @@ def main():
     app_config = load_app_config(args.config)
     pres_on = presentation_enabled(app_config, args.presentation)
     apply_configured_log_level(app_config, presentation=pres_on)
+
+    if args.upload_workbook_csv_dir:
+        try:
+            target = parse_google_sheets_target(
+                app_config,
+                {
+                    "enabled": True,
+                    "spreadsheet_id": args.sheets_spreadsheet_id,
+                    "create_title": args.sheets_create_title,
+                },
+            )
+            tables = load_workbook_tables_from_csv_dir(args.upload_workbook_csv_dir)
+            result = GoogleSheetsWorkbookWriter(app_config=app_config).write_workbook(tables, target)
+        except GoogleSheetsOutputError as e:
+            print(str(e))
+            sys.exit(1)
+
+        print("Google Sheets fixture upload complete.")
+        print(f"  Spreadsheet ID : {result.spreadsheet_id}")
+        print(f"  Spreadsheet URL: {result.spreadsheet_url}")
+        print(f"  Managed tabs   : {len(result.managed_tabs)} managed tab(s)")
+        if result.managed_tabs:
+            print(f"  Tab names      : {', '.join(result.managed_tabs)}")
+        print(f"  Updated cells  : {result.updated_cells}")
+        return
 
     if args.drive_auth:
         try:
