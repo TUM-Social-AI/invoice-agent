@@ -1,0 +1,4 @@
+invoice_id,invoice_file,invoice_type_id,review_status,R_NET_REQUIRED,R_SERVICE_DATE,R_TOTAL_PRESENT,R_VAT_RATE_WARN,R_VAT_REQUIRED
+drive-invoice-gamma,drive-invoice-gamma.pdf,SERVICES,needs_review,flagged,skipped,,,
+invoice-alpha,invoice-alpha.pdf,EU_VAT,passed,,,passed,,passed
+invoice-beta,invoice-beta.pdf,EU_VAT,warning,,,,warning,

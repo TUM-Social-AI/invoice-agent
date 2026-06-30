@@ -1,0 +1,3 @@
+severity,passed,failed,warning,flagged,skipped,unknown,total
+error,2,0,0,1,0,0,3
+warning,0,0,1,0,1,0,2

@@ -1,0 +1,10 @@
+metric,value,count
+compliance_status,flagged,1
+compliance_status,passed,2
+compliance_status,skipped,1
+compliance_status,warning,1
+invoice_review_status,needs_review,1
+invoice_review_status,passed,1
+invoice_review_status,warning,1
+invoice_type,EU_VAT,2
+invoice_type,SERVICES,1
