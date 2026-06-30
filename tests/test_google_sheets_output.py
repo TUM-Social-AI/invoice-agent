@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from src.output.canonical import _stringify_cell
 from src.output.workbook import build_workbook_from_states
 from tests.test_canonical_output import canonical_states
 
@@ -204,7 +205,10 @@ def test_write_existing_spreadsheet_batches_structure_clear_and_values():
             "majorDimension": "ROWS",
             "values": [
                 table.headers,
-                *[[str(row.get(header, "")) for header in table.headers] for row in table.rows],
+                *[
+                    [_stringify_cell(row.get(header, "")) for header in table.headers]
+                    for row in table.rows
+                ],
             ],
         }
         for table in tables
