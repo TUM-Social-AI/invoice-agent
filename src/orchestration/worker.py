@@ -126,13 +126,20 @@ def build_store(cfg: OrchestrationConfig) -> DedupStore:
     return DynamoDbDedupStore(cfg.dynamodb_table, region=cfg.aws_region)
 
 
-def build_drive_client(cfg: OrchestrationConfig) -> DriveClient:
+def build_drive_client(app_config: dict) -> DriveClient:
     """
     Resolve the document source.
 
-    DRIVE_CLIENT=local -> filesystem stand-in (LOCAL_INPUT_DIR / LOCAL_OUTPUT_DIR).
-    Otherwise -> the Google Drive client provided on a separate branch, which must
-    expose `src.sources.google_drive.GoogleDriveClient` implementing DriveClient.
+    DRIVE_CLIENT=local -> filesystem stand-in (LOCAL_INPUT_DIR / LOCAL_OUTPUT_DIR),
+    which runs the whole loop with no AWS and no Drive credentials.
+
+    Otherwise -> the real Google Drive source. NOTE: the google-drive-source branch
+    exposes module-level *functions* (discover_google_drive_documents,
+    materialize_google_drive_document, cleanup_materialized_google_drive_document,
+    resolve_google_drive_folder_id) — not a client class — and still needs
+    service-account auth + a result-upload function before it can back this worker.
+    The adapter that wraps those functions into a DriveClient lands as a follow-up once
+    that branch merges; until then this path is intentionally unimplemented.
     """
     mode = os.environ.get("DRIVE_CLIENT", "").strip().lower()
     if mode == "local":
@@ -143,15 +150,16 @@ def build_drive_client(cfg: OrchestrationConfig) -> DriveClient:
             os.environ.get("LOCAL_OUTPUT_DIR", "output/drive"),
         )
 
-    try:
-        from src.sources.google_drive import GoogleDriveClient  # provided by the Drive branch
-    except ImportError as e:
-        raise RuntimeError(
-            "No Drive client available. Set DRIVE_CLIENT=local for local runs, or merge the "
-            "Google Drive branch providing src.sources.google_drive.GoogleDriveClient "
-            "(must implement the DriveClient protocol)."
-        ) from e
-    return GoogleDriveClient(input_folder=cfg.input_folder, output_folder=cfg.output_folder)
+    # TODO(drive-adapter): implement a GoogleDriveAdapter(DriveClient) over the
+    # google-drive-source module functions once that branch merges with service-account
+    # auth and an upload-results-to-Drive function. It will take `app_config` (the Drive
+    # functions resolve the folder via resolve_google_drive_folder_id(app_config)).
+    raise NotImplementedError(
+        "The Google Drive source adapter is not implemented yet. Set DRIVE_CLIENT=local "
+        "for local runs. The production adapter (wrapping src.sources.google_drive's "
+        "discover / materialize / cleanup / upload functions) lands once the "
+        "google-drive-source branch merges with service-account auth and result upload."
+    )
 
 
 def main() -> None:
@@ -174,12 +182,12 @@ def main() -> None:
     store = load_config(app_config.get("config_dir", "config/csv"))
     agent = InvoiceAgent(config=app_config, store=store)
 
-    drive = build_drive_client(cfg)
+    drive = build_drive_client(app_config)
     dedup = build_store(cfg)
 
     logger.info(
-        "starting poll: input=%s output=%s backend=%s cap=%d",
-        cfg.input_folder, cfg.output_folder, cfg.dedup_backend, cfg.max_files_per_poll,
+        "starting poll: backend=%s table=%s cap=%d",
+        cfg.dedup_backend, cfg.dynamodb_table, cfg.max_files_per_poll,
     )
     run_poll(agent, drive, dedup, cfg)
 

@@ -169,13 +169,8 @@ output:
   base_dir: "output"
   include_page_crops: true               # save region crops for debugging
 
-# Google Drive I/O for the deployed worker (see src/orchestration/).
-# Folders are logical source locations the DriveClient resolves; kept here so they are
-# easy to change without touching code. The service-account credential is injected at
-# deploy time (Secrets Manager), never stored in config.
-drive:
-  input_folder: "/input"                 # poll this folder for new PDFs
-  output_folder: "/output"               # publish results here (never re-ingested as input)
+# Google Drive input/output folders are configured under `sources.google_drive` (provided
+# by the google-drive-source branch), not here — the worker resolves them via that layer.
 
 # Scheduled-poll worker behavior (src/orchestration/worker.py).
 orchestration:
