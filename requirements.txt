@@ -13,3 +13,4 @@ boto3>=1.34
 
 # Dev / test
 pytest>=7.0
+moto[dynamodb]>=5   # mock AWS for DynamoDbDedupStore tests
