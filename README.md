@@ -254,6 +254,16 @@ sources:
 
 When `--pdf` is provided, local PDF processing is used. When `--pdf` is omitted and a Drive folder is configured, Drive ingestion is used.
 
+Drive-backed config is separate from Drive PDF ingestion. If `sources.google_drive.config_folder.enabled: true`,
+the app loads `invoice_types.csv`, `extraction_fields.csv`, `compliance_rules.csv`, and optional config files
+from that Drive folder even when `--pdf` points to a local file. To force local `config_dir` CSVs for one run:
+
+```bash
+python main.py --pdf invoices/my_invoice.pdf --local-config
+```
+
+`--no-drive-config` is accepted as an alias for the same behavior.
+
 OAuth access tokens refresh automatically. If the OAuth app remains in Google’s Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
 
 ### 1. Install Ollama

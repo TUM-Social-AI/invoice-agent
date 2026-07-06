@@ -175,8 +175,8 @@ def _config_summary(source: str, config_dir: str | Path, store) -> ConfigLoadSum
     )
 
 
-def load_config_store(app_config: dict):
-    if not google_drive_config_folder_enabled(app_config):
+def load_config_store(app_config: dict, *, force_local: bool = False):
+    if force_local or not google_drive_config_folder_enabled(app_config):
         config_dir = app_config.get("config_dir", "config/csv")
         store = load_config(config_dir)
         return store, _config_summary("local config/csv", config_dir, store)
@@ -457,6 +457,13 @@ def main():
         default=os.environ.get("CONFIG_PATH", "config/config.yaml"),
         help="Config file path",
     )
+    parser.add_argument(
+        "--local-config",
+        "--no-drive-config",
+        dest="local_config",
+        action="store_true",
+        help="Load config CSVs from local config_dir even when Google Drive config_folder is enabled",
+    )
     parser.add_argument("--list-types", action="store_true", help="List available invoice types")
     parser.add_argument("--learn", action="store_true",
                         help="Learning mode: after processing, compare to *_truth.json and write learnings")
@@ -554,7 +561,7 @@ def main():
         RunPresenter(show_reasoning=bool(logging_cfg.get("presentation_show_reasoning", False)))
         if pres_on else NullPresenter()
     )
-    store, config_summary = load_config_store(app_config)
+    store, config_summary = load_config_store(app_config, force_local=args.local_config)
 
     if args.list_types:
         if presenter.active:

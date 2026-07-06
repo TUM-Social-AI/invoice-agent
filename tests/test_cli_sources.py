@@ -21,7 +21,7 @@ def _patch_cli_runtime(monkeypatch):
     monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
     monkeypatch.setattr(cli, "load_app_config", lambda path: {})
     monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
-    monkeypatch.setattr(cli, "load_config_store", lambda config: (store, summary))
+    monkeypatch.setattr(cli, "load_config_store", lambda config, **kwargs: (store, summary))
     monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store, presenter=None: object())
 
 
@@ -104,6 +104,80 @@ def test_load_config_store_google_drive_returns_summary(tmp_path: Path, monkeypa
     assert summary.extraction_fields == 2
     assert summary.compliance_rules == 3
     assert summary.denylist_phrases == 2
+
+
+def test_load_config_store_force_local_ignores_enabled_google_drive_config(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object()]},
+        compliance_rules={"VIAJES": [object()]},
+        employee_name_role_denylist=[],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: True)
+    monkeypatch.setattr(
+        cli,
+        "materialize_google_drive_config_folder",
+        lambda config: (_ for _ in ()).throw(AssertionError("Drive config should not be loaded")),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({"config_dir": str(config_dir)}, force_local=True)
+
+    assert loaded is store
+    assert summary.source == "local config/csv"
+    assert summary.path == str(config_dir)
+
+
+def test_main_local_config_flag_bypasses_drive_config_for_local_pdf(tmp_path: Path, monkeypatch):
+    store = SimpleNamespace(invoice_types={})
+    summary = cli.ConfigLoadSummary(
+        source="local config/csv",
+        path="config/csv",
+        invoice_types=0,
+        extraction_fields=0,
+        compliance_rules=0,
+        allowed_value_sets=0,
+        denylist_phrases=0,
+    )
+    config = {
+        "config_dir": "config/csv",
+        "sources": {
+            "google_drive": {
+                "config_folder": {"enabled": True, "folder_id": "drive-config-folder"},
+            }
+        },
+    }
+    pdf = tmp_path / "example.pdf"
+    pdf.write_bytes(b"%PDF")
+    calls = []
+
+    monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(cli, "load_config_store", lambda app_config, **kwargs: calls.append(kwargs) or (store, summary))
+    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store, presenter=None: object())
+    monkeypatch.setattr(
+        cli,
+        "process_invoice",
+        lambda *args, **kwargs: (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 0, "fields_exact": 0, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        ),
+    )
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(pdf), "--local-config"])
+
+    cli.main()
+
+    assert calls == [{"force_local": True}]
 
 
 def test_main_single_pdf_routes_through_sources_as_single_run(tmp_path: Path, monkeypatch):
