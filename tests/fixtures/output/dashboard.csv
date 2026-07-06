@@ -1,0 +1,23 @@
+section,metric,value,count
+Action summary,Invoices,Blocked / needs review,1
+Action summary,Invoices,Passed,1
+Action summary,Invoices,Warnings,1
+Invoice review,Review status,needs_review,1
+Invoice review,Review status,passed,1
+Invoice review,Review status,warning,1
+Compliance status,Rule results,flagged,1
+Compliance status,Rule results,passed,2
+Compliance status,Rule results,skipped,1
+Compliance status,Rule results,warning,1
+Missing critical fields,Field,Currency,2
+Missing critical fields,Field,Gross amount,2
+Missing critical fields,Field,Invoice date,3
+Missing critical fields,Field,Invoice number,1
+Missing critical fields,Field,Net amount,2
+Missing critical fields,Field,Tax amount,2
+Missing critical fields,Field,Vendor VAT ID,2
+Rules needing attention,Rule,Net amount required,1
+Rules needing attention,Rule,Vat rate plausibility,1
+Legend,Status,not_checked,
+Legend,Status,not_applicable,
+Legend,Issue,internal_contradiction,

@@ -1,4 +1,5 @@
 from pathlib import Path
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -788,30 +789,61 @@ def test_main_upload_workbook_csv_dir_rejects_ambiguous_target_overrides(monkeyp
 def test_load_workbook_tables_from_csv_dir_reads_expected_fixture_tabs():
     from src.output.google_sheets import load_workbook_tables_from_csv_dir
     from src.output.workbook import (
+        COMPLIANCE_MATRIX_COLUMNS,
         COMPLIANCE_MATRIX_TABLE,
         DASHBOARD_TABLE,
+        INVOICE_SUMMARY_REVIEWER_COLUMNS,
         INVOICE_SUMMARY_TABLE,
         RAW_COMPLIANCE_RESULTS_TABLE,
         RAW_INVOICE_SUMMARY_TABLE,
+        REVIEW_ISSUES_TABLE,
         REVIEW_QUEUE_TABLE,
+        RULE_GUIDE_TABLE,
     )
 
     tables = load_workbook_tables_from_csv_dir("tests/fixtures/output")
 
     assert [table.name for table in tables] == [
-        INVOICE_SUMMARY_TABLE,
-        REVIEW_QUEUE_TABLE,
-        COMPLIANCE_MATRIX_TABLE,
         DASHBOARD_TABLE,
+        REVIEW_QUEUE_TABLE,
+        REVIEW_ISSUES_TABLE,
+        INVOICE_SUMMARY_TABLE,
+        COMPLIANCE_MATRIX_TABLE,
+        RULE_GUIDE_TABLE,
         RAW_COMPLIANCE_RESULTS_TABLE,
         RAW_INVOICE_SUMMARY_TABLE,
     ]
-    assert tables[0].headers[:4] == ["schema_version", "run_id", "invoice_id", "invoice_file"]
-    assert tables[0].rows[0]["invoice_id"] == "invoice-alpha"
-    assert list(tables[0].rows[0]) == tables[0].headers
-    assert tables[2].headers[-1] == "R_VAT_REQUIRED"
-    alpha_matrix_row = next(row for row in tables[2].rows if row["invoice_id"] == "invoice-alpha")
-    assert alpha_matrix_row["R_VAT_REQUIRED"] == "passed"
+    by_name = {table.name: table for table in tables}
+    assert by_name[INVOICE_SUMMARY_TABLE].headers == INVOICE_SUMMARY_REVIEWER_COLUMNS
+    assert by_name[RAW_INVOICE_SUMMARY_TABLE].rows[0]["invoice_id"] == "invoice-alpha"
+    assert list(by_name[INVOICE_SUMMARY_TABLE].rows[0]) == by_name[INVOICE_SUMMARY_TABLE].headers
+    assert by_name[REVIEW_ISSUES_TABLE].headers[:4] == [
+        "priority",
+        "issue_type",
+        "severity",
+        "recommended_action",
+    ]
+    assert by_name[COMPLIANCE_MATRIX_TABLE].headers[:3] == COMPLIANCE_MATRIX_COLUMNS
+    assert not any(header.startswith("R_") for header in by_name[COMPLIANCE_MATRIX_TABLE].headers)
+    alpha_matrix_row = next(
+        row for row in by_name[COMPLIANCE_MATRIX_TABLE].rows if row["invoice_file"] == "invoice-alpha.pdf"
+    )
+    assert alpha_matrix_row["Vendor vat required"] == "passed"
+
+
+def test_load_workbook_tables_from_csv_dir_rejects_stale_visible_generated_schema(tmp_path: Path):
+    from src.output.google_sheets import GoogleSheetsOutputError, load_workbook_tables_from_csv_dir
+
+    stale_dir = tmp_path / "stale-workbook"
+    shutil.copytree(Path("tests/fixtures/output"), stale_dir)
+    (stale_dir / "review.csv").write_text(
+        "priority,invoice_id,invoice_file,blocking_rule_ids\n"
+        "1,invoice-alpha,invoice-alpha.pdf,R_NET_REQUIRED\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(GoogleSheetsOutputError, match="stale or invalid headers"):
+        load_workbook_tables_from_csv_dir(stale_dir)
 
 
 def test_main_upload_workbook_csv_dir_refuses_partial_fixture_before_writer(tmp_path: Path, monkeypatch):

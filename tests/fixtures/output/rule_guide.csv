@@ -1,0 +1,6 @@
+rule,invoice_type,severity,field,condition,guidance,failure_message,passed,failed,warning,flagged,skipped,unknown,total_results,failing_invoices,warning_invoices,reasoning
+Gross total present,EU_VAT,error,F_GROSS,,,Gross amount present,1,0,0,0,0,0,1,,,
+Net amount required,SERVICES,error,F_NET,,,Net amount needs human confirmation,0,0,0,1,0,0,1,drive-invoice-gamma.pdf,,drive-invoice-gamma.pdf: Net amount needs human confirmation
+Service date present,SERVICES,warning,F_SERVICE_DATE,,,No service date field configured for fixture,0,0,0,0,1,0,1,,,
+Vat rate plausibility,EU_VAT,warning,F_TAX,,,VAT rate differs from expected rate,0,0,1,0,0,0,1,,invoice-beta.pdf,invoice-beta.pdf: VAT rate differs from expected rate
+Vendor vat required,EU_VAT,error,F_VAT,,,VAT ID present,1,0,0,0,0,0,1,,,

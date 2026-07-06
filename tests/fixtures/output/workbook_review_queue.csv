@@ -1,3 +1,0 @@
-priority,invoice_id,invoice_file,source_type,source_id,source_hash,invoice_type_id,review_status,blocking_rule_ids,warning_rule_ids,review_reasons
-1,drive-invoice-gamma,drive-invoice-gamma.pdf,google_drive,drive-file-123,hash-gamma,SERVICES,needs_review,R_NET_REQUIRED,,review_status=needs_review; R_NET_REQUIRED: Net amount needs human confirmation
-2,invoice-beta,invoice-beta.pdf,,,,EU_VAT,warning,,R_VAT_RATE_WARN,review_status=warning; R_VAT_RATE_WARN: VAT rate differs from expected rate

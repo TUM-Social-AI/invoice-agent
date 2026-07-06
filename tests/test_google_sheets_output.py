@@ -316,6 +316,7 @@ def test_google_sheets_formatting_hides_raw_tabs_and_adds_pivot_requests():
         COMPLIANCE_MATRIX_TABLE,
         DASHBOARD_TABLE,
         RAW_COMPLIANCE_RESULTS_TABLE,
+        REVIEW_ISSUES_TABLE,
         REVIEW_QUEUE_TABLE,
         TECHNICAL_RUN_DATA_TABLE,
     )
@@ -363,11 +364,21 @@ def test_google_sheets_formatting_hides_raw_tabs_and_adds_pivot_requests():
         props["sheetId"]: props["gridProperties"]["frozenColumnCount"]
         for props in frozen_updates
     }
-    assert frozen_by_sheet[sheet_ids[REVIEW_QUEUE_TABLE]] == 2
+    assert frozen_by_sheet[sheet_ids[REVIEW_QUEUE_TABLE]] == 6
+    assert frozen_by_sheet[sheet_ids[REVIEW_ISSUES_TABLE]] == 7
     assert frozen_by_sheet[sheet_ids[COMPLIANCE_MATRIX_TABLE]] == 3
 
     assert any("setBasicFilter" in request for request in requests)
     assert any("autoResizeDimensions" in request for request in requests)
+    assert any("updateDimensionProperties" in request for request in requests)
+    validation_requests = [request for request in requests if "setDataValidation" in request]
+    assert len(validation_requests) == 2
+    validation_values = {
+        value["userEnteredValue"]
+        for request in validation_requests
+        for value in request["setDataValidation"]["rule"]["condition"]["values"]
+    }
+    assert {"needs_info", "approved", "rejected", "escalated"}.issubset(validation_values)
     assert any("addConditionalFormatRule" in request for request in requests)
     conditional_values = {
         value["userEnteredValue"]
@@ -375,7 +386,12 @@ def test_google_sheets_formatting_hides_raw_tabs_and_adds_pivot_requests():
         if "addConditionalFormatRule" in request
         for value in request["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"]
     }
-    assert {"not_checked", "not_applicable"}.issubset(conditional_values)
+    assert {
+        "not_checked",
+        "not_applicable",
+        "missing_critical_field",
+        "internal_contradiction",
+    }.issubset(conditional_values)
     assert any(
         request.get("updateCells", {}).get("fields") == "note"
         for request in requests

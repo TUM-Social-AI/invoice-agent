@@ -10,11 +10,18 @@ from typing import Any, Callable, Iterable
 from src.output.canonical import _stringify_cell
 from src.output.canonical_csv import _workbook_filename
 from src.output.workbook import (
+    COMPLIANCE_MATRIX_COLUMNS,
     COMPLIANCE_MATRIX_TABLE,
+    DASHBOARD_COLUMNS,
     DASHBOARD_TABLE,
+    INVOICE_SUMMARY_REVIEWER_COLUMNS,
     INVOICE_SUMMARY_TABLE,
     RAW_COMPLIANCE_RESULTS_TABLE,
+    REVIEW_ISSUES_COLUMNS,
+    REVIEW_ISSUES_TABLE,
+    REVIEW_QUEUE_COLUMNS,
     REVIEW_QUEUE_TABLE,
+    RULE_GUIDE_COLUMNS,
     RULE_GUIDE_TABLE,
     TECHNICAL_RUN_DATA_TABLE,
     WorkbookTable,
@@ -36,25 +43,29 @@ class GoogleSheetsOutputError(ValueError):
 
 
 WORKBOOK_TABLE_ORDER = [
-    INVOICE_SUMMARY_TABLE,
-    REVIEW_QUEUE_TABLE,
-    COMPLIANCE_MATRIX_TABLE,
     DASHBOARD_TABLE,
+    REVIEW_QUEUE_TABLE,
+    REVIEW_ISSUES_TABLE,
+    INVOICE_SUMMARY_TABLE,
+    COMPLIANCE_MATRIX_TABLE,
     RULE_GUIDE_TABLE,
     RAW_COMPLIANCE_RESULTS_TABLE,
     TECHNICAL_RUN_DATA_TABLE,
 ]
 
 _RAW_FIXTURE_FILENAME_FALLBACKS = {
-    INVOICE_SUMMARY_TABLE: "canonical_invoice_summary.csv",
     RAW_COMPLIANCE_RESULTS_TABLE: "canonical_compliance_results.csv",
     TECHNICAL_RUN_DATA_TABLE: "canonical_invoice_summary.csv",
-    COMPLIANCE_MATRIX_TABLE: "workbook_compliance_matrix.csv",
-    REVIEW_QUEUE_TABLE: "workbook_review_queue.csv",
-    DASHBOARD_TABLE: "workbook_dashboard_status_counts.csv",
 }
 
 _HIDDEN_RAW_TABLES = {RAW_COMPLIANCE_RESULTS_TABLE, TECHNICAL_RUN_DATA_TABLE}
+_VISIBLE_HEADER_CONTRACTS = {
+    INVOICE_SUMMARY_TABLE: INVOICE_SUMMARY_REVIEWER_COLUMNS,
+    REVIEW_QUEUE_TABLE: REVIEW_QUEUE_COLUMNS,
+    REVIEW_ISSUES_TABLE: REVIEW_ISSUES_COLUMNS,
+    DASHBOARD_TABLE: DASHBOARD_COLUMNS,
+    RULE_GUIDE_TABLE: RULE_GUIDE_COLUMNS,
+}
 
 
 @dataclass(frozen=True)
@@ -159,7 +170,7 @@ def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
 
     resolved_paths: dict[str, Path] = {}
     missing: list[str] = []
-    optional_tables = {RULE_GUIDE_TABLE}
+    optional_tables: set[str] = set()
     for table_name in WORKBOOK_TABLE_ORDER:
         candidates = [fixture_dir / _workbook_filename(table_name)]
         fallback = _RAW_FIXTURE_FILENAME_FALLBACKS.get(table_name)
@@ -178,11 +189,14 @@ def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
             + ", ".join(missing)
         )
 
-    return [
+    tables = [
         _load_workbook_table_csv(table_name, resolved_paths[table_name])
         for table_name in WORKBOOK_TABLE_ORDER
         if table_name in resolved_paths
     ]
+    for table in tables:
+        _validate_workbook_table_schema(table)
+    return tables
 
 
 def _load_workbook_table_csv(table_name: str, path: Path) -> WorkbookTable:
@@ -193,6 +207,24 @@ def _load_workbook_table_csv(table_name: str, path: Path) -> WorkbookTable:
             raise GoogleSheetsOutputError(f"Workbook CSV fixture has no header row: {path}")
         rows = [{header: row.get(header, "") for header in headers} for row in reader]
     return WorkbookTable(table_name, headers, rows)
+
+
+def _validate_workbook_table_schema(table: WorkbookTable) -> None:
+    expected_headers = _VISIBLE_HEADER_CONTRACTS.get(table.name)
+    if expected_headers is not None and table.headers != expected_headers:
+        raise GoogleSheetsOutputError(
+            f"Workbook CSV for {table.name!r} has stale or invalid headers."
+        )
+    if table.name == COMPLIANCE_MATRIX_TABLE:
+        if table.headers[: len(COMPLIANCE_MATRIX_COLUMNS)] != COMPLIANCE_MATRIX_COLUMNS:
+            raise GoogleSheetsOutputError(
+                "Workbook CSV for 'Compliance Matrix' has stale or invalid key columns."
+            )
+        raw_rule_headers = [header for header in table.headers if header.startswith("R_")]
+        if raw_rule_headers:
+            raise GoogleSheetsOutputError(
+                "Workbook CSV for 'Compliance Matrix' exposes raw rule IDs in visible headers."
+            )
 
 
 def _error_status(exc: BaseException) -> int | None:
@@ -404,7 +436,9 @@ class GoogleSheetsWorkbookWriter:
             hidden = target.hide_raw_tabs and table.name in _HIDDEN_RAW_TABLES
             frozen_column_count = 0
             if table.name == REVIEW_QUEUE_TABLE:
-                frozen_column_count = 2
+                frozen_column_count = 6
+            elif table.name == REVIEW_ISSUES_TABLE:
+                frozen_column_count = 7
             elif table.name == COMPLIANCE_MATRIX_TABLE:
                 frozen_column_count = 3
 
@@ -487,6 +521,8 @@ class GoogleSheetsWorkbookWriter:
                     }
                 }
             )
+            requests.extend(self._workflow_column_width_requests(table, sheet_id))
+            requests.extend(self._reviewer_validation_requests(table, sheet_id, row_count))
             requests.extend(self._status_conditional_format_requests(table, sheet_id, row_count, col_count))
 
         requests.extend(self._matrix_header_note_requests(tables_by_name, sheet_ids))
@@ -516,6 +552,10 @@ class GoogleSheetsWorkbookWriter:
             "error": {"red": 0.96, "green": 0.8, "blue": 0.8},
             "not_checked": {"red": 0.9, "green": 0.86, "blue": 0.96},
             "not_applicable": {"red": 0.88, "green": 0.88, "blue": 0.88},
+            "blocking_rule": {"red": 0.96, "green": 0.8, "blue": 0.8},
+            "warning_rule": {"red": 1.0, "green": 0.91, "blue": 0.64},
+            "missing_critical_field": {"red": 1.0, "green": 0.91, "blue": 0.64},
+            "internal_contradiction": {"red": 0.93, "green": 0.78, "blue": 0.93},
         }
         requests: list[dict[str, Any]] = []
         for status, color in colors.items():
@@ -545,6 +585,84 @@ class GoogleSheetsWorkbookWriter:
                 }
             )
         return requests
+
+    def _workflow_column_width_requests(
+        self,
+        table: WorkbookTable,
+        sheet_id: int,
+    ) -> list[dict[str, Any]]:
+        if table.name not in {REVIEW_QUEUE_TABLE, REVIEW_ISSUES_TABLE}:
+            return []
+        widths = {
+            "priority": 72,
+            "recommended_action": 360,
+            "decision": 140,
+            "reviewer": 140,
+            "notes": 280,
+            "resolved_date": 120,
+            "issue": 340,
+            "policy_summary": 260,
+            "evidence_refs": 220,
+        }
+        requests: list[dict[str, Any]] = []
+        for header, width in widths.items():
+            index = _col_index(table.headers, header)
+            if index is None:
+                continue
+            requests.append(
+                {
+                    "updateDimensionProperties": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": index,
+                            "endIndex": index + 1,
+                        },
+                        "properties": {"pixelSize": width},
+                        "fields": "pixelSize",
+                    }
+                }
+            )
+        return requests
+
+    def _reviewer_validation_requests(
+        self,
+        table: WorkbookTable,
+        sheet_id: int,
+        row_count: int,
+    ) -> list[dict[str, Any]]:
+        if row_count <= 1 or table.name not in {REVIEW_QUEUE_TABLE, REVIEW_ISSUES_TABLE}:
+            return []
+        decision_col = _col_index(table.headers, "decision")
+        if decision_col is None:
+            return []
+        return [
+            {
+                "setDataValidation": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": decision_col,
+                        "endColumnIndex": decision_col + 1,
+                    },
+                    "rule": {
+                        "condition": {
+                            "type": "ONE_OF_LIST",
+                            "values": [
+                                {"userEnteredValue": "needs_info"},
+                                {"userEnteredValue": "approved"},
+                                {"userEnteredValue": "rejected"},
+                                {"userEnteredValue": "escalated"},
+                                {"userEnteredValue": "not_applicable"},
+                            ],
+                        },
+                        "strict": False,
+                        "showCustomUi": True,
+                    },
+                }
+            }
+        ]
 
     def _matrix_header_note_requests(
         self,

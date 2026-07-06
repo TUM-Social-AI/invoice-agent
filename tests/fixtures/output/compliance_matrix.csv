@@ -1,0 +1,4 @@
+invoice_file,invoice_type,review_status,Gross total present,Net amount required,Service date present,Vat rate plausibility,Vendor vat required
+drive-invoice-gamma.pdf,SERVICES,needs_review,not_applicable,flagged,skipped,not_applicable,not_applicable
+invoice-alpha.pdf,EU_VAT,passed,passed,not_applicable,not_applicable,not_checked,passed
+invoice-beta.pdf,EU_VAT,warning,not_checked,not_applicable,not_applicable,warning,not_checked

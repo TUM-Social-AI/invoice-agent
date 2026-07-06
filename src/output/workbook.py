@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter, defaultdict
 from dataclasses import dataclass
+import json
 from typing import Any, Iterable
 
 from src.agent.state import AgentState
@@ -21,6 +22,7 @@ TECHNICAL_RUN_DATA_TABLE = "Technical Run Data"
 RAW_COMPLIANCE_RESULTS_TABLE = "Compliance Results"
 COMPLIANCE_MATRIX_TABLE = "Compliance Matrix"
 REVIEW_QUEUE_TABLE = "Review"
+REVIEW_ISSUES_TABLE = "Review Issues"
 DASHBOARD_TABLE = "Dashboard"
 RULE_GUIDE_TABLE = "Rule Guide"
 
@@ -45,6 +47,7 @@ INVOICE_SUMMARY_REVIEWER_COLUMNS = [
     "invoice_file",
     "invoice_type",
     "review_status",
+    "primary_action",
     "vendor_name",
     "vendor_vat_id",
     "invoice_number",
@@ -54,28 +57,53 @@ INVOICE_SUMMARY_REVIEWER_COLUMNS = [
     "net_amount",
     "tax_amount",
     "missing_critical_fields",
+    "contradictions",
     "blocking_rules",
     "warning_rules",
+    "not_checked_count",
 ]
 
 REVIEW_QUEUE_COLUMNS = [
     "priority",
+    "recommended_action",
+    "decision",
+    "reviewer",
+    "notes",
+    "resolved_date",
     "invoice_file",
     "invoice_type",
     "review_status",
     "blocking_rules",
     "warning_rules",
     "review_reasons",
-    "recommended_action",
+    "missing_critical_fields",
+    "contradictions",
     "source_page",
     "evidence_refs",
-    "policy_refs",
+    "policy_summary",
+    "source_url",
     "source_uri",
-    "missing_critical_fields",
-    "reviewer",
+]
+
+REVIEW_ISSUES_COLUMNS = [
+    "priority",
+    "issue_type",
+    "severity",
+    "recommended_action",
     "decision",
     "notes",
     "resolved_date",
+    "invoice_file",
+    "invoice_type",
+    "review_status",
+    "field",
+    "rule",
+    "issue",
+    "source_page",
+    "evidence_refs",
+    "policy_summary",
+    "source_url",
+    "source_uri",
 ]
 
 DASHBOARD_COLUMNS = ["section", "metric", "value", "count"]
@@ -136,6 +164,51 @@ _MISSING_FIELD_LABELS = {
     "net_amount": "Net amount",
     "tax_amount": "Tax amount",
 }
+_NON_TRAVEL_TEXT_HINTS = (
+    "purchase",
+    "procurement",
+    "supplier",
+    "quotation",
+    "quote",
+    "bid",
+    "flour",
+    "wheat",
+    "goods",
+    "equipment",
+    "consumable",
+    "payment voucher",
+)
+_TRAVEL_TEXT_HINTS = ("travel", "viaje", "destino", "destination", "per diem", "dieta")
+_NEGATED_NON_TRAVEL_PATTERNS = (
+    "no procurement",
+    "no supplier",
+    "no quotation",
+    "no quote",
+    "no bid",
+    "no flour",
+    "no wheat",
+    "no goods",
+    "no equipment",
+    "no consumable",
+    "no payment voucher",
+    "not procurement",
+    "not supplier",
+    "without procurement",
+    "without supplier",
+    "sin procurement",
+    "sin proveedor",
+    "sin cotizacion",
+    "sin cotización",
+)
+_MISSING_RESULT_TERMS = (
+    "missing",
+    "not identified",
+    "no se ha identificado",
+    "falta",
+    "null",
+    "required",
+    "obligatorio",
+)
 
 
 @dataclass(frozen=True)
@@ -253,12 +326,151 @@ def _join_values(values: Iterable[str]) -> str:
     return "; ".join(sorted({value for value in values if value}))
 
 
+def _looks_like_rule_id(value: str) -> bool:
+    return value.startswith("R_")
+
+
+def _redact_visible_rule_ids(value: str) -> str:
+    text = value.strip()
+    if not text:
+        return ""
+    return " ".join(
+        "Configured compliance rule" if _looks_like_rule_id(part) else part
+        for part in text.split()
+    )
+
+
+def _policy_summary(policy_refs: str) -> str:
+    if not policy_refs:
+        return ""
+    summaries: list[str] = []
+    for part in policy_refs.split("; "):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            summaries.append(_redact_visible_rule_ids(text))
+            continue
+        if isinstance(parsed, dict):
+            snippet = _text(parsed, "snippet_id")
+            if _looks_like_rule_id(snippet):
+                snippet = ""
+            source = _text(parsed, "source")
+            title = _text(parsed, "title") or _text(parsed, "name")
+            pieces = [piece for piece in [snippet, title, source] if piece]
+            if not pieces:
+                pieces = ["Configured compliance rule"]
+            summaries.append(" - ".join(pieces) if pieces else json.dumps(parsed, sort_keys=True))
+        else:
+            summaries.append(_redact_visible_rule_ids(_stringify_cell(parsed)))
+    return _join_values(summaries)
+
+
 def _missing_critical_fields(invoice: dict[str, object]) -> list[str]:
     return [
         _MISSING_FIELD_LABELS.get(field_name, _display_text(field_name))
         for field_name in HIGH_VALUE_FIELD_NAMES
         if not _text(invoice, field_name)
     ]
+
+
+def _source_url(invoice: dict[str, object]) -> str:
+    web_view_link = _text(invoice, "web_view_link")
+    if web_view_link:
+        return web_view_link
+    source_type = _text(invoice, "source_type")
+    source_id = _text(invoice, "source_id")
+    if source_type == "google_drive" and source_id:
+        return f"https://drive.google.com/file/d/{source_id}/view"
+    source_uri = _text(invoice, "source_uri")
+    if source_uri.startswith(("http://", "https://", "file://")):
+        return source_uri
+    return ""
+
+
+def _rule_topic(row: dict[str, object], label: str) -> str:
+    haystack = " ".join(
+        [
+            label,
+            _text(row, "rule_name"),
+            _text(row, "field_id"),
+            _text(row, "message"),
+            _text(row, "agent_notes"),
+        ]
+    ).lower()
+    if any(term in haystack for term in ("currency", "moneda")):
+        return "currency"
+    if any(term in haystack for term in ("total", "amount", "importe", "gross", "net")):
+        return "amount"
+    return ""
+
+
+def _amount_fields_for_rule(row: dict[str, object], label: str) -> list[str]:
+    haystack = " ".join(
+        [
+            label,
+            _text(row, "rule_name"),
+            _text(row, "field_id"),
+            _text(row, "message"),
+            _text(row, "agent_notes"),
+        ]
+    ).lower()
+    fields: list[str] = []
+    if "net" in haystack or "base imponible" in haystack:
+        fields.append("net_amount")
+    if any(term in haystack for term in ("tax", "vat", "iva", "impuesto")):
+        fields.append("tax_amount")
+    if any(term in haystack for term in ("gross", "total", "importe")):
+        fields.extend(["total_amount", "gross_amount"])
+    return fields
+
+
+def _looks_like_missing_result(row: dict[str, object], label: str) -> bool:
+    haystack = " ".join([_text(row, "message"), _text(row, "agent_notes")]).lower()
+    return any(term in haystack for term in _MISSING_RESULT_TERMS)
+
+
+def _has_affirmative_non_travel_evidence(text: str) -> bool:
+    haystack = (text or "").lower()
+    if not haystack:
+        return False
+    if any(pattern in haystack for pattern in _NEGATED_NON_TRAVEL_PATTERNS):
+        return False
+    return any(hint in haystack for hint in _NON_TRAVEL_TEXT_HINTS)
+
+
+def _contradictions_for_invoice(
+    invoice: dict[str, object],
+    related_rows: list[dict[str, object]],
+    labels: dict[str, str],
+) -> list[str]:
+    contradictions: list[str] = []
+    for row in related_rows:
+        status = _normalized_status(row)
+        if status not in {"failed", "flagged", "warning", "unknown"}:
+            continue
+        label = labels.get(_text(row, "rule_id"), _display_text(_text(row, "rule_name")))
+        if not _looks_like_missing_result(row, label):
+            continue
+        topic = _rule_topic(row, label)
+        if topic == "currency" and _text(invoice, "currency"):
+            contradictions.append(f"Currency value exists but {label} still needs review")
+        if topic == "amount" and any(_text(invoice, field) for field in _amount_fields_for_rule(row, label)):
+            contradictions.append(f"Amount value exists but {label} still needs review")
+
+    if _text(invoice, "invoice_type_id").upper() == "VIAJES":
+        related_source_text = " ".join(
+            _text(row, key)
+            for row in related_rows
+            if _normalized_status(row) in {"failed", "flagged", "warning", "unknown"}
+            for key in ("agent_notes", "evidence_refs")
+        )
+        if _has_affirmative_non_travel_evidence(related_source_text):
+            contradictions.append("Invoice classified as travel but visible context suggests procurement or goods")
+
+    return sorted(set(contradictions))
 
 
 def _rows_by_invoice(compliance_rows: list[dict[str, object]]) -> dict[str, list[dict[str, object]]]:
@@ -297,16 +509,28 @@ def _recommended_action(
     warning_rules: list[str],
     unknown_rules: list[str],
     missing_fields: list[str],
+    contradictions: list[str],
     labels: dict[str, str],
 ) -> str:
+    parts: list[str] = []
     if blocking_rules:
-        return f"Block approval until reviewed: confirm {_join_rule_labels(blocking_rules, labels)}."
+        parts.append(f"confirm {_join_rule_labels(blocking_rules, labels)}")
     if warning_rules:
-        return f"Check warning before approval: {_join_rule_labels(warning_rules, labels)}."
+        parts.append(f"check {_join_rule_labels(warning_rules, labels)}")
     if unknown_rules:
-        return f"Review unchecked rule result: {_join_rule_labels(unknown_rules, labels)}."
+        parts.append(f"review unchecked result for {_join_rule_labels(unknown_rules, labels)}")
     if missing_fields:
-        return "Complete missing invoice fields."
+        parts.append(f"complete missing fields: {'; '.join(missing_fields)}")
+    if contradictions:
+        parts.append("resolve internal contradictions")
+    if blocking_rules or contradictions:
+        return f"Block approval until reviewed: {'; '.join(parts)}."
+    if warning_rules:
+        return f"Check warning before approval: {'; '.join(parts)}."
+    if unknown_rules:
+        return f"Review unchecked rule result: {'; '.join(parts)}."
+    if missing_fields:
+        return f"Complete missing invoice fields: {'; '.join(missing_fields)}."
     return "No action needed."
 
 
@@ -386,10 +610,25 @@ def build_invoice_summary(
             for row in related
             if _normalized_status(row) == "warning"
         ]
+        unknown_rules = [
+            _text(row, "rule_id")
+            for row in related
+            if _normalized_status(row) == "unknown"
+        ]
+        missing_fields = _missing_critical_fields(invoice)
+        contradictions = _contradictions_for_invoice(invoice, related, labels)
         summary = {
             "invoice_file": _text(invoice, "invoice_file"),
             "invoice_type": _text(invoice, "invoice_type_id"),
             "review_status": _text(invoice, "review_status"),
+            "primary_action": _recommended_action(
+                blocking_rules,
+                warning_rules,
+                unknown_rules,
+                missing_fields,
+                contradictions,
+                labels,
+            ),
             "vendor_name": _text(invoice, "vendor_name"),
             "vendor_vat_id": _text(invoice, "vendor_vat_id"),
             "invoice_number": _text(invoice, "invoice_number"),
@@ -398,9 +637,11 @@ def build_invoice_summary(
             "gross_amount": _text(invoice, "gross_amount"),
             "net_amount": _text(invoice, "net_amount"),
             "tax_amount": _text(invoice, "tax_amount"),
-            "missing_critical_fields": "; ".join(_missing_critical_fields(invoice)),
+            "missing_critical_fields": "; ".join(missing_fields),
+            "contradictions": "; ".join(contradictions),
             "blocking_rules": _join_rule_labels(blocking_rules, labels),
             "warning_rules": _join_rule_labels(warning_rules, labels),
+            "not_checked_count": str(len(unknown_rules)),
         }
         rows.append(summary)
 
@@ -437,12 +678,14 @@ def build_review_queue(
             if _normalized_status(row) == "unknown"
         ]
         missing_fields = _missing_critical_fields(invoice)
+        contradictions = _contradictions_for_invoice(invoice, related, labels)
         needs_attention = (
             review_status in _ATTENTION_REVIEW_STATUSES
             or bool(blocking_rules)
             or bool(warning_rules)
             or bool(unknown_rules)
             or bool(missing_fields)
+            or bool(contradictions)
         )
         if not needs_attention:
             continue
@@ -461,40 +704,47 @@ def build_review_queue(
                     reasons.append(f"{rule_label}: {status}")
         if missing_fields:
             reasons.append(f"Missing critical fields: {'; '.join(missing_fields)}")
+        if contradictions:
+            reasons.append(f"Internal contradictions: {'; '.join(contradictions)}")
 
         action_rows = _action_rows(related)
+        policy_refs = _join_values(_text(row, "policy_refs") for row in action_rows)
         priority = _review_priority(
             review_status,
             blocking_rules,
             warning_rules,
             unknown_rules,
             missing_fields,
+            contradictions,
         )
         queue_rows.append(
             {
                 "priority": str(priority),
+                "recommended_action": _recommended_action(
+                    blocking_rules,
+                    warning_rules,
+                    unknown_rules,
+                    missing_fields,
+                    contradictions,
+                    labels,
+                ),
+                "decision": "",
+                "reviewer": "",
+                "notes": "",
+                "resolved_date": "",
                 "invoice_file": _text(invoice, "invoice_file"),
                 "invoice_type": _text(invoice, "invoice_type_id"),
                 "review_status": review_status,
                 "blocking_rules": _join_rule_labels(blocking_rules, labels),
                 "warning_rules": _join_rule_labels(warning_rules, labels),
                 "review_reasons": "; ".join(reasons),
-                "recommended_action": _recommended_action(
-                    blocking_rules,
-                    warning_rules,
-                    unknown_rules,
-                    missing_fields,
-                    labels,
-                ),
+                "missing_critical_fields": "; ".join(missing_fields),
+                "contradictions": "; ".join(contradictions),
                 "source_page": _join_values(_text(row, "source_page") for row in action_rows),
                 "evidence_refs": _join_values(_text(row, "evidence_refs") for row in action_rows),
-                "policy_refs": _join_values(_text(row, "policy_refs") for row in action_rows),
+                "policy_summary": _policy_summary(policy_refs),
+                "source_url": _source_url(invoice),
                 "source_uri": _text(invoice, "source_uri"),
-                "missing_critical_fields": "; ".join(missing_fields),
-                "reviewer": "",
-                "decision": "",
-                "notes": "",
-                "resolved_date": "",
             }
         )
 
@@ -509,14 +759,130 @@ def build_review_queue(
     return WorkbookTable(REVIEW_QUEUE_TABLE, REVIEW_QUEUE_COLUMNS, queue_rows)
 
 
+def build_review_issues(
+    invoice_rows: list[dict[str, object]],
+    compliance_rows: list[dict[str, object]],
+    rule_metadata: Iterable[Any] | None = None,
+) -> WorkbookTable:
+    grouped = _rows_by_invoice(compliance_rows)
+    labels = _rule_labels(compliance_rows, rule_metadata)
+    issue_rows: list[dict[str, object]] = []
+
+    for invoice in invoice_rows:
+        _require_keys(invoice, _REVIEW_INVOICE_KEYS, "invoice row")
+        invoice_id = _text(invoice, "invoice_id")
+        review_status = _text(invoice, "review_status").strip().lower() or "unknown"
+        related = grouped.get(invoice_id, [])
+
+        for row in sorted(related, key=lambda item: (_text(item, "rule_id"), _text(item, "message"))):
+            status = _normalized_status(row)
+            if status not in {"failed", "flagged", "warning", "unknown"}:
+                continue
+            rule_label = labels.get(_text(row, "rule_id"), _display_text(_text(row, "rule_name")))
+            issue_type = "not_checked" if status == "unknown" else (
+                "warning_rule" if status == "warning" else "blocking_rule"
+            )
+            priority = 1 if issue_type == "blocking_rule" else (2 if issue_type == "warning_rule" else 3)
+            policy_refs = _text(row, "policy_refs")
+            issue_rows.append(
+                {
+                    "priority": str(priority),
+                    "issue_type": issue_type,
+                    "severity": _text(row, "severity") or status,
+                    "recommended_action": _recommended_action(
+                        [_text(row, "rule_id")] if issue_type == "blocking_rule" else [],
+                        [_text(row, "rule_id")] if issue_type == "warning_rule" else [],
+                        [_text(row, "rule_id")] if issue_type == "not_checked" else [],
+                        [],
+                        [],
+                        labels,
+                    ),
+                    "decision": "",
+                    "notes": "",
+                    "resolved_date": "",
+                    "invoice_file": _text(invoice, "invoice_file"),
+                    "invoice_type": _text(invoice, "invoice_type_id"),
+                    "review_status": review_status,
+                    "field": _text(row, "field_id"),
+                    "rule": rule_label,
+                    "issue": _text(row, "message") or status,
+                    "source_page": _text(row, "source_page"),
+                    "evidence_refs": _text(row, "evidence_refs"),
+                    "policy_summary": _policy_summary(policy_refs),
+                    "source_url": _source_url(invoice),
+                    "source_uri": _text(invoice, "source_uri"),
+                }
+            )
+
+        for field in _missing_critical_fields(invoice):
+            issue_rows.append(
+                {
+                    "priority": "3",
+                    "issue_type": "missing_critical_field",
+                    "severity": "warning",
+                    "recommended_action": f"Complete missing invoice field: {field}.",
+                    "decision": "",
+                    "notes": "",
+                    "resolved_date": "",
+                    "invoice_file": _text(invoice, "invoice_file"),
+                    "invoice_type": _text(invoice, "invoice_type_id"),
+                    "review_status": review_status,
+                    "field": field,
+                    "rule": "",
+                    "issue": f"Missing critical field: {field}",
+                    "source_page": "",
+                    "evidence_refs": "",
+                    "policy_summary": "",
+                    "source_url": _source_url(invoice),
+                    "source_uri": _text(invoice, "source_uri"),
+                }
+            )
+
+        for contradiction in _contradictions_for_invoice(invoice, related, labels):
+            issue_rows.append(
+                {
+                    "priority": "1",
+                    "issue_type": "internal_contradiction",
+                    "severity": "error",
+                    "recommended_action": "Block approval until reviewed: resolve internal contradiction.",
+                    "decision": "",
+                    "notes": "",
+                    "resolved_date": "",
+                    "invoice_file": _text(invoice, "invoice_file"),
+                    "invoice_type": _text(invoice, "invoice_type_id"),
+                    "review_status": review_status,
+                    "field": "",
+                    "rule": "",
+                    "issue": contradiction,
+                    "source_page": "",
+                    "evidence_refs": "",
+                    "policy_summary": "",
+                    "source_url": _source_url(invoice),
+                    "source_uri": _text(invoice, "source_uri"),
+                }
+            )
+
+    issue_rows.sort(
+        key=lambda row: (
+            int(_text(row, "priority") or "99"),
+            _text(row, "invoice_file"),
+            _text(row, "issue_type"),
+            _text(row, "rule"),
+            _text(row, "field"),
+        )
+    )
+    return WorkbookTable(REVIEW_ISSUES_TABLE, REVIEW_ISSUES_COLUMNS, issue_rows)
+
+
 def _review_priority(
     review_status: str,
     blocking_rules: list[str],
     warning_rules: list[str],
     unknown_rules: list[str],
     missing_fields: list[str] | None = None,
+    contradictions: list[str] | None = None,
 ) -> int:
-    if review_status in {"error", "failed"} or blocking_rules:
+    if review_status in {"error", "failed"} or blocking_rules or contradictions:
         return 1
     if review_status == "needs_review":
         return 1
@@ -539,13 +905,20 @@ def build_dashboard(
     compliance_status_counts: Counter[str] = Counter()
     rule_counts: Counter[str] = Counter()
     missing_field_counts: Counter[str] = Counter()
+    contradiction_counts: Counter[str] = Counter()
     labels = _rule_labels(compliance_rows, rule_metadata)
+    grouped = _rows_by_invoice(compliance_rows)
 
     for invoice in invoice_rows:
-        _require_keys(invoice, ["review_status", "invoice_type_id"], "invoice row")
+        _require_keys(invoice, ["invoice_id", "review_status", "invoice_type_id"], "invoice row")
         review_status = _text(invoice, "review_status") or "unknown"
         invoice_review_counts[review_status] += 1
-        if review_status in {"needs_review", "failed", "error"}:
+        contradictions = _contradictions_for_invoice(
+            invoice,
+            grouped.get(_text(invoice, "invoice_id"), []),
+            labels,
+        )
+        if contradictions or review_status in {"needs_review", "failed", "error"}:
             action_counts["Blocked / needs review"] += 1
         elif review_status == "warning":
             action_counts["Warnings"] += 1
@@ -555,6 +928,8 @@ def build_dashboard(
             action_counts["Unknown"] += 1
         for field in _missing_critical_fields(invoice):
             missing_field_counts[field] += 1
+        for contradiction in contradictions:
+            contradiction_counts[contradiction] += 1
     for row in compliance_rows:
         _require_keys(row, ["rule_id", "normalized_status"], "compliance row")
         status = _normalized_status(row)
@@ -579,6 +954,10 @@ def build_dashboard(
         for value, count in sorted(missing_field_counts.items())
     )
     rows.extend(
+        {"section": "Internal contradictions", "metric": "Finding", "value": value, "count": str(count)}
+        for value, count in sorted(contradiction_counts.items())
+    )
+    rows.extend(
         {"section": "Rules needing attention", "metric": "Rule", "value": value, "count": str(count)}
         for value, count in sorted(rule_counts.items())
     )
@@ -594,6 +973,12 @@ def build_dashboard(
                 "section": "Legend",
                 "metric": "Status",
                 "value": "not_applicable",
+                "count": "",
+            },
+            {
+                "section": "Legend",
+                "metric": "Issue",
+                "value": "internal_contradiction",
                 "count": "",
             },
         ]
@@ -673,14 +1058,27 @@ def build_workbook_tables(
     rule_metadata: Iterable[Any] | None = None,
 ) -> list[WorkbookTable]:
     return [
-        build_invoice_summary(invoice_rows, compliance_rows, rule_metadata),
-        build_review_queue(invoice_rows, compliance_rows, rule_metadata),
-        build_compliance_matrix(invoice_rows, compliance_rows, rule_metadata),
         build_dashboard(invoice_rows, compliance_rows, rule_metadata),
+        build_review_queue(invoice_rows, compliance_rows, rule_metadata),
+        build_review_issues(invoice_rows, compliance_rows, rule_metadata),
+        build_invoice_summary(invoice_rows, compliance_rows, rule_metadata),
+        build_compliance_matrix(invoice_rows, compliance_rows, rule_metadata),
         build_rule_guide(compliance_rows, rule_metadata),
         WorkbookTable(RAW_COMPLIANCE_RESULTS_TABLE, COMPLIANCE_RESULT_COLUMNS, compliance_rows),
         WorkbookTable(TECHNICAL_RUN_DATA_TABLE, INVOICE_SUMMARY_COLUMNS, invoice_rows),
     ]
+
+
+def _invoice_summary_row_with_extracted_values(state: AgentState) -> dict[str, str]:
+    row = dict(build_invoice_summary_row(state))
+    provenance = state.source_provenance
+    if provenance:
+        row["web_view_link"] = _stringify_cell(provenance.metadata.get("web_view_link", ""))
+    for key, result in state.extracted_fields.items():
+        field_name = result.field_name or key
+        if field_name not in row:
+            row[field_name] = _stringify_cell(result.extracted_value)
+    return row
 
 
 def build_workbook_from_states(
@@ -689,9 +1087,22 @@ def build_workbook_from_states(
 ) -> list[WorkbookTable]:
     materialized_states = list(states)
     invoice_rows = [build_invoice_summary_row(state) for state in materialized_states]
+    generated_invoice_rows = [
+        _invoice_summary_row_with_extracted_values(state)
+        for state in materialized_states
+    ]
     compliance_rows = [
         row
         for state in materialized_states
         for row in build_compliance_result_rows(state)
     ]
-    return build_workbook_tables(invoice_rows, compliance_rows, rule_metadata)
+    return [
+        build_dashboard(generated_invoice_rows, compliance_rows, rule_metadata),
+        build_review_queue(generated_invoice_rows, compliance_rows, rule_metadata),
+        build_review_issues(generated_invoice_rows, compliance_rows, rule_metadata),
+        build_invoice_summary(generated_invoice_rows, compliance_rows, rule_metadata),
+        build_compliance_matrix(generated_invoice_rows, compliance_rows, rule_metadata),
+        build_rule_guide(compliance_rows, rule_metadata),
+        WorkbookTable(RAW_COMPLIANCE_RESULTS_TABLE, COMPLIANCE_RESULT_COLUMNS, compliance_rows),
+        WorkbookTable(TECHNICAL_RUN_DATA_TABLE, INVOICE_SUMMARY_COLUMNS, invoice_rows),
+    ]

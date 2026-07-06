@@ -37,6 +37,9 @@ def _source_provenance(
     revision_id: str = "rev-alpha",
 ) -> SourceProvenance:
     timestamp = datetime(2026, 1, 15, 12, 0, tzinfo=timezone.utc)
+    metadata = {}
+    if source_type == "google_drive":
+        metadata["web_view_link"] = f"https://drive.google.com/file/d/{source_id}/view"
     return SourceProvenance(
         source_type=source_type,
         source_id=source_id,
@@ -48,6 +51,7 @@ def _source_provenance(
         discovered_at_utc=timestamp,
         materialized_at_utc=timestamp,
         materialization_method="passthrough" if source_type == "local" else "download",
+        metadata=metadata,
     )
 
 

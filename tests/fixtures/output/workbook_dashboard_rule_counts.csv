@@ -1,6 +1,0 @@
-rule_id,rule_name,severity,passed,failed,warning,flagged,skipped,unknown,total
-R_NET_REQUIRED,net_amount_required,error,0,0,0,1,0,0,1
-R_SERVICE_DATE,service_date_present,warning,0,0,0,0,1,0,1
-R_TOTAL_PRESENT,gross_total_present,error,1,0,0,0,0,0,1
-R_VAT_RATE_WARN,vat_rate_plausibility,warning,0,0,1,0,0,0,1
-R_VAT_REQUIRED,vendor_vat_required,error,1,0,0,0,0,0,1
