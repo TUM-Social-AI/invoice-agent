@@ -27,7 +27,8 @@ from pathlib import Path
 import yaml
 from dotenv import load_dotenv
 
-from src.config.loader import load_config
+from src.config.loader import ConfigStore, load_config
+from src.llm.config_resolve import active_rule_groups_from_config
 from src.agent.agent import InvoiceAgent
 from src.agent.state import AgentState, rule_verdict_summary
 from src.output.canonical_csv import write_workbook_csvs
@@ -455,12 +456,26 @@ def _write_batch_workbook_outputs(
     states: list[AgentState],
     output_dir: str | Path,
     app_config: dict,
+    store: ConfigStore | None = None,
 ) -> None:
     successful_states = list(states)
     if not successful_states:
         return
 
-    tables = build_workbook_from_states(successful_states)
+    active_rule_groups = active_rule_groups_from_config(app_config)
+    rule_metadata = []
+    if store is not None and hasattr(store, "get_rules"):
+        invoice_types = sorted({state.invoice_type_id for state in successful_states if state.invoice_type_id})
+        rule_metadata = [
+            rule
+            for invoice_type_id in invoice_types
+            for rule in store.get_rules(invoice_type_id, active_rule_groups)
+        ]
+
+    if rule_metadata:
+        tables = build_workbook_from_states(successful_states, rule_metadata)
+    else:
+        tables = build_workbook_from_states(successful_states)
     workbook_output_dir = Path(output_dir) / "canonical_workbook"
     csv_paths = write_workbook_csvs(tables, workbook_output_dir)
 
@@ -762,7 +777,7 @@ def main():
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
         try:
-            _write_batch_workbook_outputs(successful_states, args.output, app_config)
+            _write_batch_workbook_outputs(successful_states, args.output, app_config, store)
         except GoogleSheetsOutputError as e:
             print(str(e))
             sys.exit(1)
@@ -811,7 +826,7 @@ def main():
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
         try:
-            _write_batch_workbook_outputs(successful_states, args.output, app_config)
+            _write_batch_workbook_outputs(successful_states, args.output, app_config, store)
         except GoogleSheetsOutputError as e:
             print(str(e))
             sys.exit(1)

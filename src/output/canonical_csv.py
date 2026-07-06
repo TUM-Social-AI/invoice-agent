@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import csv
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable
 
 from src.agent.state import AgentState
 from src.output.canonical import (
@@ -93,7 +93,8 @@ def write_workbook_csvs(
 def write_canonical_workbook_csvs(
     states: Iterable[AgentState],
     output_dir: str | Path,
+    rule_metadata: Iterable[Any] | None = None,
 ) -> dict[str, str]:
     from src.output.workbook import build_workbook_from_states
 
-    return write_workbook_csvs(build_workbook_from_states(states), output_dir)
+    return write_workbook_csvs(build_workbook_from_states(states, rule_metadata), output_dir)

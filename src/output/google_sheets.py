@@ -11,12 +11,12 @@ from src.output.canonical import _stringify_cell
 from src.output.canonical_csv import _workbook_filename
 from src.output.workbook import (
     COMPLIANCE_MATRIX_TABLE,
-    DASHBOARD_RULE_COUNTS_TABLE,
-    DASHBOARD_SEVERITY_COUNTS_TABLE,
-    DASHBOARD_STATUS_COUNTS_TABLE,
+    DASHBOARD_TABLE,
+    INVOICE_SUMMARY_TABLE,
     RAW_COMPLIANCE_RESULTS_TABLE,
-    RAW_INVOICE_SUMMARY_TABLE,
     REVIEW_QUEUE_TABLE,
+    RULE_GUIDE_TABLE,
+    TECHNICAL_RUN_DATA_TABLE,
     WorkbookTable,
 )
 from src.sources.google_drive import GoogleDriveSourceError, resolve_google_drive_credentials
@@ -36,24 +36,25 @@ class GoogleSheetsOutputError(ValueError):
 
 
 WORKBOOK_TABLE_ORDER = [
-    RAW_INVOICE_SUMMARY_TABLE,
-    RAW_COMPLIANCE_RESULTS_TABLE,
-    COMPLIANCE_MATRIX_TABLE,
+    INVOICE_SUMMARY_TABLE,
     REVIEW_QUEUE_TABLE,
-    DASHBOARD_STATUS_COUNTS_TABLE,
-    DASHBOARD_RULE_COUNTS_TABLE,
-    DASHBOARD_SEVERITY_COUNTS_TABLE,
+    COMPLIANCE_MATRIX_TABLE,
+    DASHBOARD_TABLE,
+    RULE_GUIDE_TABLE,
+    RAW_COMPLIANCE_RESULTS_TABLE,
+    TECHNICAL_RUN_DATA_TABLE,
 ]
 
 _RAW_FIXTURE_FILENAME_FALLBACKS = {
-    RAW_INVOICE_SUMMARY_TABLE: "canonical_invoice_summary.csv",
+    INVOICE_SUMMARY_TABLE: "canonical_invoice_summary.csv",
     RAW_COMPLIANCE_RESULTS_TABLE: "canonical_compliance_results.csv",
+    TECHNICAL_RUN_DATA_TABLE: "canonical_invoice_summary.csv",
     COMPLIANCE_MATRIX_TABLE: "workbook_compliance_matrix.csv",
     REVIEW_QUEUE_TABLE: "workbook_review_queue.csv",
-    DASHBOARD_STATUS_COUNTS_TABLE: "workbook_dashboard_status_counts.csv",
-    DASHBOARD_RULE_COUNTS_TABLE: "workbook_dashboard_rule_counts.csv",
-    DASHBOARD_SEVERITY_COUNTS_TABLE: "workbook_dashboard_severity_counts.csv",
+    DASHBOARD_TABLE: "workbook_dashboard_status_counts.csv",
 }
+
+_HIDDEN_RAW_TABLES = {RAW_COMPLIANCE_RESULTS_TABLE, TECHNICAL_RUN_DATA_TABLE}
 
 
 @dataclass(frozen=True)
@@ -64,6 +65,10 @@ class GoogleSheetsTarget:
     mode: str = "replace"
     value_input_option: str = "RAW"
     include_generated_views: bool = True
+    hide_raw_tabs: bool = True
+    formatting: bool = True
+    include_native_pivots: bool = True
+    include_charts: bool = True
 
 
 @dataclass(frozen=True)
@@ -106,6 +111,10 @@ def parse_google_sheets_target(
     mode = str(cfg.get("mode") or "replace").strip().lower()
     value_input_option = str(cfg.get("value_input_option") or "RAW").strip().upper()
     include_generated_views = bool(cfg.get("include_generated_views", True))
+    hide_raw_tabs = bool(cfg.get("hide_raw_tabs", True))
+    formatting = bool(cfg.get("formatting", True))
+    include_native_pivots = bool(cfg.get("include_native_pivots", True))
+    include_charts = bool(cfg.get("include_charts", True))
 
     if spreadsheet_id and create_title:
         raise GoogleSheetsOutputError(
@@ -125,6 +134,10 @@ def parse_google_sheets_target(
         mode=mode,
         value_input_option=value_input_option,
         include_generated_views=include_generated_views,
+        hide_raw_tabs=hide_raw_tabs,
+        formatting=formatting,
+        include_native_pivots=include_native_pivots,
+        include_charts=include_charts,
     )
 
 
@@ -146,6 +159,7 @@ def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
 
     resolved_paths: dict[str, Path] = {}
     missing: list[str] = []
+    optional_tables = {RULE_GUIDE_TABLE}
     for table_name in WORKBOOK_TABLE_ORDER:
         candidates = [fixture_dir / _workbook_filename(table_name)]
         fallback = _RAW_FIXTURE_FILENAME_FALLBACKS.get(table_name)
@@ -153,7 +167,8 @@ def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
             candidates.append(fixture_dir / fallback)
         csv_path = next((candidate for candidate in candidates if candidate.exists()), None)
         if csv_path is None:
-            missing.append(_workbook_filename(table_name))
+            if table_name not in optional_tables:
+                missing.append(_workbook_filename(table_name))
         else:
             resolved_paths[table_name] = csv_path
 
@@ -166,6 +181,7 @@ def load_workbook_tables_from_csv_dir(path: str | Path) -> list[WorkbookTable]:
     return [
         _load_workbook_table_csv(table_name, resolved_paths[table_name])
         for table_name in WORKBOOK_TABLE_ORDER
+        if table_name in resolved_paths
     ]
 
 
@@ -206,6 +222,24 @@ def _metadata_tab_titles(metadata: dict[str, Any]) -> set[str]:
         if title:
             titles.add(title)
     return titles
+
+
+def _metadata_tab_ids(metadata: dict[str, Any]) -> dict[str, int]:
+    ids: dict[str, int] = {}
+    for sheet in metadata.get("sheets", []) or []:
+        props = sheet.get("properties") or {}
+        title = str(props.get("title") or "").strip()
+        sheet_id = props.get("sheetId")
+        if title and sheet_id is not None:
+            ids[title] = int(sheet_id)
+    return ids
+
+
+def _col_index(headers: list[str], name: str) -> int | None:
+    try:
+        return headers.index(name)
+    except ValueError:
+        return None
 
 
 class GoogleSheetsWorkbookWriter:
@@ -276,6 +310,12 @@ class GoogleSheetsWorkbookWriter:
                     },
                 )
             )
+            metadata = self._execute(
+                self.service.spreadsheets().get(
+                    spreadsheetId=spreadsheet_id,
+                    fields="spreadsheetUrl,sheets.properties(sheetId,title)",
+                )
+            )
 
         self._execute(
             self.service.spreadsheets().values().batchClear(
@@ -300,6 +340,16 @@ class GoogleSheetsWorkbookWriter:
                 },
             )
         )
+
+        if target.formatting:
+            requests = self._formatting_requests(materialized_tables, metadata, target)
+            if requests:
+                self._execute(
+                    self.service.spreadsheets().batchUpdate(
+                        spreadsheetId=spreadsheet_id,
+                        body={"requests": requests},
+                    )
+                )
 
         return GoogleSheetsUploadResult(
             spreadsheet_id=spreadsheet_id,
@@ -334,3 +384,346 @@ class GoogleSheetsWorkbookWriter:
 
     def _cell_count(self, tables: list[WorkbookTable]) -> int:
         return sum(len(table.headers) * (len(table.rows) + 1) for table in tables)
+
+    def _formatting_requests(
+        self,
+        tables: list[WorkbookTable],
+        metadata: dict[str, Any],
+        target: GoogleSheetsTarget,
+    ) -> list[dict[str, Any]]:
+        sheet_ids = _metadata_tab_ids(metadata)
+        requests: list[dict[str, Any]] = []
+        tables_by_name = {table.name: table for table in tables}
+
+        for index, table in enumerate(tables):
+            sheet_id = sheet_ids.get(table.name)
+            if sheet_id is None:
+                continue
+            row_count = max(len(table.rows) + 1, 1)
+            col_count = max(len(table.headers), 1)
+            hidden = target.hide_raw_tabs and table.name in _HIDDEN_RAW_TABLES
+            frozen_column_count = 0
+            if table.name == REVIEW_QUEUE_TABLE:
+                frozen_column_count = 2
+            elif table.name == COMPLIANCE_MATRIX_TABLE:
+                frozen_column_count = 3
+
+            requests.append(
+                {
+                    "updateSheetProperties": {
+                        "properties": {
+                            "sheetId": sheet_id,
+                            "index": index,
+                            "hidden": hidden,
+                            "gridProperties": {
+                                "frozenRowCount": 1,
+                                "frozenColumnCount": frozen_column_count,
+                            },
+                        },
+                        "fields": "index,hidden,gridProperties(frozenRowCount,frozenColumnCount)",
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 0,
+                            "endRowIndex": 1,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count,
+                        },
+                        "cell": {
+                            "userEnteredFormat": {
+                                "backgroundColor": {"red": 0.9, "green": 0.93, "blue": 0.97},
+                                "textFormat": {"bold": True},
+                                "wrapStrategy": "WRAP",
+                            }
+                        },
+                        "fields": "userEnteredFormat(backgroundColor,textFormat,wrapStrategy)",
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "repeatCell": {
+                        "range": {
+                            "sheetId": sheet_id,
+                            "startRowIndex": 1,
+                            "endRowIndex": row_count,
+                            "startColumnIndex": 0,
+                            "endColumnIndex": col_count,
+                        },
+                        "cell": {"userEnteredFormat": {"wrapStrategy": "WRAP"}},
+                        "fields": "userEnteredFormat.wrapStrategy",
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "setBasicFilter": {
+                        "filter": {
+                            "range": {
+                                "sheetId": sheet_id,
+                                "startRowIndex": 0,
+                                "endRowIndex": row_count,
+                                "startColumnIndex": 0,
+                                "endColumnIndex": col_count,
+                            }
+                        }
+                    }
+                }
+            )
+            requests.append(
+                {
+                    "autoResizeDimensions": {
+                        "dimensions": {
+                            "sheetId": sheet_id,
+                            "dimension": "COLUMNS",
+                            "startIndex": 0,
+                            "endIndex": col_count,
+                        }
+                    }
+                }
+            )
+            requests.extend(self._status_conditional_format_requests(table, sheet_id, row_count, col_count))
+
+        requests.extend(self._matrix_header_note_requests(tables_by_name, sheet_ids))
+        if target.include_native_pivots:
+            requests.extend(self._native_pivot_requests(tables_by_name, sheet_ids))
+        if target.include_charts:
+            requests.extend(self._chart_requests(tables_by_name, sheet_ids))
+        return requests
+
+    def _status_conditional_format_requests(
+        self,
+        table: WorkbookTable,
+        sheet_id: int,
+        row_count: int,
+        col_count: int,
+    ) -> list[dict[str, Any]]:
+        if row_count <= 1:
+            return []
+        colors = {
+            "failed": {"red": 0.96, "green": 0.8, "blue": 0.8},
+            "flagged": {"red": 0.96, "green": 0.8, "blue": 0.8},
+            "warning": {"red": 1.0, "green": 0.91, "blue": 0.64},
+            "passed": {"red": 0.82, "green": 0.93, "blue": 0.78},
+            "skipped": {"red": 0.88, "green": 0.88, "blue": 0.88},
+            "unknown": {"red": 0.9, "green": 0.86, "blue": 0.96},
+            "needs_review": {"red": 1.0, "green": 0.91, "blue": 0.64},
+            "error": {"red": 0.96, "green": 0.8, "blue": 0.8},
+            "not_checked": {"red": 0.9, "green": 0.86, "blue": 0.96},
+            "not_applicable": {"red": 0.88, "green": 0.88, "blue": 0.88},
+        }
+        requests: list[dict[str, Any]] = []
+        for status, color in colors.items():
+            requests.append(
+                {
+                    "addConditionalFormatRule": {
+                        "rule": {
+                            "ranges": [
+                                {
+                                    "sheetId": sheet_id,
+                                    "startRowIndex": 1,
+                                    "endRowIndex": row_count,
+                                    "startColumnIndex": 0,
+                                    "endColumnIndex": col_count,
+                                }
+                            ],
+                            "booleanRule": {
+                                "condition": {
+                                    "type": "TEXT_EQ",
+                                    "values": [{"userEnteredValue": status}],
+                                },
+                                "format": {"backgroundColor": color},
+                            },
+                        },
+                        "index": 0,
+                    }
+                }
+            )
+        return requests
+
+    def _matrix_header_note_requests(
+        self,
+        tables_by_name: dict[str, WorkbookTable],
+        sheet_ids: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        matrix = tables_by_name.get(COMPLIANCE_MATRIX_TABLE)
+        guide = tables_by_name.get(RULE_GUIDE_TABLE)
+        matrix_id = sheet_ids.get(COMPLIANCE_MATRIX_TABLE)
+        if not matrix or not guide or matrix_id is None:
+            return []
+
+        guide_by_rule = {_stringify_cell(row.get("rule")): row for row in guide.rows}
+        values = []
+        for header in matrix.headers:
+            guide_row = guide_by_rule.get(header)
+            if not guide_row:
+                values.append({})
+                continue
+            parts = [
+                _stringify_cell(guide_row.get("severity")),
+                _stringify_cell(guide_row.get("condition")),
+                _stringify_cell(guide_row.get("guidance")),
+                _stringify_cell(guide_row.get("failure_message")),
+            ]
+            values.append({"note": "\n".join(part for part in parts if part)})
+
+        if not any(value.get("note") for value in values):
+            return []
+        return [
+            {
+                "updateCells": {
+                    "start": {"sheetId": matrix_id, "rowIndex": 0, "columnIndex": 0},
+                    "rows": [{"values": values}],
+                    "fields": "note",
+                }
+            }
+        ]
+
+    def _native_pivot_requests(
+        self,
+        tables_by_name: dict[str, WorkbookTable],
+        sheet_ids: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        compliance = tables_by_name.get(RAW_COMPLIANCE_RESULTS_TABLE)
+        dashboard = tables_by_name.get(DASHBOARD_TABLE)
+        source_id = sheet_ids.get(RAW_COMPLIANCE_RESULTS_TABLE)
+        dashboard_id = sheet_ids.get(DASHBOARD_TABLE)
+        if not compliance or not dashboard or source_id is None or dashboard_id is None:
+            return []
+
+        rule_col = _col_index(compliance.headers, "rule_name")
+        status_col = _col_index(compliance.headers, "normalized_status")
+        invoice_col = _col_index(compliance.headers, "invoice_id")
+        if rule_col is None or status_col is None or invoice_col is None:
+            return []
+
+        start_row = max(len(dashboard.rows) + 3, 3)
+        return [
+            {
+                "updateCells": {
+                    "start": {"sheetId": dashboard_id, "rowIndex": start_row, "columnIndex": 0},
+                    "rows": [
+                        {
+                            "values": [
+                                {
+                                    "pivotTable": {
+                                        "source": {
+                                            "sheetId": source_id,
+                                            "startRowIndex": 0,
+                                            "startColumnIndex": 0,
+                                            "endRowIndex": len(compliance.rows) + 1,
+                                            "endColumnIndex": len(compliance.headers),
+                                        },
+                                        "rows": [
+                                            {
+                                                "sourceColumnOffset": rule_col,
+                                                "showTotals": True,
+                                                "sortOrder": "ASCENDING",
+                                            }
+                                        ],
+                                        "columns": [
+                                            {
+                                                "sourceColumnOffset": status_col,
+                                                "showTotals": True,
+                                                "sortOrder": "ASCENDING",
+                                            }
+                                        ],
+                                        "values": [
+                                            {
+                                                "summarizeFunction": "COUNTA",
+                                                "sourceColumnOffset": invoice_col,
+                                                "name": "Invoices",
+                                            }
+                                        ],
+                                        "valueLayout": "HORIZONTAL",
+                                    }
+                                }
+                            ]
+                        }
+                    ],
+                    "fields": "pivotTable",
+                }
+            }
+        ]
+
+    def _chart_requests(
+        self,
+        tables_by_name: dict[str, WorkbookTable],
+        sheet_ids: dict[str, int],
+    ) -> list[dict[str, Any]]:
+        dashboard = tables_by_name.get(DASHBOARD_TABLE)
+        dashboard_id = sheet_ids.get(DASHBOARD_TABLE)
+        if not dashboard or dashboard_id is None or not dashboard.rows:
+            return []
+
+        return [
+            {
+                "addChart": {
+                    "chart": {
+                        "spec": {
+                            "title": "Dashboard counts",
+                            "basicChart": {
+                                "chartType": "COLUMN",
+                                "legendPosition": "NO_LEGEND",
+                                "axis": [
+                                    {"position": "BOTTOM_AXIS", "title": "Value"},
+                                    {"position": "LEFT_AXIS", "title": "Count"},
+                                ],
+                                "domains": [
+                                    {
+                                        "domain": {
+                                            "sourceRange": {
+                                                "sources": [
+                                                    {
+                                                        "sheetId": dashboard_id,
+                                                        "startRowIndex": 1,
+                                                        "endRowIndex": len(dashboard.rows) + 1,
+                                                        "startColumnIndex": 2,
+                                                        "endColumnIndex": 3,
+                                                    }
+                                                ]
+                                            }
+                                        }
+                                    }
+                                ],
+                                "series": [
+                                    {
+                                        "series": {
+                                            "sourceRange": {
+                                                "sources": [
+                                                    {
+                                                        "sheetId": dashboard_id,
+                                                        "startRowIndex": 1,
+                                                        "endRowIndex": len(dashboard.rows) + 1,
+                                                        "startColumnIndex": 3,
+                                                        "endColumnIndex": 4,
+                                                    }
+                                                ]
+                                            }
+                                        },
+                                        "targetAxis": "LEFT_AXIS",
+                                    }
+                                ],
+                                "headerCount": 0,
+                            },
+                        },
+                        "position": {
+                            "overlayPosition": {
+                                "anchorCell": {
+                                    "sheetId": dashboard_id,
+                                    "rowIndex": 0,
+                                    "columnIndex": 5,
+                                },
+                                "widthPixels": 640,
+                                "heightPixels": 360,
+                            }
+                        },
+                    }
+                }
+            }
+        ]

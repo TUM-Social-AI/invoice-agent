@@ -122,6 +122,9 @@ def test_parse_google_sheets_target_accepts_disabled_and_exactly_one_target():
     disabled = parse_google_sheets_target(_config(enabled=False))
     assert disabled.enabled is False
     assert disabled.mode == "replace"
+    assert disabled.hide_raw_tabs is True
+    assert disabled.formatting is True
+    assert disabled.include_native_pivots is True
 
     existing = parse_google_sheets_target(
         _config(enabled=True, spreadsheet_id="sheet-123", create_title="", mode="replace")
@@ -171,7 +174,10 @@ def test_write_existing_spreadsheet_batches_structure_clear_and_values():
     result = GoogleSheetsWorkbookWriter(
         service=service,
         retry_policy=RetryPolicy(max_attempts=1),
-    ).write_workbook(tables, GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123"))
+    ).write_workbook(
+        tables,
+        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+    )
 
     assert result.spreadsheet_id == "sheet-123"
     assert result.spreadsheet_url == "https://docs.google.com/spreadsheets/d/sheet-123"
@@ -180,7 +186,8 @@ def test_write_existing_spreadsheet_batches_structure_clear_and_values():
     assert result.updated_cells == expected_cells
 
     assert service.get_calls == [
-        {"spreadsheetId": "sheet-123", "fields": "spreadsheetUrl,sheets.properties(sheetId,title)"}
+        {"spreadsheetId": "sheet-123", "fields": "spreadsheetUrl,sheets.properties(sheetId,title)"},
+        {"spreadsheetId": "sheet-123", "fields": "spreadsheetUrl,sheets.properties(sheetId,title)"},
     ]
     assert len(service.structural_batch_update_calls) == 1
     add_sheet_requests = service.structural_batch_update_calls[0]["body"]["requests"]
@@ -228,7 +235,10 @@ def test_write_created_spreadsheet_creates_then_writes_managed_tabs():
     result = GoogleSheetsWorkbookWriter(
         service=service,
         retry_policy=RetryPolicy(max_attempts=1),
-    ).write_workbook(tables, GoogleSheetsTarget(enabled=True, create_title="Invoice Review"))
+    ).write_workbook(
+        tables,
+        GoogleSheetsTarget(enabled=True, create_title="Invoice Review", formatting=False),
+    )
 
     assert service.create_calls == [{"body": {"properties": {"title": "Invoice Review"}}}]
     assert service.get_calls[0]["spreadsheetId"] == "created-sheet-123"
@@ -262,7 +272,10 @@ def test_retry_handling_retries_transient_execute_failures(operation):
             backoff_multiplier=2,
             sleep=sleeps.append,
         ),
-    ).write_workbook(_tables()[:1], GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123"))
+    ).write_workbook(
+        _tables()[:1],
+        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+    )
 
     assert result.spreadsheet_id == "sheet-123"
     assert sleeps == [0.25, 0.5]
@@ -284,22 +297,136 @@ def test_retry_handling_does_not_retry_permanent_request_failures(status):
         GoogleSheetsWorkbookWriter(
             service=service,
             retry_policy=RetryPolicy(max_attempts=3, sleep=lambda _: None),
-        ).write_workbook(_tables()[:1], GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123"))
+        ).write_workbook(
+            _tables()[:1],
+            GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+        )
 
     assert service.executed.count("values.batchUpdate") == 0
     assert len(service.values_batch_update_calls) == 1
 
 
-def test_default_config_exposes_disabled_google_sheets_output():
+def test_google_sheets_formatting_hides_raw_tabs_and_adds_pivot_requests():
+    from src.output.google_sheets import (
+        GoogleSheetsTarget,
+        GoogleSheetsWorkbookWriter,
+        RetryPolicy,
+    )
+    from src.output.workbook import (
+        COMPLIANCE_MATRIX_TABLE,
+        DASHBOARD_TABLE,
+        RAW_COMPLIANCE_RESULTS_TABLE,
+        REVIEW_QUEUE_TABLE,
+        TECHNICAL_RUN_DATA_TABLE,
+    )
+
+    tables = _tables()
+    service = FakeSheetsService(
+        metadata={
+            "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/sheet-123",
+            "sheets": [
+                {"properties": {"sheetId": index + 10, "title": table.name}}
+                for index, table in enumerate(tables)
+            ],
+        }
+    )
+
+    GoogleSheetsWorkbookWriter(
+        service=service,
+        retry_policy=RetryPolicy(max_attempts=1),
+    ).write_workbook(tables, GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123"))
+
+    assert len(service.structural_batch_update_calls) == 1
+    requests = service.structural_batch_update_calls[0]["body"]["requests"]
+
+    hidden_updates = [
+        request["updateSheetProperties"]["properties"]
+        for request in requests
+        if "updateSheetProperties" in request
+        and request["updateSheetProperties"]["properties"].get("hidden") is True
+    ]
+    hidden_sheet_ids = {props["sheetId"] for props in hidden_updates}
+    sheet_ids = {
+        table.name: index + 10
+        for index, table in enumerate(tables)
+    }
+    assert hidden_sheet_ids == {
+        sheet_ids[RAW_COMPLIANCE_RESULTS_TABLE],
+        sheet_ids[TECHNICAL_RUN_DATA_TABLE],
+    }
+    frozen_updates = [
+        request["updateSheetProperties"]["properties"]
+        for request in requests
+        if "updateSheetProperties" in request
+    ]
+    frozen_by_sheet = {
+        props["sheetId"]: props["gridProperties"]["frozenColumnCount"]
+        for props in frozen_updates
+    }
+    assert frozen_by_sheet[sheet_ids[REVIEW_QUEUE_TABLE]] == 2
+    assert frozen_by_sheet[sheet_ids[COMPLIANCE_MATRIX_TABLE]] == 3
+
+    assert any("setBasicFilter" in request for request in requests)
+    assert any("autoResizeDimensions" in request for request in requests)
+    assert any("addConditionalFormatRule" in request for request in requests)
+    conditional_values = {
+        value["userEnteredValue"]
+        for request in requests
+        if "addConditionalFormatRule" in request
+        for value in request["addConditionalFormatRule"]["rule"]["booleanRule"]["condition"]["values"]
+    }
+    assert {"not_checked", "not_applicable"}.issubset(conditional_values)
+    assert any(
+        request.get("updateCells", {}).get("fields") == "note"
+        for request in requests
+        if "updateCells" in request
+    )
+    assert any(
+        request.get("updateCells", {}).get("fields") == "pivotTable"
+        and request["updateCells"]["start"]["sheetId"] == sheet_ids[DASHBOARD_TABLE]
+        for request in requests
+        if "updateCells" in request
+    )
+    assert any(
+        request.get("addChart", {})
+        .get("chart", {})
+        .get("position", {})
+        .get("overlayPosition", {})
+        .get("anchorCell", {})
+        .get("sheetId")
+        == sheet_ids[DASHBOARD_TABLE]
+        for request in requests
+    )
+    assert sheet_ids[COMPLIANCE_MATRIX_TABLE]
+
+
+def test_parse_google_sheets_target_reads_usability_options():
+    from src.output.google_sheets import parse_google_sheets_target
+
+    target = parse_google_sheets_target(
+        _config(
+            enabled=True,
+            spreadsheet_id="sheet-123",
+            hide_raw_tabs=False,
+            formatting=False,
+            include_native_pivots=False,
+            include_charts=False,
+        )
+    )
+
+    assert target.hide_raw_tabs is False
+    assert target.formatting is False
+    assert target.include_native_pivots is False
+    assert target.include_charts is False
+
+
+def test_default_config_parses_google_sheets_output():
     from src.output.google_sheets import parse_google_sheets_target
 
     config = yaml.safe_load(Path("config/config.yaml").read_text(encoding="utf-8"))
 
     target = parse_google_sheets_target(config)
 
-    assert target.enabled is False
-    assert target.spreadsheet_id is None
-    assert target.create_title is None
     assert target.mode == "replace"
     assert target.value_input_option == "RAW"
     assert target.include_generated_views is True

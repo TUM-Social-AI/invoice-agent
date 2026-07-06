@@ -789,9 +789,8 @@ def test_load_workbook_tables_from_csv_dir_reads_expected_fixture_tabs():
     from src.output.google_sheets import load_workbook_tables_from_csv_dir
     from src.output.workbook import (
         COMPLIANCE_MATRIX_TABLE,
-        DASHBOARD_RULE_COUNTS_TABLE,
-        DASHBOARD_SEVERITY_COUNTS_TABLE,
-        DASHBOARD_STATUS_COUNTS_TABLE,
+        DASHBOARD_TABLE,
+        INVOICE_SUMMARY_TABLE,
         RAW_COMPLIANCE_RESULTS_TABLE,
         RAW_INVOICE_SUMMARY_TABLE,
         REVIEW_QUEUE_TABLE,
@@ -800,13 +799,12 @@ def test_load_workbook_tables_from_csv_dir_reads_expected_fixture_tabs():
     tables = load_workbook_tables_from_csv_dir("tests/fixtures/output")
 
     assert [table.name for table in tables] == [
-        RAW_INVOICE_SUMMARY_TABLE,
-        RAW_COMPLIANCE_RESULTS_TABLE,
-        COMPLIANCE_MATRIX_TABLE,
+        INVOICE_SUMMARY_TABLE,
         REVIEW_QUEUE_TABLE,
-        DASHBOARD_STATUS_COUNTS_TABLE,
-        DASHBOARD_RULE_COUNTS_TABLE,
-        DASHBOARD_SEVERITY_COUNTS_TABLE,
+        COMPLIANCE_MATRIX_TABLE,
+        DASHBOARD_TABLE,
+        RAW_COMPLIANCE_RESULTS_TABLE,
+        RAW_INVOICE_SUMMARY_TABLE,
     ]
     assert tables[0].headers[:4] == ["schema_version", "run_id", "invoice_id", "invoice_file"]
     assert tables[0].rows[0]["invoice_id"] == "invoice-alpha"
