@@ -572,7 +572,9 @@ class InvoiceAgent:
             f"Agent starting | run_id={state.run_id} | pdf={pdf_path} | type={invoice_type_id or 'auto-detect'} "
             f"| log={log_path}"
         )
-        self.presenter.run_start(pdf_path)
+        presenter = getattr(self, "presenter", NullPresenter())
+        self.presenter = presenter
+        presenter.run_start(pdf_path)
 
         if hasattr(self.provider, "reset_meters"):
             self.provider.reset_meters()  # type: ignore[attr-defined]
