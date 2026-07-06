@@ -73,7 +73,7 @@ class GoogleSheetsTarget:
     enabled: bool = True
     spreadsheet_id: str | None = None
     create_title: str | None = None
-    mode: str = "replace"
+    mode: str = "append"
     value_input_option: str = "RAW"
     include_generated_views: bool = True
     hide_raw_tabs: bool = True
@@ -119,7 +119,7 @@ def parse_google_sheets_target(
     enabled = bool(cfg.get("enabled", False))
     spreadsheet_id = _clean_optional(cfg.get("spreadsheet_id"))
     create_title = _clean_optional(cfg.get("create_title"))
-    mode = str(cfg.get("mode") or "replace").strip().lower()
+    mode = str(cfg.get("mode") or "append").strip().lower()
     value_input_option = str(cfg.get("value_input_option") or "RAW").strip().upper()
     include_generated_views = bool(cfg.get("include_generated_views", True))
     hide_raw_tabs = bool(cfg.get("hide_raw_tabs", True))
@@ -131,8 +131,8 @@ def parse_google_sheets_target(
         raise GoogleSheetsOutputError(
             "Google Sheets output cannot set both spreadsheet_id and create_title."
         )
-    if mode != "replace":
-        raise GoogleSheetsOutputError("Google Sheets output only supports replace mode in this version.")
+    if mode not in {"replace", "append"}:
+        raise GoogleSheetsOutputError("Google Sheets output only supports replace or append mode.")
     if enabled and not (spreadsheet_id or create_title):
         raise GoogleSheetsOutputError(
             "Enabled Google Sheets output requires spreadsheet_id or create_title."
@@ -302,8 +302,8 @@ class GoogleSheetsWorkbookWriter:
         materialized_tables = list(tables)
         if not target.enabled:
             raise GoogleSheetsOutputError("Google Sheets output target is disabled.")
-        if target.mode != "replace":
-            raise GoogleSheetsOutputError("Google Sheets workbook writer only supports replace mode.")
+        if target.mode not in {"replace", "append"}:
+            raise GoogleSheetsOutputError("Google Sheets workbook writer only supports replace or append mode.")
         if not materialized_tables:
             raise GoogleSheetsOutputError("Google Sheets workbook writer requires at least one table.")
 
@@ -349,32 +349,72 @@ class GoogleSheetsWorkbookWriter:
                 )
             )
 
-        self._execute(
-            self.service.spreadsheets().values().batchClear(
-                spreadsheetId=spreadsheet_id,
-                body={"ranges": [_quote_sheet_name(table.name) for table in materialized_tables]},
+        append_existing_row_counts: dict[str, int] = {}
+        if target.mode == "replace":
+            self._execute(
+                self.service.spreadsheets().values().batchClear(
+                    spreadsheetId=spreadsheet_id,
+                    body={"ranges": [_quote_sheet_name(table.name) for table in materialized_tables]},
+                )
             )
-        )
-
-        values_response = self._execute(
-            self.service.spreadsheets().values().batchUpdate(
-                spreadsheetId=spreadsheet_id,
-                body={
-                    "valueInputOption": target.value_input_option,
-                    "data": [
-                        {
-                            "range": f"{_quote_sheet_name(table.name)}!A1",
+            values_response = self._execute(
+                self.service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body={
+                        "valueInputOption": target.value_input_option,
+                        "data": [
+                            {
+                                "range": f"{_quote_sheet_name(table.name)}!A1",
+                                "majorDimension": "ROWS",
+                                "values": self._table_values(table),
+                            }
+                            for table in materialized_tables
+                        ],
+                    },
+                )
+            )
+        else:
+            append_existing_row_counts = {
+                table.name: self._existing_row_count(spreadsheet_id, table.name)
+                for table in materialized_tables
+            }
+            total_updated_cells = 0
+            total_updated_rows = 0
+            for table in materialized_tables:
+                append_values = self._append_table_values(
+                    table,
+                    include_header=append_existing_row_counts.get(table.name, 0) == 0,
+                )
+                if not append_values:
+                    continue
+                response = self._execute(
+                    self.service.spreadsheets().values().append(
+                        spreadsheetId=spreadsheet_id,
+                        range=f"{_quote_sheet_name(table.name)}!A1",
+                        valueInputOption=target.value_input_option,
+                        insertDataOption="INSERT_ROWS",
+                        body={
                             "majorDimension": "ROWS",
-                            "values": self._table_values(table),
-                        }
-                        for table in materialized_tables
-                    ],
-                },
-            )
-        )
+                            "values": append_values,
+                        },
+                    )
+                )
+                updates = response.get("updates") or {}
+                total_updated_cells += int(updates.get("updatedCells") or self._value_cell_count(append_values))
+                total_updated_rows += int(updates.get("updatedRows") or len(append_values))
+            values_response = {
+                "totalUpdatedCells": total_updated_cells,
+                "totalUpdatedRows": total_updated_rows,
+                "totalUpdatedSheets": len(materialized_tables),
+            }
 
         if target.formatting:
-            requests = self._formatting_requests(materialized_tables, metadata, target)
+            requests = self._formatting_requests(
+                materialized_tables,
+                metadata,
+                target,
+                append_existing_row_counts=append_existing_row_counts,
+            )
             if requests:
                 self._execute(
                     self.service.spreadsheets().batchUpdate(
@@ -414,24 +454,56 @@ class GoogleSheetsWorkbookWriter:
             ],
         ]
 
+    def _append_table_values(self, table: WorkbookTable, *, include_header: bool) -> list[list[str]]:
+        rows = [
+            [_stringify_cell(row.get(header, "")) for header in table.headers]
+            for row in table.rows
+        ]
+        if include_header:
+            return [list(table.headers), *rows]
+        return rows
+
+    def _value_cell_count(self, values: list[list[str]]) -> int:
+        return sum(len(row) for row in values)
+
     def _cell_count(self, tables: list[WorkbookTable]) -> int:
         return sum(len(table.headers) * (len(table.rows) + 1) for table in tables)
+
+    def _existing_row_count(self, spreadsheet_id: str, table_name: str) -> int:
+        response = self._execute(
+            self.service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"{_quote_sheet_name(table_name)}!A:A",
+                majorDimension="COLUMNS",
+            )
+        )
+        columns = response.get("values") or []
+        if not columns:
+            return 0
+        return len(columns[0])
 
     def _formatting_requests(
         self,
         tables: list[WorkbookTable],
         metadata: dict[str, Any],
         target: GoogleSheetsTarget,
+        append_existing_row_counts: dict[str, int] | None = None,
     ) -> list[dict[str, Any]]:
         sheet_ids = _metadata_tab_ids(metadata)
         requests: list[dict[str, Any]] = []
         tables_by_name = {table.name: table for table in tables}
+        append_existing_row_counts = append_existing_row_counts or {}
 
         for index, table in enumerate(tables):
             sheet_id = sheet_ids.get(table.name)
             if sheet_id is None:
                 continue
-            row_count = max(len(table.rows) + 1, 1)
+            if target.mode == "append":
+                existing_rows = append_existing_row_counts.get(table.name, 0)
+                appended_rows = len(table.rows) + (1 if existing_rows == 0 else 0)
+                row_count = max(existing_rows + appended_rows, 1)
+            else:
+                row_count = max(len(table.rows) + 1, 1)
             col_count = max(len(table.headers), 1)
             hidden = target.hide_raw_tabs and table.name in _HIDDEN_RAW_TABLES
             frozen_column_count = 0

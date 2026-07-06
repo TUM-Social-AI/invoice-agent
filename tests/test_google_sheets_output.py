@@ -34,6 +34,14 @@ class FakeValuesResource:
     def __init__(self, service: "FakeSheetsService"):
         self.service = service
 
+    def get(self, **kwargs):
+        self.service.values_get_calls.append(kwargs)
+        return FakeExecuteRequest(
+            self.service,
+            "values.get",
+            {"values": self.service.existing_values_by_range.get(kwargs.get("range"), [])},
+        )
+
     def batchClear(self, **kwargs):
         self.service.batch_clear_calls.append(kwargs)
         return FakeExecuteRequest(self.service, "values.batchClear", {})
@@ -47,6 +55,21 @@ class FakeValuesResource:
                 "totalUpdatedCells": self.service.updated_cells,
                 "totalUpdatedRows": self.service.updated_rows,
                 "totalUpdatedSheets": self.service.updated_sheets,
+            },
+        )
+
+    def append(self, **kwargs):
+        self.service.values_append_calls.append(kwargs)
+        values = (kwargs.get("body") or {}).get("values") or []
+        return FakeExecuteRequest(
+            self.service,
+            "values.append",
+            {
+                "updates": {
+                    "updatedCells": sum(len(row) for row in values),
+                    "updatedRows": len(values),
+                    "updatedRange": kwargs.get("range", ""),
+                }
             },
         )
 
@@ -85,9 +108,11 @@ class FakeSheetsService:
         *,
         metadata: dict | None = None,
         failures: dict[str, list[Exception]] | None = None,
+        existing_values_by_range: dict[str, list[list[str]]] | None = None,
     ):
         self.metadata = metadata or {"sheets": []}
         self.failures = failures or {}
+        self.existing_values_by_range = existing_values_by_range or {}
         self.created_spreadsheet_id = "created-sheet-123"
         self.created_spreadsheet_url = "https://docs.google.com/spreadsheets/d/created-sheet-123"
         self.updated_cells = 0
@@ -98,6 +123,8 @@ class FakeSheetsService:
         self.structural_batch_update_calls = []
         self.batch_clear_calls = []
         self.values_batch_update_calls = []
+        self.values_get_calls = []
+        self.values_append_calls = []
         self.executed = []
         self._spreadsheets = FakeSpreadsheetsResource(self)
 
@@ -121,7 +148,7 @@ def test_parse_google_sheets_target_accepts_disabled_and_exactly_one_target():
 
     disabled = parse_google_sheets_target(_config(enabled=False))
     assert disabled.enabled is False
-    assert disabled.mode == "replace"
+    assert disabled.mode == "append"
     assert disabled.hide_raw_tabs is True
     assert disabled.formatting is True
     assert disabled.include_native_pivots is True
@@ -134,10 +161,11 @@ def test_parse_google_sheets_target_accepts_disabled_and_exactly_one_target():
     assert existing.create_title is None
 
     created = parse_google_sheets_target(
-        _config(enabled=True, spreadsheet_id="", create_title="Invoice Review", mode="replace")
+        _config(enabled=True, spreadsheet_id="", create_title="Invoice Review")
     )
     assert created.spreadsheet_id is None
     assert created.create_title == "Invoice Review"
+    assert created.mode == "append"
 
     with pytest.raises(GoogleSheetsOutputError, match="both spreadsheet_id and create_title"):
         parse_google_sheets_target(
@@ -145,11 +173,11 @@ def test_parse_google_sheets_target_accepts_disabled_and_exactly_one_target():
         )
     with pytest.raises(GoogleSheetsOutputError, match="requires spreadsheet_id or create_title"):
         parse_google_sheets_target(_config(enabled=True, spreadsheet_id="", create_title=""))
-    with pytest.raises(GoogleSheetsOutputError, match="only supports replace"):
-        parse_google_sheets_target(_config(enabled=True, spreadsheet_id="sheet-123", mode="append"))
+    with pytest.raises(GoogleSheetsOutputError, match="only supports replace or append"):
+        parse_google_sheets_target(_config(enabled=True, spreadsheet_id="sheet-123", mode="merge"))
 
 
-def test_write_existing_spreadsheet_batches_structure_clear_and_values():
+def test_write_existing_spreadsheet_replace_batches_structure_clear_and_values():
     from src.output.google_sheets import (
         GoogleSheetsTarget,
         GoogleSheetsWorkbookWriter,
@@ -176,7 +204,7 @@ def test_write_existing_spreadsheet_batches_structure_clear_and_values():
         retry_policy=RetryPolicy(max_attempts=1),
     ).write_workbook(
         tables,
-        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", mode="replace", formatting=False),
     )
 
     assert result.spreadsheet_id == "sheet-123"
@@ -222,6 +250,64 @@ def test_write_existing_spreadsheet_batches_structure_clear_and_values():
     ]
 
 
+def test_write_existing_spreadsheet_append_preserves_existing_rows_and_adds_new_rows():
+    from src.output.google_sheets import (
+        GoogleSheetsTarget,
+        GoogleSheetsWorkbookWriter,
+        RetryPolicy,
+    )
+
+    tables = _tables()[:2]
+    service = FakeSheetsService(
+        metadata={
+            "spreadsheetUrl": "https://docs.google.com/spreadsheets/d/sheet-123",
+            "sheets": [
+                {"properties": {"sheetId": index + 10, "title": table.name}}
+                for index, table in enumerate(tables)
+            ],
+        },
+        existing_values_by_range={
+            f"'{tables[0].name}'!A:A": [["section", "existing"]],
+        },
+    )
+
+    result = GoogleSheetsWorkbookWriter(
+        service=service,
+        retry_policy=RetryPolicy(max_attempts=1),
+    ).write_workbook(
+        tables,
+        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", mode="append", formatting=False),
+    )
+
+    assert result.spreadsheet_id == "sheet-123"
+    assert result.managed_tabs == [table.name for table in tables]
+    assert service.batch_clear_calls == []
+    assert service.values_batch_update_calls == []
+    assert service.values_get_calls == [
+        {
+            "spreadsheetId": "sheet-123",
+            "range": f"'{table.name}'!A:A",
+            "majorDimension": "COLUMNS",
+        }
+        for table in tables
+    ]
+
+    assert len(service.values_append_calls) == 2
+    existing_tab_append = service.values_append_calls[0]
+    empty_tab_append = service.values_append_calls[1]
+    assert existing_tab_append["body"]["values"] == [
+        [_stringify_cell(row.get(header, "")) for header in tables[0].headers]
+        for row in tables[0].rows
+    ]
+    assert empty_tab_append["body"]["values"] == [
+        tables[1].headers,
+        *[
+            [_stringify_cell(row.get(header, "")) for header in tables[1].headers]
+            for row in tables[1].rows
+        ],
+    ]
+
+
 def test_write_created_spreadsheet_creates_then_writes_managed_tabs():
     from src.output.google_sheets import (
         GoogleSheetsTarget,
@@ -237,7 +323,7 @@ def test_write_created_spreadsheet_creates_then_writes_managed_tabs():
         retry_policy=RetryPolicy(max_attempts=1),
     ).write_workbook(
         tables,
-        GoogleSheetsTarget(enabled=True, create_title="Invoice Review", formatting=False),
+        GoogleSheetsTarget(enabled=True, create_title="Invoice Review", mode="replace", formatting=False),
     )
 
     assert service.create_calls == [{"body": {"properties": {"title": "Invoice Review"}}}]
@@ -274,7 +360,7 @@ def test_retry_handling_retries_transient_execute_failures(operation):
         ),
     ).write_workbook(
         _tables()[:1],
-        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+        GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", mode="replace", formatting=False),
     )
 
     assert result.spreadsheet_id == "sheet-123"
@@ -299,7 +385,7 @@ def test_retry_handling_does_not_retry_permanent_request_failures(status):
             retry_policy=RetryPolicy(max_attempts=3, sleep=lambda _: None),
         ).write_workbook(
             _tables()[:1],
-            GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", formatting=False),
+            GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", mode="replace", formatting=False),
         )
 
     assert service.executed.count("values.batchUpdate") == 0
@@ -335,7 +421,7 @@ def test_google_sheets_formatting_hides_raw_tabs_and_adds_pivot_requests():
     GoogleSheetsWorkbookWriter(
         service=service,
         retry_policy=RetryPolicy(max_attempts=1),
-    ).write_workbook(tables, GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123"))
+    ).write_workbook(tables, GoogleSheetsTarget(enabled=True, spreadsheet_id="sheet-123", mode="replace"))
 
     assert len(service.structural_batch_update_calls) == 1
     requests = service.structural_batch_update_calls[0]["body"]["requests"]
@@ -443,6 +529,6 @@ def test_default_config_parses_google_sheets_output():
 
     target = parse_google_sheets_target(config)
 
-    assert target.mode == "replace"
+    assert target.mode == "append"
     assert target.value_input_option == "RAW"
     assert target.include_generated_views is True
