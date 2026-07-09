@@ -91,9 +91,15 @@ _PHASE_TOOLS: dict[str, set[str]] = _load_phase_tools()
 def current_phase(state: AgentState) -> str:
     if not state.invoice_type_id:
         return "SCAN"
-    if not state.rule_results:
-        return "EXTRACT"
-    return "VALIDATE"
+    if state.rule_results:
+        return "VALIDATE"
+    # Transition to VALIDATE early when full-quality pages are rendered and at least one
+    # field has been extracted — compliance/visual tools belong there even before
+    # check_compliance has formally populated rule_results.
+    full_quality = bool(state.page_image_paths) and state.page_image_paths != state.compressed_page_paths
+    if full_quality and state.extracted_fields:
+        return "VALIDATE"
+    return "EXTRACT"
 
 
 def next_required_step(state: AgentState) -> str:

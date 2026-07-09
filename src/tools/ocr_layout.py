@@ -2,8 +2,10 @@
 
 import base64
 import ast
+import contextlib
 import json
 import logging
+import os
 import re
 import subprocess
 import sys
@@ -111,9 +113,23 @@ class FieldLocalization(BaseModel):
     value_bbox: tuple[int, int, int, int]
     value_confidence: float  # OCR confidence; 0 if value not found/readable
 
+@contextlib.contextmanager
+def _tqdm_silent():
+    """Suppress tqdm progress bars by redirecting stderr to /dev/null."""
+    devnull = open(os.devnull, "w")
+    old_stderr = sys.stderr
+    sys.stderr = devnull
+    try:
+        yield
+    finally:
+        sys.stderr = old_stderr
+        devnull.close()
+
+
 def _ocr_with_layout(
     image_path: str,
     surya_models: "Optional[SuryaModels]",
+    silent: bool = False,
 ) -> OcrResult:
     """
     Run surya OCR on a page image and return structured results with bounding boxes.
@@ -126,11 +142,13 @@ def _ocr_with_layout(
         from surya.common.surya.schema import TaskNames
         img = Image.open(image_path)
         w, h = img.size
-        predictions = surya_models.rec_predictor(
-            images=[img],
-            task_names=[TaskNames.ocr_without_boxes],
-            det_predictor=surya_models.det_predictor,
-        )
+        ctx = _tqdm_silent() if silent else contextlib.nullcontext()
+        with ctx:
+            predictions = surya_models.rec_predictor(
+                images=[img],
+                task_names=[TaskNames.ocr_without_boxes],
+                det_predictor=surya_models.det_predictor,
+            )
         lines = []
         for tl in predictions[0].text_lines:
             b = tl.bbox  # [x1, y1, x2, y2] floats

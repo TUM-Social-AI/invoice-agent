@@ -185,6 +185,23 @@ def page_inventory_prompt() -> str:
     )
 
 
+def page_inventory_batch_prompt(page_count: int) -> str:
+    return (
+        f"You are given {page_count} page images in order (page 1 first). "
+        "For EACH page classify it and write a short description.\n\n"
+        "Categories (pick exactly one per page):\n"
+        "   INVOICE_HEADER   — vendor/client block, invoice number, dates, references, letterhead\n"
+        "   LINE_ITEMS       — tables of services/products, quantities, unit prices, mileage lines\n"
+        "   TOTALS           — subtotals, taxes, grand total, bank/IBAN, payment summary\n"
+        "   SIGNATURE_STAMP  — signatures, stamps, seals, approvals, discharge blocks\n"
+        "   SUPPORTING_DOC   — receipts, quotes, contracts, tickets, boarding passes, photos, timesheets\n"
+        "   COVER_PAGE       — title page, transmittal, cover letter, project summary without invoice body\n"
+        "   BLANK            — empty or nearly empty\n\n"
+        "Description: max 15 words, name organisations/amounts/stamps visible on that specific page.\n\n"
+        'Respond with ONLY valid JSON: {"pages": [{"category": "...", "description": "..."}, ...]}'
+    )
+
+
 # --- Planning (one-shot JSON plan after classify) ---
 
 PLANNING_SYSTEM_MESSAGE = (

@@ -20,7 +20,35 @@ from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
 from src.models.tool_io_models import InventoryItemModel
-from src.prompts.llm_prompts import page_inventory_prompt
+from src.prompts.llm_prompts import page_inventory_prompt, page_inventory_batch_prompt
+
+_CATEGORY_ENUM = [
+    "INVOICE_HEADER", "LINE_ITEMS", "TOTALS", "SIGNATURE_STAMP",
+    "SUPPORTING_DOC", "COVER_PAGE", "BLANK", "UNKNOWN",
+]
+
+_INVENTORY_ITEM_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "category": {"type": "string", "enum": _CATEGORY_ENUM},
+        "description": {"type": "string"},
+    },
+    "required": ["category", "description"],
+    "additionalProperties": False,
+}
+
+# OpenAI structured output requires the top-level to be an object, not an array.
+_INVENTORY_BATCH_SCHEMA: dict = {
+    "type": "object",
+    "properties": {
+        "pages": {
+            "type": "array",
+            "items": _INVENTORY_ITEM_SCHEMA,
+        }
+    },
+    "required": ["pages"],
+    "additionalProperties": False,
+}
 from src.tools.pdf_pages import _image_to_base64
 from src.tools.compliance_eval import _normalize_numeric
 
@@ -59,13 +87,72 @@ def _extract_entities_from_text(text: str) -> dict:
         "payment_markers": sorted(set(payment_markers)),
     }
 
+def _batch_inventory_with_provider(
+    inventory_paths: list,
+    model: str,
+    provider: "LLMProvider",
+    timeout_s: int,
+    batch_size: int,
+) -> list[dict]:
+    """
+    Call provider.generate_json once per batch of pages, returning a flat list of
+    {category, description} dicts in page order.  batch_size=0 means all pages in
+    one call; batch_size=N means at most N pages per call.
+    """
+    results: list[dict] = []
+    effective_batch = len(inventory_paths) if batch_size <= 0 else batch_size
+
+    for chunk_start in range(0, len(inventory_paths), effective_batch):
+        chunk_paths = inventory_paths[chunk_start:chunk_start + effective_batch]
+        images_b64 = [_image_to_base64(p) for p in chunk_paths]
+        prompt = page_inventory_batch_prompt(len(chunk_paths))
+        try:
+            llm_result = provider.generate_json(
+                model=model,
+                prompt=prompt,
+                images_b64=images_b64,
+                temperature=0.1,
+                timeout_s=timeout_s,
+                response_format=_INVENTORY_BATCH_SCHEMA,
+            )
+            parsed = llm_result.content_json
+            if parsed is None:
+                parsed = json.loads(llm_result.content_text.strip())
+            # Schema enforces {"pages": [...]}, but unwrap defensively
+            if isinstance(parsed, dict) and isinstance(parsed.get("pages"), list):
+                parsed = parsed["pages"]
+            if not isinstance(parsed, list):
+                raise ValueError(f"Expected array under 'pages', got: {type(parsed).__name__}")
+            # Pad or trim to match chunk length
+            while len(parsed) < len(chunk_paths):
+                parsed.append({"category": "UNKNOWN", "description": "(no response)"})
+            results.extend(parsed[:len(chunk_paths)])
+        except Exception as e:
+            raw_preview = ""
+            try:
+                raw_preview = f" | response: {llm_result.content_text[:200]!r}"
+            except Exception:
+                pass
+            logger.warning("inventory_pages batch failed for pages %d-%d: %s%s", chunk_start + 1, chunk_start + len(chunk_paths), e, raw_preview)
+            results.extend([{"category": "UNKNOWN", "description": f"(error: {e})"}] * len(chunk_paths))
+
+    return results
+
+
 def inventory_pages(
     state: AgentState,
     ollama_url: str,
     model: str,
     provider: "LLMProvider | None" = None,
     timeout_s: int = 180,
+    batch_size: int = 1,
 ) -> dict:
+    """
+    batch_size controls how many page images are sent in a single vision call:
+      1  (default) — one call per page (Ollama-safe, any model)
+      0            — all pages in one call (best for remote APIs like OpenAI/Gemini)
+      N            — at most N pages per call
+    """
     """
     Quick first-pass scan of all rendered pages.
     Sends each page to the vision model with a cheap one-sentence prompt to
@@ -106,58 +193,66 @@ def inventory_pages(
             "(consider calling compress_pages before inventory_pages for speed)"
         )
 
-    # Fixed taxonomy makes the inventory machine-readable and easier for the agent
-    # to use when deciding which pages to target for extraction.
-    prompt = page_inventory_prompt()
-
     inventory = []
-    for i, path in enumerate(inventory_paths):
-        page_num = i + 1
-        category = "UNKNOWN"
-        description = ""
-        try:
-            img_b64 = _image_to_base64(path)
-            payload = {
-                "model": model,
-                "prompt": prompt,
-                "images": [img_b64],
-                "stream": False,
-                "options": {"temperature": 0.1},
-                "format": "json",
-            }
-            if provider is not None:
-                llm_result = provider.generate_json(
-                    model=model,
-                    prompt=prompt,
-                    images_b64=[img_b64],
-                    temperature=0.1,
-                    timeout_s=timeout_s,
-                    response_format="json",
-                )
-                raw = llm_result.content_text.strip()
-                parsed = llm_result.content_json if llm_result.content_json is not None else json.loads(raw)
-            else:
-                resp = requests.post(f"{ollama_url}/api/generate", json=payload, timeout=timeout_s)
-                resp.raise_for_status()
-                raw = resp.json().get("response", "").strip()
-                raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-                parsed = json.loads(raw)
-            inv_item = InventoryItemModel.model_validate(parsed)
-            category = inv_item.category
-            description = inv_item.description.strip()
-        except json.JSONDecodeError:
-            # Model didn't return JSON — fall back to treating raw response as description
-            description = resp.json().get("response", "").strip()[:120]
-        except Exception as e:
-            description = f"(error: {e})"
 
-        inventory.append({
-            "page": page_num,
-            "path": path,
-            "category": category,
-            "description": description,
-        })
-        logger.debug(f"  inventory p{page_num} [{category}]: {description}")
+    use_batch = provider is not None and batch_size != 1
+    if use_batch:
+        logger.debug("inventory_pages: batch mode (batch_size=%d, %d pages)", batch_size, len(inventory_paths))
+        raw_items = _batch_inventory_with_provider(inventory_paths, model, provider, timeout_s, batch_size)
+        for i, (path, item) in enumerate(zip(inventory_paths, raw_items)):
+            page_num = i + 1
+            try:
+                inv_item = InventoryItemModel.model_validate(item)
+                category = inv_item.category
+                description = inv_item.description.strip()
+            except Exception:
+                category = str(item.get("category", "UNKNOWN"))
+                description = str(item.get("description", ""))
+            inventory.append({"page": page_num, "path": path, "category": category, "description": description})
+            logger.debug("  inventory p%d [%s]: %s", page_num, category, description)
+    else:
+        # Per-page mode: one vision call per page (safe for Ollama and small models)
+        prompt = page_inventory_prompt()
+        for i, path in enumerate(inventory_paths):
+            page_num = i + 1
+            category = "UNKNOWN"
+            description = ""
+            try:
+                img_b64 = _image_to_base64(path)
+                if provider is not None:
+                    llm_result = provider.generate_json(
+                        model=model,
+                        prompt=prompt,
+                        images_b64=[img_b64],
+                        temperature=0.1,
+                        timeout_s=timeout_s,
+                        response_format=_INVENTORY_ITEM_SCHEMA,
+                    )
+                    raw = llm_result.content_text.strip()
+                    parsed = llm_result.content_json if llm_result.content_json is not None else json.loads(raw)
+                else:
+                    payload = {
+                        "model": model,
+                        "prompt": prompt,
+                        "images": [img_b64],
+                        "stream": False,
+                        "options": {"temperature": 0.1},
+                        "format": "json",
+                    }
+                    resp = requests.post(f"{ollama_url}/api/generate", json=payload, timeout=timeout_s)
+                    resp.raise_for_status()
+                    raw = resp.json().get("response", "").strip()
+                    raw = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+                    parsed = json.loads(raw)
+                inv_item = InventoryItemModel.model_validate(parsed)
+                category = inv_item.category
+                description = inv_item.description.strip()
+            except json.JSONDecodeError:
+                description = "(json parse error)"
+            except Exception as e:
+                description = f"(error: {e})"
+            inventory.append({"page": page_num, "path": path, "category": category, "description": description})
+            logger.debug("  inventory p%d [%s]: %s", page_num, category, description)
 
     state.page_inventory = inventory
     # Build normalized page facts for evidence-grounded rule evaluation.

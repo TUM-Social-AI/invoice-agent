@@ -19,6 +19,7 @@ from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
+from src.llm.response_format import provider_json_mode
 from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel
 from src.prompts.llm_prompts import (
     build_extract_fields_vision_prompt,
@@ -86,12 +87,14 @@ def classify_document_type(
 
     try:
         if provider is not None:
+            pname = getattr(provider, "provider_name", "")
             llm_result = provider.generate_json(
                 model=vision_model,
                 prompt=prompt,
                 images_b64=[img_b64],
                 temperature=0.1,
                 timeout_s=timeout_s,
+                response_format=provider_json_mode(pname),
             )
             raw = llm_result.content_text
             parsed = llm_result.content_json if llm_result.content_json is not None else json.loads(raw)
@@ -134,7 +137,7 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
     so enum constraints flow from config into the LLM's structured output without
     any hardcoding here.  Returns None for unknown providers (falls back to json mode).
     """
-    if provider_name == "ollama":
+    if provider_name in ("ollama", "openai"):
         props: dict = {}
         for field_name, meta in schema.items():
             ftype = (meta.get("type") or "string").strip().lower()
@@ -230,7 +233,15 @@ def extract_fields_vision(
             # None still produces valid output.
             extraction_response_format: Any = (
                 _build_extraction_response_schema(schema, pname)
-                or ("json" if pname == "ollama" else "application/json" if pname == "gemini" else None)
+                or (
+                    "json"
+                    if pname == "ollama"
+                    else "application/json"
+                    if pname == "gemini"
+                    else {"type": "json_object"}
+                    if pname == "openai"
+                    else None
+                )
             )
             llm_result = provider.generate_json(
                 model=model,

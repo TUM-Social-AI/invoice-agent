@@ -4,15 +4,180 @@ from types import SimpleNamespace
 import main as cli
 
 from src.agent.state import AgentState, AgentStatus
-from src.sources.models import SourceProvenance
+from src.sources.models import DocumentRef, MaterializedDocument, RunIdentity, SourceProvenance
 
 
 def _patch_cli_runtime(monkeypatch):
+    store = SimpleNamespace(invoice_types={})
+    summary = cli.ConfigLoadSummary(
+        source="local config/csv",
+        path="config/csv",
+        invoice_types=0,
+        extraction_fields=0,
+        compliance_rules=0,
+        allowed_value_sets=0,
+        denylist_phrases=0,
+    )
     monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
     monkeypatch.setattr(cli, "load_app_config", lambda path: {})
-    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config: None)
-    monkeypatch.setattr(cli, "load_config", lambda config_dir: SimpleNamespace(invoice_types={}))
-    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store: object())
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(cli, "load_config_store", lambda config, **kwargs: (store, summary))
+    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store, presenter=None: object())
+
+
+def test_config_summary_counts_loaded_store_and_allowed_values(tmp_path: Path):
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\n"
+        "currency,,EUR\n"
+        "currency,,USD\n"
+        "expense_category,VIAJES,hotel\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object(), "EQUIPOS": object()},
+        extraction_fields={"VIAJES": [object(), object()], "EQUIPOS": [object()]},
+        compliance_rules={"VIAJES": [object()], "EQUIPOS": [object(), object()]},
+        employee_name_role_denylist=["manager"],
+    )
+
+    summary = cli._config_summary("local config/csv", config_dir, store)
+
+    assert summary.source == "local config/csv"
+    assert summary.invoice_types == 2
+    assert summary.extraction_fields == 3
+    assert summary.compliance_rules == 3
+    assert summary.allowed_value_sets == 2
+    assert summary.denylist_phrases == 1
+
+
+def test_load_config_store_local_returns_summary(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object()]},
+        compliance_rules={"VIAJES": [object(), object()]},
+        employee_name_role_denylist=[],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: False)
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({"config_dir": str(config_dir)})
+
+    assert loaded is store
+    assert summary.source == "local config/csv"
+    assert summary.path == str(config_dir)
+    assert summary.allowed_value_sets == 1
+
+
+def test_load_config_store_google_drive_returns_summary(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "drive-csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object(), object()]},
+        compliance_rules={"VIAJES": [object(), object(), object()]},
+        employee_name_role_denylist=["manager", "director"],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: True)
+    monkeypatch.setattr(cli, "materialize_google_drive_config_folder", lambda config: config_dir)
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({})
+
+    assert loaded is store
+    assert summary.source == "Google Drive config folder"
+    assert summary.path == str(config_dir)
+    assert summary.invoice_types == 1
+    assert summary.extraction_fields == 2
+    assert summary.compliance_rules == 3
+    assert summary.denylist_phrases == 2
+
+
+def test_load_config_store_force_local_ignores_enabled_google_drive_config(tmp_path: Path, monkeypatch):
+    config_dir = tmp_path / "csv"
+    config_dir.mkdir()
+    (config_dir / "allowed_values.csv").write_text(
+        "field_name,invoice_type_id,value\ncurrency,,EUR\n",
+        encoding="utf-8",
+    )
+    store = SimpleNamespace(
+        invoice_types={"VIAJES": object()},
+        extraction_fields={"VIAJES": [object()]},
+        compliance_rules={"VIAJES": [object()]},
+        employee_name_role_denylist=[],
+    )
+
+    monkeypatch.setattr(cli, "google_drive_config_folder_enabled", lambda config: True)
+    monkeypatch.setattr(
+        cli,
+        "materialize_google_drive_config_folder",
+        lambda config: (_ for _ in ()).throw(AssertionError("Drive config should not be loaded")),
+    )
+    monkeypatch.setattr(cli, "load_config", lambda path: store)
+
+    loaded, summary = cli.load_config_store({"config_dir": str(config_dir)}, force_local=True)
+
+    assert loaded is store
+    assert summary.source == "local config/csv"
+    assert summary.path == str(config_dir)
+
+
+def test_main_local_config_flag_bypasses_drive_config_for_local_pdf(tmp_path: Path, monkeypatch):
+    store = SimpleNamespace(invoice_types={})
+    summary = cli.ConfigLoadSummary(
+        source="local config/csv",
+        path="config/csv",
+        invoice_types=0,
+        extraction_fields=0,
+        compliance_rules=0,
+        allowed_value_sets=0,
+        denylist_phrases=0,
+    )
+    config = {
+        "config_dir": "config/csv",
+        "sources": {
+            "google_drive": {
+                "config_folder": {"enabled": True, "folder_id": "drive-config-folder"},
+            }
+        },
+    }
+    pdf = tmp_path / "example.pdf"
+    pdf.write_bytes(b"%PDF")
+    calls = []
+
+    monkeypatch.setattr(cli, "_load_dotenv_files", lambda: None)
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "apply_configured_log_level", lambda config, **kwargs: None)
+    monkeypatch.setattr(cli, "load_config_store", lambda app_config, **kwargs: calls.append(kwargs) or (store, summary))
+    monkeypatch.setattr(cli, "InvoiceAgent", lambda config, store, presenter=None: object())
+    monkeypatch.setattr(
+        cli,
+        "process_invoice",
+        lambda *args, **kwargs: (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 0, "fields_exact": 0, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        ),
+    )
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["main.py", "--pdf", str(pdf), "--local-config"])
+
+    cli.main()
+
+    assert calls == [{"force_local": True}]
 
 
 def test_main_single_pdf_routes_through_sources_as_single_run(tmp_path: Path, monkeypatch):
@@ -24,7 +189,11 @@ def test_main_single_pdf_routes_through_sources_as_single_run(tmp_path: Path, mo
 
     def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
         calls.append((pdf_path, output_dir, kwargs))
-        return SimpleNamespace(invoice_type_id=""), None, None
+        return (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        )
 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(
@@ -55,7 +224,11 @@ def test_main_one_pdf_folder_routes_as_batch_and_preserves_output_stem(tmp_path:
 
     def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
         calls.append((pdf_path, output_dir, kwargs))
-        return SimpleNamespace(invoice_type_id=""), None, None
+        return (
+            SimpleNamespace(invoice_type_id=""),
+            {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0},
+            None,
+        )
 
     monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
     monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))
@@ -101,3 +274,159 @@ def test_process_invoice_uses_state_provenance_from_agent_fallback(tmp_path: Pat
     cli.process_invoice(FakeAgent(), str(pdf), str(output))
 
     assert captured["source_provenance"] == provenance
+
+
+def _drive_doc(tmp_path: Path) -> MaterializedDocument:
+    pdf = tmp_path / "materialized.pdf"
+    pdf.write_bytes(b"%PDF")
+    ref = DocumentRef(
+        source_type="google_drive",
+        display_name="Drive Invoice.pdf",
+        uri="gdrive://drive-file-1",
+        source_id="drive-file-1",
+        revision_id="rev-1",
+        mime_type="application/pdf",
+    )
+    provenance = SourceProvenance(
+        source_type="google_drive",
+        source_id="drive-file-1",
+        source_uri="gdrive://drive-file-1",
+        display_name="Drive Invoice.pdf",
+        original_filename="Drive Invoice.pdf",
+        revision_id="rev-1",
+        source_hash="abc123def456",
+        materialization_method="download",
+    )
+    run_identity = RunIdentity(
+        run_id="20260608T000000000000Z-drive-invoice-abc123def456",
+        created_at_utc=provenance.materialized_at_utc,
+        safe_document_stem="drive-invoice",
+        source_hash="abc123def456",
+    )
+    return MaterializedDocument(
+        ref=ref,
+        local_pdf_path=str(pdf),
+        provenance=provenance,
+        run_identity=run_identity,
+    )
+
+
+def test_main_drive_auth_saves_token_without_constructing_agent(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    calls = []
+
+    monkeypatch.setattr(
+        cli,
+        "resolve_google_drive_credentials",
+        lambda config, **kwargs: calls.append(kwargs) or SimpleNamespace(scopes=["scope-a"]),
+    )
+    monkeypatch.setattr(
+        cli,
+        "InvoiceAgent",
+        lambda config, store: (_ for _ in ()).throw(AssertionError("agent should not be constructed")),
+    )
+    monkeypatch.setattr("sys.argv", ["main.py", "--drive-auth", "--drive-oauth-client-secret", str(tmp_path / "c.json")])
+
+    cli.main()
+
+    assert calls == [{"oauth_client_secret_path": str(tmp_path / "c.json"), "force_interactive": True}]
+
+
+def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    output = tmp_path / "output"
+    doc = _drive_doc(tmp_path)
+    calls = []
+    cleaned = []
+    summaries = []
+
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "discover_google_drive_documents", lambda *args, **kwargs: [doc.ref])
+    monkeypatch.setattr(cli, "materialize_google_drive_document", lambda *args, **kwargs: doc)
+
+    def fake_process_invoice(agent, pdf_path, output_dir, **kwargs):
+        calls.append((pdf_path, output_dir, kwargs))
+        return SimpleNamespace(invoice_type_id="VIAJES"), {"fields_total": 1, "fields_exact": 1, "fields_partial": 0, "fields_wrong": 0}, {}
+
+    monkeypatch.setattr(cli, "process_invoice", fake_process_invoice)
+    monkeypatch.setattr(cli, "cleanup_materialized_google_drive_document", lambda d: cleaned.append(d))
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: summaries.append((args, kwargs)))
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--google-drive-folder-id", "folder-1", "--output", str(output)],
+    )
+
+    cli.main()
+
+    assert len(calls) == 1
+    assert calls[0][0] == str(tmp_path / "materialized.pdf")
+    assert calls[0][1] == str(output / "drive-invoice-abc123def456")
+    assert calls[0][2]["source_provenance"].source_type == "google_drive"
+    assert calls[0][2]["run_identity"].safe_document_stem == "drive-invoice"
+    assert cleaned == [doc]
+    assert len(summaries) == 1
+
+
+def test_main_google_drive_folder_empty_exits_without_agent(tmp_path: Path, monkeypatch, capsys):
+    _patch_cli_runtime(monkeypatch)
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "discover_google_drive_documents", lambda *args, **kwargs: [])
+    monkeypatch.setattr(
+        cli,
+        "InvoiceAgent",
+        lambda config, store: (_ for _ in ()).throw(AssertionError("agent should not be constructed")),
+    )
+    monkeypatch.setattr("sys.argv", ["main.py", "--google-drive-folder-id", "folder-1"])
+
+    cli.main()
+
+    assert "No PDF files found in Google Drive folder: folder-1" in capsys.readouterr().out
+
+
+def test_main_uses_configured_google_drive_folder_when_pdf_is_omitted(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    config = {
+        "sources": {
+            "google_drive": {
+                "folder_url": "https://drive.google.com/drive/folders/folder-from-config",
+            }
+        }
+    }
+    doc = _drive_doc(tmp_path)
+    seen = {}
+
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: object())
+    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: object())
+
+    def fake_discover(folder_id, *args, **kwargs):
+        seen["folder_id"] = folder_id
+        return [doc.ref]
+
+    monkeypatch.setattr(cli, "discover_google_drive_documents", fake_discover)
+    monkeypatch.setattr(cli, "materialize_google_drive_document", lambda *args, **kwargs: doc)
+    monkeypatch.setattr(cli, "process_invoice", lambda *args, **kwargs: (SimpleNamespace(invoice_type_id=""), None, None))
+    monkeypatch.setattr(cli, "cleanup_materialized_google_drive_document", lambda d: None)
+    monkeypatch.setattr(cli, "_print_batch_summary", lambda *args, **kwargs: None)
+    monkeypatch.setattr("sys.argv", ["main.py"])
+
+    cli.main()
+
+    assert seen["folder_id"] == "folder-from-config"
+
+
+def test_main_rejects_pdf_and_google_drive_folder_together(tmp_path: Path, monkeypatch):
+    _patch_cli_runtime(monkeypatch)
+    monkeypatch.setattr(
+        "sys.argv",
+        ["main.py", "--pdf", str(tmp_path / "a.pdf"), "--google-drive-folder-id", "folder-1"],
+    )
+
+    try:
+        cli.main()
+    except SystemExit as e:
+        assert e.code == 2
+    else:
+        raise AssertionError("Expected parser SystemExit")

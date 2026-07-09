@@ -13,6 +13,7 @@ from src.llm.config_resolve import (
 from src.llm.gemini_provider import GeminiProvider
 from src.llm.metered_provider import MeteredLLMProvider, remote_guard_is_active
 from src.llm.ollama_provider import OllamaProvider
+from src.llm.openai_provider import OpenAIProvider
 
 
 def build_llm_provider(config: dict) -> LLMProvider:
@@ -29,6 +30,13 @@ def build_llm_provider(config: dict) -> LLMProvider:
         if remote_guard_is_active(guard):
             return MeteredLLMProvider(inner, guard)
         return inner
+    if name == "openai":
+        inner = OpenAIProvider.from_config(config)
+        guard = remote_guard_config(config)
+        if remote_guard_is_active(guard):
+            return MeteredLLMProvider(inner, guard)
+        return inner
     raise ValueError(
-        f"Unsupported llm.provider {name!r}. Use 'ollama' or 'gemini', or extend build_llm_provider."
+        f"Unsupported llm.provider {name!r}. Use 'ollama', 'gemini', or 'openai', "
+        "or extend build_llm_provider."
     )

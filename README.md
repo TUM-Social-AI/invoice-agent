@@ -213,7 +213,58 @@ conda run -n invoice-agent python main.py --pdf invoices/
 
 On startup, `main.py` loads a **`.env`** file from the **project root** (next to `main.py`), then from the **current working directory** (only variables not already set are filled in from the second file).
 
-For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). `.env` is gitignored.
+For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_API_KEY=...` (or match `gemini.api_key_env` in `config/config.yaml`). For OpenAI, set `OPENAI_API_KEY=...` (or match `openai.api_key_env`). `.env` is gitignored.
+
+### Optional: Google Drive invoice source
+
+Google Drive ingestion uses OAuth for the first version. The app reads PDFs from a Drive folder, downloads each PDF temporarily for processing, and deletes the downloaded copy after the run. Normal outputs, logs, rendered pages, and CSV files are preserved.
+
+Setup:
+
+1. Enable the **Google Drive API** in your Google Cloud project.
+2. Configure an OAuth consent screen.
+3. Create an OAuth client of type **Desktop app**.
+4. Rename the downloaded JSON to:
+
+```bash
+.secrets/google-drive-oauth-client.json
+```
+
+The `.secrets/` folder and OAuth token files are gitignored. You can override the client JSON path with `GOOGLE_DRIVE_OAUTH_CLIENT_SECRET` or `--drive-oauth-client-secret`.
+
+Authenticate once:
+
+```bash
+python main.py --drive-auth
+```
+
+Process a Drive folder:
+
+```bash
+python main.py --google-drive-folder-id <folder-id>
+```
+
+Or set a default folder in `config/config.yaml` and omit the CLI folder flag:
+
+```yaml
+sources:
+  google_drive:
+    folder_url: "https://drive.google.com/drive/folders/<folder-id>"
+```
+
+When `--pdf` is provided, local PDF processing is used. When `--pdf` is omitted and a Drive folder is configured, Drive ingestion is used.
+
+Drive-backed config is separate from Drive PDF ingestion. If `sources.google_drive.config_folder.enabled: true`,
+the app loads `invoice_types.csv`, `extraction_fields.csv`, `compliance_rules.csv`, and optional config files
+from that Drive folder even when `--pdf` points to a local file. To force local `config_dir` CSVs for one run:
+
+```bash
+python main.py --pdf invoices/my_invoice.pdf --local-config
+```
+
+`--no-drive-config` is accepted as an alias for the same behavior.
+
+OAuth access tokens refresh automatically. If the OAuth app remains in Google’s Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
 
 ### 1. Install Ollama
 ```
@@ -238,7 +289,7 @@ Then update `config/config.yaml` to use the larger model names.
 pip install -r requirements.txt
 ```
 
-Includes `google-genai` for optional / future SDK use; the built-in **Gemini** backend calls the REST API via `requests` (no extra runtime wiring required beyond the API key).
+Includes `google-genai` and `openai` SDKs for remote **Gemini** and **OpenAI** backends (API keys via `.env` or env vars).
 
 ### 4. Install surya OCR (optional but recommended)
 ```bash
@@ -265,9 +316,23 @@ python main.py --pdf invoices/my_invoice.pdf --learn
 
 # List all configured invoice types
 python main.py --list-types
+
+# Live demo — Rich phase-aware output (suppresses INFO logs)
+python main.py --pdf invoices/my_invoice.pdf --presentation
 ```
 
 Press `Ctrl+C` at any time to interrupt gracefully — partial results and the per-run log are saved.
+
+### Presentation mode
+
+For live demos or screen recordings, use `--presentation` (or set `logging.presentation: true` in `config/config.yaml`). This:
+
+- Streams **phase banners** (SCAN → EXTRACT → VALIDATE) and human-readable tool labels to stdout
+- Shows agent **reasoning** and per-step **elapsed time**
+- Renders a **Rich summary panel** at the end instead of ASCII `===` boxes
+- Sets console logging to **WARNING** so developer traces (`src.agent.*`, `src.tools.*`) stay quiet
+
+The JSONL run log under `output/<invoice>/logs/` is unchanged — presentation mode only affects live terminal output.
 
 ---
 
@@ -364,15 +429,15 @@ Agent tool-selection, per-phase tool availability, and orchestration diagrams ar
 
 ```yaml
 llm:
-  provider: ollama   # or gemini (Google AI — set GOOGLE_API_KEY; see gemini.* below)
-  # remote_guard: per-run caps when provider is gemini (see config/config.yaml for defaults)
+  provider: ollama   # or gemini (GOOGLE_API_KEY) or openai (OPENAI_API_KEY)
+  # remote_guard: per-run caps for remote providers (see config/config.yaml for defaults)
 
 ollama:
   base_url: "http://localhost:11434"
   vision_model: "qwen2.5vl:32b"    # used for extraction, inventory, visual checks
   reasoning_model: "qwen3:1.7b"    # used for the agent reasoning loop only
 
-# gemini: block lives in config/config.yaml (Flash defaults); set llm.provider: gemini to use.
+# gemini / openai: blocks live in config/config.yaml; set llm.provider accordingly.
 
 agent:
   # Orchestration mode:

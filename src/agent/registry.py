@@ -67,6 +67,7 @@ def build_tool_registry(
     store: ConfigStore,
     surya_models: "Optional[SuryaModels]" = None,
     provider: "LLMProvider | None" = None,
+    ocr_silent: bool = False,
 ) -> dict:
     """Assemble and return the agent's runtime tool dict.
 
@@ -101,6 +102,8 @@ def build_tool_registry(
         store=store,
         provider=provider,
         surya_models=surya_models,
+        inventory_batch_size=int(agent_cfg.get("inventory_batch_size", 1)),
+        ocr_silent=ocr_silent,
     )
 
     return {

@@ -46,7 +46,7 @@ def reflect(
     for turn in range(MAX_REFLECTION_TURNS):
         messages = [
             {"role": "system", "content": build_reflection_prompt(state, diff_text, store)},
-            {"role": "user", "content": f"Reflection turn {turn + 1}. Write your next learning or finish."},
+            {"role": "user", "content": f"Reflection turn {turn + 1}. Write your next learning or finish. Respond with JSON only."},
         ]
         payload = build_payload(
             reasoning_model_for_config(config),

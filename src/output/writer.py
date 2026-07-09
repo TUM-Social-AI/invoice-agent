@@ -1,101 +1,169 @@
-"""CSV output writers for agent runs."""
+"""
+Output writer — serialises AgentState to CSV files.
+
+Two output files per run:
+  results_YYYYMMDD_HHMMSS_microseconds.csv — one row per field extracted
+  compliance_YYYYMMDD_HHMMSS_microseconds.csv — one row per rule evaluated
+"""
 
 from __future__ import annotations
 
 import csv
-import time
+from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from src.agent.state import AgentState, rule_verdict_summary
 
 
-def write_results(state: AgentState, output_dir: str) -> dict[str, str]:
+FIELD_COLUMNS = [
+    "invoice_file",
+    "invoice_type_id",
+    "field_id",
+    "field_name",
+    "extracted_value",
+    "confidence",
+    "source_page",
+    "source_region",
+    "extraction_attempts",
+    "flagged_for_review",
+    "batch_review",
+    "review_reason",
+]
+
+COMPLIANCE_COLUMNS = [
+    "invoice_file",
+    "invoice_type_id",
+    "rule_id",
+    "rule_name",
+    "field_id",
+    "status",
+    "severity",
+    "message",
+    "agent_notes",
+]
+
+SUMMARY_COLUMNS = [
+    "timestamp",
+    "invoice_file",
+    "pdf_path",
+    "invoice_type_id",
+    "agent_status",
+    "turns_used",
+    "finish_reason",
+    "fields_extracted",
+    "fields_flagged",
+    "rules_total",
+    "rules_passed",
+    "rules_failed_error",
+    "rules_failed_warning",
+    "source_type",
+    "source_id",
+    "source_hash",
+    "run_id",
+]
+
+
+def _timestamp() -> str:
+    return datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def _stringify(value: Any) -> str:
+    if value is None:
+        return ""
+    return str(value)
+
+
+def _write_dict_rows(path: Path, fieldnames: list[str], rows: list[dict[str, Any]]) -> None:
+    with path.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: _stringify(row.get(k, "")) for k in fieldnames})
+
+
+def _append_summary(path: Path, row: dict[str, Any]) -> None:
+    exists = path.exists()
+    with path.open("a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=SUMMARY_COLUMNS)
+        if not exists:
+            writer.writeheader()
+        writer.writerow({k: _stringify(row.get(k, "")) for k in SUMMARY_COLUMNS})
+
+
+def write_results(state: AgentState, output_dir: str | Path) -> dict[str, str]:
     """Write fields, compliance, and rolling summary CSVs for a completed run."""
+
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    ts = _timestamp()
+    pdf_name = Path(state.pdf_path).name
 
-    fields_path = out / f"results_{timestamp}.csv"
-    compliance_path = out / f"compliance_{timestamp}.csv"
+    fields_path = out / f"results_{ts}.csv"
+    compliance_path = out / f"compliance_{ts}.csv"
     summary_path = out / "summary.csv"
 
-    field_columns = [
-        "field_name",
-        "field_id",
-        "extracted_value",
-        "confidence",
-        "source_page",
-        "source_region",
-        "flagged_for_review",
-        "review_reason",
+    field_rows = [
+        {
+            "invoice_file": pdf_name,
+            "invoice_type_id": state.invoice_type_id,
+            "field_id": result.field_id,
+            "field_name": result.field_name,
+            "extracted_value": result.extracted_value,
+            "confidence": f"{result.confidence:.2f}",
+            "source_page": result.source_page,
+            "source_region": result.source_region,
+            "extraction_attempts": result.extraction_attempts,
+            "flagged_for_review": result.flagged_for_review,
+            "batch_review": getattr(result, "batch_review", False),
+            "review_reason": result.review_reason,
+        }
+        for result in state.extracted_fields.values()
     ]
-    with open(fields_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=field_columns)
-        writer.writeheader()
-        for fr in state.extracted_fields.values():
-            writer.writerow({
-                "field_name": fr.field_name,
-                "field_id": fr.field_id,
-                "extracted_value": fr.extracted_value,
-                "confidence": f"{fr.confidence:.2f}",
-                "source_page": fr.source_page if fr.source_page is not None else "",
-                "source_region": fr.source_region or "",
-                "flagged_for_review": str(fr.flagged_for_review),
-                "review_reason": fr.review_reason or "",
-            })
+    _write_dict_rows(fields_path, FIELD_COLUMNS, field_rows)
 
-    compliance_columns = [
-        "rule_id",
-        "rule_name",
-        "field_id",
-        "status",
-        "severity",
-        "message",
+    compliance_rows = [
+        {
+            "invoice_file": pdf_name,
+            "invoice_type_id": state.invoice_type_id,
+            "rule_id": result.rule_id,
+            "rule_name": result.rule_name,
+            "field_id": result.field_id,
+            "status": result.status,
+            "severity": result.severity,
+            "message": result.message,
+            "agent_notes": result.agent_notes,
+        }
+        for result in state.rule_results
     ]
-    with open(compliance_path, "w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=compliance_columns)
-        writer.writeheader()
-        for rr in state.rule_results:
-            writer.writerow({
-                "rule_id": rr.rule_id,
-                "rule_name": rr.rule_name,
-                "field_id": rr.field_id,
-                "status": rr.status,
-                "severity": rr.severity,
-                "message": rr.message,
-            })
+    _write_dict_rows(compliance_path, COMPLIANCE_COLUMNS, compliance_rows)
 
-    rv = rule_verdict_summary(state.rule_results)
-    summary_columns = [
-        "timestamp",
-        "pdf",
-        "invoice_type",
-        "status",
-        "turns",
-        "fields_extracted",
-        "rules_passed",
-        "rules_failed_error",
-        "rules_failed_warning",
-        "finish_reason",
-    ]
-    summary_row = {
-        "timestamp": timestamp,
-        "pdf": Path(state.pdf_path).name,
-        "invoice_type": state.invoice_type_id,
-        "status": state.status.value,
-        "turns": state.turn,
-        "fields_extracted": len(state.extracted_fields),
-        "rules_passed": rv["passed_count"],
-        "rules_failed_error": len(rv["error_failed_rule_ids"]),
-        "rules_failed_warning": len(rv["warning_failed_rule_ids"]),
-        "finish_reason": state.finish_reason or "",
-    }
-    write_header = not summary_path.exists()
-    with open(summary_path, "a", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=summary_columns)
-        if write_header:
-            writer.writeheader()
-        writer.writerow(summary_row)
+    verdict = rule_verdict_summary(state.rule_results)
+    flagged = [f for f in state.extracted_fields.values() if f.flagged_for_review]
+    provenance = state.source_provenance
+    run_identity = state.run_identity
+    _append_summary(
+        summary_path,
+        {
+            "timestamp": ts,
+            "invoice_file": pdf_name,
+            "pdf_path": state.pdf_path,
+            "invoice_type_id": state.invoice_type_id,
+            "agent_status": state.status.value,
+            "turns_used": state.turn,
+            "finish_reason": state.finish_reason,
+            "fields_extracted": len(state.extracted_fields),
+            "fields_flagged": len(flagged),
+            "rules_total": len(state.rule_results),
+            "rules_passed": verdict["passed_count"],
+            "rules_failed_error": len(verdict["error_failed_rule_ids"]),
+            "rules_failed_warning": len(verdict["warning_failed_rule_ids"]),
+            "source_type": provenance.source_type if provenance else "",
+            "source_id": provenance.source_id if provenance else "",
+            "source_hash": provenance.source_hash if provenance else "",
+            "run_id": run_identity.run_id if run_identity else state.run_id,
+        },
+    )
 
     return {
         "fields_csv": str(fields_path),

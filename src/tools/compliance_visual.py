@@ -19,6 +19,7 @@ from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
+from src.llm.response_format import provider_json_mode
 from src.models.tool_io_models import VisualVerdictModel
 from src.prompts.llm_prompts import build_compliance_visual_prompt
 from src.tools.vision_llm import _sanitize_extracted_string_value
@@ -251,12 +252,14 @@ def check_compliance_visual(
         }
         try:
             if provider is not None:
+                pname = getattr(provider, "provider_name", "")
                 llm_result = provider.generate_json(
                     model=model,
                     prompt=prompt,
                     images_b64=images_b64,
                     temperature=0.1,
                     timeout_s=timeout_s,
+                    response_format=provider_json_mode(pname),
                 )
                 raw_local = llm_result.content_text
                 if llm_result.content_json is not None:

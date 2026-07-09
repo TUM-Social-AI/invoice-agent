@@ -16,6 +16,7 @@ Learning mode:
 """
 
 import argparse
+import csv
 import json
 import logging
 import os
@@ -30,6 +31,7 @@ from src.config.loader import load_config
 from src.agent.agent import InvoiceAgent
 from src.agent.state import rule_verdict_summary
 from src.output.writer import write_results
+from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter
 from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
 from src.learning.evaluator import (
     evaluate,
@@ -42,6 +44,19 @@ from src.sources.local import (
     is_folder_batch,
     legacy_local_output_dir,
     materialize_local_input,
+)
+from src.sources.google_drive import (
+    GoogleDriveSourceError,
+    build_google_drive_service,
+    cleanup_materialized_google_drive_document,
+    discover_google_drive_documents,
+    google_drive_config_folder_enabled,
+    google_drive_cleanup_enabled,
+    google_drive_output_dir,
+    materialize_google_drive_config_folder,
+    materialize_google_drive_document,
+    resolve_google_drive_credentials,
+    resolve_google_drive_folder_id,
 )
 from src.sources.models import RunIdentity, SourceProvenance
 from src.tools.tools import reset_learnings
@@ -92,15 +107,18 @@ _install_url_query_key_redaction()
 logger = logging.getLogger("main")
 
 
-def apply_configured_log_level(app_config: dict) -> None:
+def apply_configured_log_level(app_config: dict, *, presentation: bool = False) -> None:
     """
     Make logging level configurable via config/config.yaml.
 
     main.py initializes logging at import time to keep early prints consistent,
     but we override the level once we have loaded the YAML config.
     """
-    lvl_raw = (app_config.get("logging", {}) or {}).get("level", "INFO")
-    lvl = _LOG_LEVELS.get(str(lvl_raw).strip().upper(), logging.INFO)
+    if presentation:
+        lvl = logging.WARNING
+    else:
+        lvl_raw = (app_config.get("logging", {}) or {}).get("level", "INFO")
+        lvl = _LOG_LEVELS.get(str(lvl_raw).strip().upper(), logging.INFO)
 
     root = logging.getLogger()
     root.setLevel(lvl)
@@ -110,6 +128,12 @@ def apply_configured_log_level(app_config: dict) -> None:
             h.setLevel(lvl)
         except Exception:
             pass
+
+
+def presentation_enabled(app_config: dict, cli_flag: bool) -> bool:
+    if cli_flag:
+        return True
+    return bool((app_config.get("logging", {}) or {}).get("presentation", False))
 
 
 def _load_dotenv_files() -> None:
@@ -122,6 +146,48 @@ def _load_dotenv_files() -> None:
 def load_app_config(path: str = "config/config.yaml") -> dict:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f)
+
+
+def _count_allowed_value_sets(config_dir: str | Path) -> int:
+    path = Path(config_dir) / "allowed_values.csv"
+    if not path.exists():
+        return 0
+    pairs: set[tuple[str, str]] = set()
+    with path.open(newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            field_name = str(row.get("field_name", "")).strip()
+            type_id = str(row.get("invoice_type_id", "")).strip()
+            value = str(row.get("value", "")).strip()
+            if field_name and value:
+                pairs.add((field_name, type_id))
+    return len(pairs)
+
+
+def _config_summary(source: str, config_dir: str | Path, store) -> ConfigLoadSummary:
+    return ConfigLoadSummary(
+        source=source,
+        path=str(config_dir),
+        invoice_types=len(store.invoice_types),
+        extraction_fields=sum(len(v) for v in store.extraction_fields.values()),
+        compliance_rules=sum(len(v) for v in store.compliance_rules.values()),
+        allowed_value_sets=_count_allowed_value_sets(config_dir),
+        denylist_phrases=len(store.employee_name_role_denylist),
+    )
+
+
+def load_config_store(app_config: dict, *, force_local: bool = False):
+    if force_local or not google_drive_config_folder_enabled(app_config):
+        config_dir = app_config.get("config_dir", "config/csv")
+        store = load_config(config_dir)
+        return store, _config_summary("local config/csv", config_dir, store)
+
+    try:
+        config_dir = materialize_google_drive_config_folder(app_config)
+    except GoogleDriveSourceError as e:
+        print(str(e))
+        sys.exit(1)
+    store = load_config(str(config_dir))
+    return store, _config_summary("Google Drive config folder", config_dir, store)
 
 
 def process_invoice(
@@ -143,25 +209,27 @@ def process_invoice(
     )
     paths = write_results(state, output_dir)
 
-    print(f"\n{'='*60}")
-    print(f"  {Path(pdf_path).name}")
-    print(f"  Status   : {state.status.value.upper()}")
-    print(f"  Turns    : {state.turn}")
-    print(f"  Fields   : {len(state.extracted_fields)} extracted")
-    _rv = rule_verdict_summary(state.rule_results)
-    print(
-        f"  Rules    : {len(state.passed_rules)} passed | "
-        f"blocking errors: {len(_rv['error_failed_rule_ids'])} | "
-        f"warnings: {len(_rv['warning_failed_rule_ids'])}"
-    )
-    if _rv["error_failed_rule_ids"]:
-        print(f"  Errors   : {', '.join(_rv['error_failed_rule_ids'])}")
-    if _rv["warning_failed_rule_ids"]:
-        print(f"  Warnings : {', '.join(_rv['warning_failed_rule_ids'])}")
-    flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
-    if flagged:
-        print(f"  Review   : {', '.join(flagged)}")
-    print(f"  Output   : {paths['fields_csv']}")
+    presenter = getattr(agent, "presenter", NullPresenter())
+    if not presenter.active:
+        print(f"\n{'='*60}")
+        print(f"  {Path(pdf_path).name}")
+        print(f"  Status   : {state.status.value.upper()}")
+        print(f"  Turns    : {state.turn}")
+        print(f"  Fields   : {len(state.extracted_fields)} extracted")
+        _rv = rule_verdict_summary(state.rule_results)
+        print(
+            f"  Rules    : {len(state.passed_rules)} passed | "
+            f"blocking errors: {len(_rv['error_failed_rule_ids'])} | "
+            f"warnings: {len(_rv['warning_failed_rule_ids'])}"
+        )
+        if _rv["error_failed_rule_ids"]:
+            print(f"  Errors   : {', '.join(_rv['error_failed_rule_ids'])}")
+        if _rv["warning_failed_rule_ids"]:
+            print(f"  Warnings : {', '.join(_rv['warning_failed_rule_ids'])}")
+        flagged = [k for k, v in state.extracted_fields.items() if v.flagged_for_review]
+        if flagged:
+            print(f"  Review   : {', '.join(flagged)}")
+        print(f"  Output   : {paths['fields_csv']}")
 
     cfg = getattr(agent, "config", None) or {}
     agent_block = cfg.get("agent") or {}
@@ -175,6 +243,9 @@ def process_invoice(
     )
     _last_score: dict | None = None
     _last_field_results: dict | None = None
+    learn_ran = False
+    no_ground_truth = False
+    ground_truth_csv_only = False
     if truth is not None:
         diff = evaluate(state, truth, store=agent.store, date_parse=date_parse)
         _last_score = diff["score"]
@@ -182,44 +253,63 @@ def process_invoice(
         diff_text = format_diff_for_agent(diff)
         s = diff["score"]
         ft = s.get("fields_total") or 0
-        if ft:
-            print(
-                f"  Ground truth: {ft} field(s) compared | "
-                f"exact {s.get('fields_exact', 0)} · partial {s.get('fields_partial', 0)} · "
-                f"wrong {s.get('fields_wrong', 0)} "
-                f"(missing {s.get('fields_not_extracted', 0)} · mismatch {s.get('fields_wrong_value', 0)})"
-            )
-            if s.get("field_accuracy") is not None:
-                exa = s.get("exact_accuracy")
+        if not presenter.active:
+            if ft:
                 print(
-                    f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
-                    f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
+                    f"  Ground truth: {ft} field(s) compared | "
+                    f"exact {s.get('fields_exact', 0)} · partial {s.get('fields_partial', 0)} · "
+                    f"wrong {s.get('fields_wrong', 0)} "
+                    f"(missing {s.get('fields_not_extracted', 0)} · mismatch {s.get('fields_wrong_value', 0)})"
                 )
-        else:
-            print("  Ground truth: no overlapping fields to score")
-        if s.get("rule_accuracy") is not None:
-            rt = s.get("rules_total") or 0
-            print(
-                f"                 compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
-                f"({s['rule_accuracy']:.0%})"
-            )
+                if s.get("field_accuracy") is not None:
+                    exa = s.get("exact_accuracy")
+                    print(
+                        f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
+                        f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
+                    )
+            else:
+                print("  Ground truth: no overlapping fields to score")
+            if s.get("rule_accuracy") is not None:
+                rt = s.get("rules_total") or 0
+                print(
+                    f"                 compliance vs truth: {s.get('rules_correct', 0)}/{rt} "
+                    f"({s['rule_accuracy']:.0%})"
+                )
         rt = parse_agent_runtime_settings(cfg)
         max_c = int(rt.get("log_line_max_chars", 120))
         for line in diff_text.splitlines():
             logger.info(clip_for_log(line, max_c))
         if learn:
-            print(f"  Learn    : running reflection loop...")
+            if not presenter.active:
+                print(f"  Learn    : running reflection loop...")
             agent.run_reflection(state, diff_text)
-            print(f"             Learnings written to learnings.md")
+            learn_ran = True
+            if not presenter.active:
+                print(f"             Learnings written to learnings.md")
     else:
         if learn:
             stem = Path(pdf_path).stem
-            print(f"  Learn    : no ground truth — skipping reflection")
-            print(f"             (add {stem}_truth.json or a matching CSV row)")
+            no_ground_truth = True
+            if not presenter.active:
+                print(f"  Learn    : no ground truth — skipping reflection")
+                print(f"             (add {stem}_truth.json or a matching CSV row)")
         elif ground_truth_csv_configured(cfg):
-            print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
+            ground_truth_csv_only = True
+            if not presenter.active:
+                print(f"  Ground truth: none for this file (no JSON, no CSV row matched)")
 
-    print(f"{'='*60}\n")
+    if presenter.active:
+        presenter.run_complete(
+            state,
+            paths=paths,
+            ground_truth_score=_last_score,
+            learn=learn,
+            learn_ran=learn_ran,
+            no_ground_truth=no_ground_truth,
+            ground_truth_csv_only=ground_truth_csv_only,
+        )
+    else:
+        print(f"{'='*60}\n")
     return state, _last_score, _last_field_results
 
 
@@ -351,13 +441,28 @@ def _print_batch_summary(
 
 def main():
     parser = argparse.ArgumentParser(description="Invoice Compliance Agent")
-    parser.add_argument("--pdf", default="invoices/", help="Path to PDF file or folder of PDFs (default: invoices/)")
+    parser.add_argument("--pdf", default=None, help="Path to PDF file or folder of PDFs (default: invoices/)")
+    parser.add_argument("--google-drive-folder-id", default=None, help="Google Drive folder ID to process PDFs from")
+    parser.add_argument("--drive-auth", action="store_true", help="Authenticate Google Drive OAuth and save token")
+    parser.add_argument(
+        "--drive-oauth-client-secret",
+        default=None,
+        metavar="PATH",
+        help="Path to Google Drive OAuth client JSON (default: config/env)",
+    )
     parser.add_argument("--type", help="Invoice type ID (e.g. EU_VAT, DE_INVOICE)")
     parser.add_argument("--output", default="output", help="Output directory (default: output/)")
     parser.add_argument(
         "--config",
         default=os.environ.get("CONFIG_PATH", "config/config.yaml"),
         help="Config file path",
+    )
+    parser.add_argument(
+        "--local-config",
+        "--no-drive-config",
+        dest="local_config",
+        action="store_true",
+        help="Load config CSVs from local config_dir even when Google Drive config_folder is enabled",
     )
     parser.add_argument("--list-types", action="store_true", help="List available invoice types")
     parser.add_argument("--learn", action="store_true",
@@ -377,8 +482,16 @@ def main():
         "--batch-summary-csv", default=None, metavar="PATH",
         help="Write batch accuracy summary to CSV file (batch mode only)",
     )
+    parser.add_argument(
+        "--presentation",
+        action="store_true",
+        help="Live demo mode: Rich-formatted phase-aware output (suppresses INFO logs)",
+    )
     args = parser.parse_args()
     _load_dotenv_files()
+
+    if args.pdf and args.google_drive_folder_id:
+        parser.error("--pdf and --google-drive-folder-id cannot be used together")
 
     # --reset-learnings handling (runs before anything else, no agent needed)
     if args.reset_learnings is not None:
@@ -387,7 +500,10 @@ def main():
         category = reset_args[1] if len(reset_args) > 1 else ""
 
         app_config_early = load_app_config(args.config)
-        apply_configured_log_level(app_config_early)
+        apply_configured_log_level(
+            app_config_early,
+            presentation=presentation_enabled(app_config_early, args.presentation),
+        )
         learnings_path = app_config_early.get("learnings_path", "learnings/learnings.md")
 
         # Describe what we're about to delete
@@ -418,10 +534,38 @@ def main():
         sys.exit(0)
 
     app_config = load_app_config(args.config)
-    apply_configured_log_level(app_config)
-    store = load_config(app_config.get("config_dir", "config/csv"))
+    pres_on = presentation_enabled(app_config, args.presentation)
+    apply_configured_log_level(app_config, presentation=pres_on)
+
+    if args.drive_auth:
+        try:
+            creds = resolve_google_drive_credentials(
+                app_config,
+                oauth_client_secret_path=args.drive_oauth_client_secret,
+                force_interactive=True,
+            )
+        except GoogleDriveSourceError as e:
+            print(str(e))
+            sys.exit(1)
+        drive_cfg = ((app_config or {}).get("sources") or {}).get("google_drive") or {}
+        token_path = drive_cfg.get("token_path", ".secrets/google-drive-token.json")
+        granted = sorted(getattr(creds, "scopes", None) or drive_cfg.get("scopes", []) or [])
+        print("Google Drive OAuth token saved.")
+        print(f"  Token : {token_path}")
+        if granted:
+            print(f"  Scopes: {', '.join(granted)}")
+        return
+
+    logging_cfg = app_config.get("logging", {}) or {}
+    presenter = (
+        RunPresenter(show_reasoning=bool(logging_cfg.get("presentation_show_reasoning", False)))
+        if pres_on else NullPresenter()
+    )
+    store, config_summary = load_config_store(app_config, force_local=args.local_config)
 
     if args.list_types:
+        if presenter.active:
+            presenter.startup_context(config_summary, app_config, ocr_enabled=None)
         print("\nConfigured invoice types:")
         for tid, t in store.invoice_types.items():
             fields = len(store.get_fields(tid))
@@ -435,16 +579,111 @@ def main():
         print(f"Available: {', '.join(store.invoice_types.keys())}")
         sys.exit(1)
 
-    agent = InvoiceAgent(config=app_config, store=store)
+    drive_folder_id = ""
+    if not args.pdf:
+        try:
+            drive_folder_id = resolve_google_drive_folder_id(app_config, override=args.google_drive_folder_id)
+        except GoogleDriveSourceError as e:
+            if args.google_drive_folder_id:
+                print(str(e))
+                sys.exit(1)
+            drive_folder_id = ""
 
-    try:
-        materialized_docs = materialize_local_input(args.pdf)
-    except SourceError as e:
-        print(str(e))
-        sys.exit(1)
+    using_google_drive = bool(drive_folder_id)
+    drive_refs = []
+    drive_service = None
+    if using_google_drive:
+        try:
+            drive_creds = resolve_google_drive_credentials(
+                app_config,
+                oauth_client_secret_path=args.drive_oauth_client_secret,
+            )
+            drive_service = build_google_drive_service(drive_creds, app_config)
+            drive_refs = discover_google_drive_documents(
+                drive_folder_id,
+                app_config,
+                service=drive_service,
+            )
+        except GoogleDriveSourceError as e:
+            print(str(e))
+            sys.exit(1)
+        if not drive_refs:
+            print(f"No PDF files found in Google Drive folder: {drive_folder_id}")
+            return
+        materialized_docs = []
+    else:
+        pdf_input = args.pdf or "invoices/"
+        try:
+            materialized_docs = materialize_local_input(pdf_input)
+        except SourceError as e:
+            print(str(e))
+            sys.exit(1)
 
-    if is_folder_batch(materialized_docs):
-        logger.info(f"Batch mode: {len(materialized_docs)} PDFs found in {args.pdf}")
+    agent = InvoiceAgent(config=app_config, store=store, presenter=presenter)
+    if presenter.active:
+        presenter.startup_context(
+            config_summary,
+            app_config,
+            ocr_enabled=getattr(agent, "surya_models", None) is not None,
+        )
+
+    if using_google_drive:
+        logger.info(f"Batch mode: {len(drive_refs)} PDFs found in Google Drive folder {drive_folder_id}")
+        if presenter.active:
+            presenter.batch_drive_start(len(drive_refs), drive_folder_id)
+        else:
+            print(f"Google Drive: found {len(drive_refs)} PDF(s) in folder {drive_folder_id}", flush=True)
+        failed_pdfs = []
+        batch_results: list[tuple[str, str, dict | None]] = []
+        batch_field_results: list[dict] = []
+        for idx, ref in enumerate(drive_refs, start=1):
+            doc = None
+            try:
+                if presenter.active:
+                    presenter.batch_drive_item(idx, len(drive_refs), ref.display_name)
+                else:
+                    print(f"Google Drive: processing {idx}/{len(drive_refs)} — {ref.display_name}", flush=True)
+                doc = materialize_google_drive_document(ref, app_config, service=drive_service)
+                pdf = Path(doc.local_pdf_path)
+                out_dir = google_drive_output_dir(doc, args.output)
+                state, score, field_results = process_invoice(
+                    agent,
+                    doc.local_pdf_path,
+                    str(out_dir),
+                    invoice_type_id=args.type or "",
+                    learn=args.learn,
+                    source_provenance=doc.provenance,
+                    run_identity=doc.run_identity,
+                )
+                batch_results.append((ref.display_name, state.invoice_type_id or "", score))
+                if field_results:
+                    batch_field_results.append(field_results)
+            except KeyboardInterrupt:
+                raise
+            except Exception as e:
+                logger.error(f"Failed to process {ref.display_name}: {e}", exc_info=True)
+                failed_pdfs.append((ref.display_name, str(e)))
+                batch_results.append((ref.display_name, "", None))
+            finally:
+                if doc is not None and google_drive_cleanup_enabled(app_config):
+                    cleanup_materialized_google_drive_document(doc)
+        if failed_pdfs:
+            print(f"\n{'='*60}")
+            print(f"  Batch complete — {len(failed_pdfs)} PDF(s) failed:")
+            for name, err in failed_pdfs:
+                print(f"    ✗ {name}: {err}")
+            print(f"{'='*60}\n")
+        if batch_results and any(s is not None for _, _, s in batch_results):
+            _print_batch_summary(
+                batch_results,
+                field_results_list=batch_field_results or None,
+                csv_path=args.batch_summary_csv,
+            )
+    elif is_folder_batch(materialized_docs):
+        batch_label = (
+            args.pdf or "invoices/"
+        )
+        logger.info(f"Batch mode: {len(materialized_docs)} PDFs found in {batch_label}")
         failed_pdfs = []
         batch_results: list[tuple[str, str, dict | None]] = []
         batch_field_results: list[dict] = []
@@ -476,7 +715,7 @@ def main():
             for name, err in failed_pdfs:
                 print(f"    ✗ {name}: {err}")
             print(f"{'='*60}\n")
-        if batch_results:
+        if batch_results and any(s is not None for _, _, s in batch_results):
             _print_batch_summary(
                 batch_results,
                 field_results_list=batch_field_results or None,
