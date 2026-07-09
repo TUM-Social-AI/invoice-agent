@@ -35,3 +35,4 @@ learnings/*.bak
 
 # Secrets (e.g. GOOGLE_API_KEY for Gemini)
 .env
+.secrets/

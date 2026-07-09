@@ -32,16 +32,24 @@ def ollama_num_ctx_generate(config: dict) -> int | None:
 
 
 def reasoning_model_for_config(config: dict) -> str:
-    if llm_provider_name(config) == "gemini":
+    prov = llm_provider_name(config)
+    if prov == "gemini":
         g = config.get("gemini") or {}
         return str(g.get("reasoning_model") or "gemini-2.5-flash")
+    if prov == "openai":
+        o = config.get("openai") or {}
+        return str(o.get("reasoning_model") or "gpt-4.1-mini")
     return str((config.get("ollama") or {}).get("reasoning_model", "qwen2.5:7b"))
 
 
 def vision_model_for_config(config: dict) -> str:
-    if llm_provider_name(config) == "gemini":
+    prov = llm_provider_name(config)
+    if prov == "gemini":
         g = config.get("gemini") or {}
         return str(g.get("vision_model") or g.get("reasoning_model") or "gemini-2.5-flash")
+    if prov == "openai":
+        o = config.get("openai") or {}
+        return str(o.get("vision_model") or o.get("reasoning_model") or "gpt-4.1")
     return str((config.get("ollama") or {}).get("vision_model", "qwen2.5-vl:7b"))
 
 
@@ -56,22 +64,44 @@ def gemini_api_key(config: dict) -> str:
     return key
 
 
+def openai_api_key(config: dict) -> str:
+    o = config.get("openai") or {}
+    env_name = str(o.get("api_key_env", "OPENAI_API_KEY")).strip() or "OPENAI_API_KEY"
+    key = (os.environ.get(env_name) or "").strip()
+    if not key:
+        raise RuntimeError(
+            f"llm.provider is 'openai' but environment variable {env_name!r} is empty or unset"
+        )
+    return key
+
+
+def openai_base_url(config: dict) -> str | None:
+    o = config.get("openai") or {}
+    raw = o.get("base_url")
+    if raw is None:
+        return None
+    s = str(raw).strip()
+    return s or None
+
+
 def llm_timeouts(config: dict) -> dict[str, int]:
     """
     HTTP timeouts for chat (reasoning loop) and generate (vision) calls.
 
-    Precedence for Gemini: gemini.* > llm.* > ollama.* > defaults.
+    Precedence for Gemini/OpenAI: provider.* > llm.* > ollama.* > defaults.
     Precedence for Ollama: ollama.* > llm.* > defaults.
     """
     llm = config.get("llm") or {}
     o = config.get("ollama") or {}
     g = config.get("gemini") or {}
+    oa = config.get("openai") or {}
     prov = llm_provider_name(config)
     def_chat, def_gen = 240, 420
 
-    if prov == "gemini":
-        chat = g.get("timeout_chat_s")
-        gen = g.get("timeout_generate_s")
+    if prov in ("gemini", "openai"):
+        pblock = g if prov == "gemini" else oa
+        chat = pblock.get("timeout_chat_s")
+        gen = pblock.get("timeout_generate_s")
         if chat is None:
             chat = llm.get("timeout_chat_s")
         if gen is None:
@@ -140,11 +170,14 @@ def prompt_limits_for_config(config: dict) -> dict[str, int]:
 
 
 def remote_guard_config(config: dict) -> dict[str, Any]:
-    """Optional per-run limits for non-local LLM providers (see MeteredLLMProvider). Gemini overrides llm."""
+    """Optional per-run limits for remote LLM providers (see MeteredLLMProvider)."""
     llm = config.get("llm") or {}
-    gem = config.get("gemini") or {}
+    prov = llm_provider_name(config)
     out = dict(llm.get("remote_guard") or {})
-    out.update(dict(gem.get("remote_guard") or {}))
+    if prov == "gemini":
+        out.update(dict((config.get("gemini") or {}).get("remote_guard") or {}))
+    elif prov == "openai":
+        out.update(dict((config.get("openai") or {}).get("remote_guard") or {}))
     return out
 
 
@@ -170,49 +203,3 @@ def fallback_reasoning_model_for_config(config: dict) -> str | None:
         return None
     s = str(fb).strip()
     return s or None
-
-
-def messages_to_gemini_body(
-    messages: list[dict[str, Any]],
-    *,
-    json_mode: bool,
-    temperature: float,
-) -> dict[str, Any]:
-    """Map OpenAI-style messages to Gemini generateContent JSON body."""
-    system_parts: list[str] = []
-    contents: list[dict[str, Any]] = []
-    for m in messages:
-        role = str(m.get("role", "")).strip().lower()
-        text = m.get("content")
-        if not isinstance(text, str):
-            text = str(text or "")
-        if role == "system":
-            system_parts.append(text)
-        elif role == "user":
-            contents.append({"role": "user", "parts": [{"text": text}]})
-        elif role == "assistant":
-            contents.append({"role": "model", "parts": [{"text": text}]})
-
-    body: dict[str, Any] = {
-        "contents": contents,
-        "generationConfig": {
-            "temperature": temperature,
-        },
-    }
-    if system_parts:
-        body["systemInstruction"] = {"parts": [{"text": "\n\n".join(system_parts)}]}
-    if json_mode:
-        body["generationConfig"]["responseMimeType"] = "application/json"
-    return body
-
-
-def extract_gemini_text(response_json: dict[str, Any]) -> str:
-    cands = response_json.get("candidates") or []
-    if not cands:
-        return ""
-    parts = ((cands[0].get("content") or {}).get("parts")) or []
-    chunks: list[str] = []
-    for p in parts:
-        if isinstance(p, dict) and "text" in p:
-            chunks.append(str(p["text"] or ""))
-    return "".join(chunks).strip()
