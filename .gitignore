@@ -39,3 +39,6 @@ learnings/*.bak
 client_secret*.json
 google-drive-oauth*.json
 google-drive-token*.json
+
+# Local GSD planning artifacts
+.planning/

@@ -75,6 +75,28 @@ def test_build_agent_context(store):
     assert "Viajes" in context
     assert "vendor_name" in context
     assert "R_VIA_001" in context
+    assert "No clasificar como VIAJES" in context
+    assert "procurement" in context
+
+
+def test_procurement_type_contexts_cover_payment_voucher_packets(store):
+    equipment_context = store.build_agent_context("EQUIPOS")
+    consumables_context = store.build_agent_context("CONSUMIBLES")
+
+    assert "payment voucher" in equipment_context
+    assert "supplier quotation" in equipment_context
+    assert "wheat flour" in consumables_context
+    assert "payment vouchers" in consumables_context
+
+
+def test_total_and_currency_field_hints_cover_payment_and_birr(store):
+    via_fields = {field.field_name: field for field in store.get_fields("VIAJES")}
+    consumable_fields = {field.field_name: field for field in store.get_fields("CONSUMIBLES")}
+
+    assert "Cheque Amount" in via_fields["total_amount"].aliases
+    assert "ETB" in via_fields["currency"].aliases
+    assert "Birr" in via_fields["currency"].extraction_hint
+    assert "Amount Paid" in consumable_fields["total_amount"].aliases
 
 
 def test_disabled_type_not_loaded(store):

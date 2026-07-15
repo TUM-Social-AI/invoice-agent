@@ -266,6 +266,32 @@ python main.py --pdf invoices/my_invoice.pdf --local-config
 
 OAuth access tokens refresh automatically. If the OAuth app remains in Google’s Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
 
+### Optional: Google Sheets workbook output
+
+Normal local-folder and Google Drive batch runs write a canonical workbook CSV snapshot under `output/canonical_workbook/` in addition to the legacy per-invoice artifacts. Enable Google Sheets sync only when you want that same workbook snapshot uploaded after the local CSV files are written:
+
+```yaml
+output:
+  google_sheets:
+    enabled: true
+    spreadsheet_id: "<existing-spreadsheet-id>"  # or use create_title below
+    create_title: ""
+    mode: replace
+    value_input_option: RAW
+    include_generated_views: true
+```
+
+Use exactly one target: `spreadsheet_id` to refresh an existing workbook, or `create_title` to create a new one. `include_generated_views: false` uploads only the raw `Invoice Summary` and `Compliance Results` tabs; `true` also uploads the generated matrix, review queue, and dashboard tabs. The writer uses replace semantics for managed tabs, so reruns refresh the current workbook snapshot instead of appending duplicate rows.
+
+Upload pre-generated fixture CSVs without processing invoices:
+
+```bash
+python main.py --upload-workbook-csv-dir tests/fixtures/output --sheets-spreadsheet-id <spreadsheet-id>
+python main.py --upload-workbook-csv-dir tests/fixtures/output --sheets-create-title "Invoice Review"
+```
+
+This fixture upload path bypasses config-store loading, `InvoiceAgent`, OCR, LLM providers, Drive PDF materialization, and invoice extraction.
+
 ### 1. Install Ollama
 ```
 https://ollama.com
@@ -310,6 +336,9 @@ python main.py --pdf invoices/my_invoice.pdf --type VIAJES
 
 # Batch — all PDFs in a folder
 python main.py --pdf invoices/
+
+# Batch — Google Drive folder
+python main.py --google-drive-folder-id <folder-id>
 
 # Learning mode — compare results to ground truth and write learnings
 python main.py --pdf invoices/my_invoice.pdf --learn
@@ -583,7 +612,35 @@ output/my_invoice/
 output/summary.csv                  ← rolling summary across all runs
 ```
 
+For folder and Google Drive batch runs, a batch-level canonical workbook snapshot is also written by default:
+
+```
+output/canonical_workbook/
+  invoice_summary.csv
+  compliance_results.csv
+  compliance_matrix.csv
+  review_queue.csv
+  dashboard_status_counts.csv
+  dashboard_rule_counts.csv
+  dashboard_severity_counts.csv
+```
+
+The raw `invoice_summary.csv` and `compliance_results.csv` files are the stable normalized contract. The other CSVs are generated workbook views derived from those raw tables for review workflows. Canonical rows include source provenance and run identity for local and Google Drive documents. Failed invoices remain visible through the existing console and batch summary paths; they are not invented as canonical rows unless invoice processing produced a completed `AgentState`.
+
+Single-file runs remain legacy-only: they write the existing per-invoice result, compliance, page, crop, and log artifacts, but do not create `output/canonical_workbook/`.
+
 The JSONL log records every turn: tool called, params, result, reasoning, elapsed time. Useful for debugging runs post-hoc without re-running.
+
+### Deterministic output tests
+
+Run the output and integration tests without live Google APIs, OCR, LLM providers, Drive materialization, full invoice extraction, or package installs:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 pytest -p no:cacheprovider tests/test_canonical_output.py tests/test_workbook_views.py tests/test_cli_sources.py -q
+PYTHONDONTWRITEBYTECODE=1 pytest -p no:cacheprovider tests/test_cli_sources.py tests/test_canonical_output.py tests/test_workbook_views.py tests/test_google_sheets_output.py -q
+```
+
+The tests use synthetic `AgentState` fixtures plus fake CLI, workbook, and Sheets writer seams.
 
 ### Exit statuses
 

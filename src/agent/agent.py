@@ -509,6 +509,8 @@ class InvoiceAgent:
         source_provenance: SourceProvenance | None = None,
         run_identity: RunIdentity | None = None,
     ) -> AgentState:
+        if not hasattr(self, "presenter"):
+            self.presenter = NullPresenter()
         _page_dpi = int(self.config.get("agent", {}).get("page_dpi", 150))
         if source_provenance is None:
             source_provenance = SourceProvenance.from_local_path_minimal(pdf_path)
