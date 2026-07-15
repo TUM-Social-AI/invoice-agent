@@ -205,6 +205,9 @@ sources:
     oauth_client_secret_path: ".secrets/google-drive-oauth-client.json"
     oauth_client_secret_path_env: GOOGLE_DRIVE_OAUTH_CLIENT_SECRET
     token_path: ".secrets/google-drive-token.json"
+    service_account_file: ".secrets/google-drive-service-account.json"
+    service_account_file_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE
+    service_account_json_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON
     materialized_root: "output/materialized"
     cleanup_downloads: true
     include_shared_drives: true
