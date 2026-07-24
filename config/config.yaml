@@ -214,6 +214,19 @@ sources:
       folder_url: "https://drive.google.com/drive/folders/1xAQA6AAS3kjcY_YcDmckA21bPbEM2deK?usp=drive_link"
       materialized_root: "output/materialized/google_drive_config"
 
+# Google Drive input/output folders are configured under `sources.google_drive` (provided
+# by the google-drive-source branch), not here — the worker resolves them via that layer.
+
+# Scheduled-poll worker behavior (src/orchestration/worker.py).
+orchestration:
+  max_files_per_poll: 50                 # bound token spend / runtime per scheduled run
+  max_attempts: 3                        # retryable failures before a doc is parked (needs_attention)
+  stale_claim_seconds: 1800              # reclaim a "processing" doc whose task died mid-run
+  dedup_backend: "dynamodb"              # "dynamodb" (prod) or "memory" (local/test)
+  dynamodb_table: "invoice-agent-dedup"
+  aws_region: null                       # null -> boto3 default (task role / env region)
+  output_root: "output"                  # local scratch for result files before upload
+
 logging:
   level: "INFO"                          # DEBUG for verbose tool traces
   presentation: true                    # Rich live demo output (or use --presentation)
