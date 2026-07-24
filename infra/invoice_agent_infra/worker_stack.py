@@ -147,13 +147,20 @@ class InvoiceAgentWorkerStack(Stack):
             environment={
                 "LLM_PROVIDER": llm_provider,
                 "CONFIG_PATH": "config/config.yaml",
+                # The committed config.yaml default is auth_mode: oauth (local browser flow).
+                # A headless task can't do OAuth, so force service-account mode here. Requires
+                # the app to honor a GOOGLE_DRIVE_AUTH_MODE env override (google_drive PR #30
+                # follow-up); until that lands, point CONFIG_PATH at a service_account config.
+                "GOOGLE_DRIVE_AUTH_MODE": "service_account",
                 # Dedup table name + region come from config.yaml today (aws_region: null ->
                 # the task's region). Keep config.yaml's dedupTableName aligned with this stack.
             },
             secrets={
                 # Injected as env vars at task start via the execution role.
                 key_env_name: ecs.Secret.from_secrets_manager(llm_secret),
-                "GOOGLE_SERVICE_ACCOUNT_JSON": ecs.Secret.from_secrets_manager(drive_secret),
+                # Name must match config.yaml's sources.google_drive.service_account_json_env
+                # (default GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON) so the worker reads the injected key.
+                "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON": ecs.Secret.from_secrets_manager(drive_secret),
             },
         )
 
