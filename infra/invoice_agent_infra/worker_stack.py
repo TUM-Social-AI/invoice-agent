@@ -73,7 +73,7 @@ class InvoiceAgentWorkerStack(Stack):
             self,
             "WorkerSg",
             vpc=vpc,
-            description="invoice-agent worker — egress only",
+            description="invoice-agent worker - egress only",
             allow_all_outbound=True,
         )
 
