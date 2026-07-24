@@ -61,8 +61,8 @@ The next scheduled tick launches the worker. Watch it in CloudWatch Logs under
 | `region` | `eu-central-1` | Deploy region |
 | `existingVpcId` | *(unset)* | Import an existing VPC instead of creating one |
 | `scheduleRate` | `rate(10 minutes)` | EventBridge schedule expression |
-| `llmProvider` | `gemini` | `LLM_PROVIDER` env for the task (`gemini`/`openai`/`ollama`) |
-| `llmKeyEnvName` | `GOOGLE_API_KEY` | Env var the provider reads its key from (`OPENAI_API_KEY` for OpenAI) |
+| `llmProvider` | `openai` | `LLM_PROVIDER` env — informational only; the app reads the provider from `config.yaml`'s `llm.provider` |
+| `llmKeyEnvName` | `OPENAI_API_KEY` | Env var the secret is injected under; **must match** `config.yaml`'s `<provider>.api_key_env` |
 | `imageTag` | `latest` | ECR image tag to run |
 | `dedupTableName` | `invoice-agent-dedup` | DynamoDB table name (keep aligned with `config/config.yaml`) |
 | `cpu` / `memoryMib` | `2048` / `8192` | Fargate task size |

@@ -10,8 +10,10 @@ to avoid a fixed NAT cost, and scales to zero between polls.
 Everything that varies is a CDK context value (see cdk.json / `-c key=value`):
   existingVpcId   import an existing VPC instead of creating one (else a minimal VPC is made)
   scheduleRate    EventBridge schedule expression        (default "rate(10 minutes)")
-  llmProvider     LLM_PROVIDER env for the task           (default "gemini")
-  llmKeyEnvName   env var the provider reads its key from (default "GOOGLE_API_KEY")
+  llmProvider     LLM_PROVIDER env (informational only; the app reads the provider
+                  from config.yaml's llm.provider, not this env)          (default "openai")
+  llmKeyEnvName   env var the secret is injected under; MUST match config.yaml's
+                  <provider>.api_key_env so the app finds its key         (default "OPENAI_API_KEY")
   imageTag        ECR image tag to run                    (default "latest")
   dedupTableName  DynamoDB table name                     (default "invoice-agent-dedup")
   cpu / memoryMib Fargate task size                       (default 2048 / 8192)
@@ -42,8 +44,12 @@ class InvoiceAgentWorkerStack(Stack):
         ctx = self.node.try_get_context
         existing_vpc_id = ctx("existingVpcId")
         schedule_expr = ctx("scheduleRate") or "rate(10 minutes)"
-        llm_provider = ctx("llmProvider") or "gemini"
-        key_env_name = ctx("llmKeyEnvName") or "GOOGLE_API_KEY"
+        # NOTE: the app resolves its provider from config.yaml's llm.provider (currently
+        # "openai"); the LLM_PROVIDER env below is informational only. What matters is that
+        # key_env_name matches config.yaml's <provider>.api_key_env, so the injected secret
+        # lands in the env var the app actually reads (openai -> OPENAI_API_KEY).
+        llm_provider = ctx("llmProvider") or "openai"
+        key_env_name = ctx("llmKeyEnvName") or "OPENAI_API_KEY"
         image_tag = ctx("imageTag") or "latest"
         dedup_table_name = ctx("dedupTableName") or "invoice-agent-dedup"
         cpu = int(ctx("cpu") or 2048)
