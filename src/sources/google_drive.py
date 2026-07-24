@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import io
 import json
 import logging
@@ -18,6 +19,10 @@ logger = logging.getLogger(__name__)
 
 DRIVE_PDF_MIME_TYPE = "application/pdf"
 DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+DEFAULT_GOOGLE_DRIVE_AUTH_MODE = "oauth"
+DEFAULT_SERVICE_ACCOUNT_FILE = ".secrets/google-drive-service-account.json"
+DEFAULT_SERVICE_ACCOUNT_FILE_ENV = "GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+DEFAULT_SERVICE_ACCOUNT_JSON_ENV = "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
 _DRIVE_FOLDER_PATH_RE = re.compile(r"/folders/([^/?#]+)")
 REQUIRED_CONFIG_FILES = {
     "invoice_types.csv",
@@ -107,6 +112,22 @@ def _drive_scopes(cfg: dict) -> list[str]:
     return cleaned or [DEFAULT_DRIVE_SCOPE]
 
 
+def _normalize_google_drive_auth_mode(cfg: dict) -> str:
+    raw = str(cfg.get("auth_mode") or DEFAULT_GOOGLE_DRIVE_AUTH_MODE).strip().lower()
+    mode = raw.replace("-", "_")
+    if mode in {"oauth", "service_account"}:
+        return mode
+    raise GoogleDriveSourceError(
+        f"Unsupported Google Drive auth_mode: {raw}. Supported values: oauth, service_account."
+    )
+
+
+def google_drive_auth_mode(app_config: dict) -> str:
+    """Return the configured Google Drive auth mode after validation."""
+
+    return _normalize_google_drive_auth_mode(_drive_config(app_config))
+
+
 def _resolve_oauth_client_secret_path(cfg: dict, override: str | None = None) -> Path:
     raw = override
     if not raw:
@@ -154,16 +175,98 @@ def _token_path(cfg: dict) -> Path:
     return Path(str(cfg.get("token_path") or ".secrets/google-drive-token.json")).expanduser()
 
 
+def _service_account_file_env_name(cfg: dict) -> str:
+    return str(cfg.get("service_account_file_env") or DEFAULT_SERVICE_ACCOUNT_FILE_ENV).strip()
+
+
+def _service_account_json_env_name(cfg: dict) -> str:
+    return str(cfg.get("service_account_json_env") or DEFAULT_SERVICE_ACCOUNT_JSON_ENV).strip()
+
+
+def _load_service_account_credentials_class():
+    try:
+        service_account_mod = importlib.import_module("google.oauth2.service_account")
+        return service_account_mod.Credentials
+    except ImportError as e:
+        raise GoogleDriveSourceError(
+            "Google Drive service-account dependencies are missing. Run `pip install -r requirements.txt`."
+        ) from e
+
+
+def _service_account_json_from_env(cfg: dict) -> tuple[str, dict] | None:
+    env_name = _service_account_json_env_name(cfg)
+    raw = os.getenv(env_name) if env_name else None
+    if raw is None or not raw.strip():
+        return None
+    try:
+        payload = json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise GoogleDriveSourceError(
+            f"Google Drive {env_name} contains malformed service-account JSON."
+        ) from e
+    if not isinstance(payload, dict):
+        raise GoogleDriveSourceError(
+            f"Google Drive {env_name} contains invalid service-account JSON payload."
+        )
+    return env_name, payload
+
+
+def _resolve_service_account_file_path(cfg: dict) -> Path:
+    file_env_name = _service_account_file_env_name(cfg)
+    raw = os.getenv(file_env_name) if file_env_name else None
+    if not raw:
+        raw = cfg.get("service_account_file")
+    if not raw:
+        raw = DEFAULT_SERVICE_ACCOUNT_FILE
+
+    path = Path(str(raw)).expanduser()
+    if not path.exists():
+        raise GoogleDriveSourceError(
+            f"Google Drive service-account JSON not found: {path}. "
+            f"Set {DEFAULT_SERVICE_ACCOUNT_JSON_ENV}, {file_env_name or DEFAULT_SERVICE_ACCOUNT_FILE_ENV}, "
+            "or sources.google_drive.service_account_file."
+        )
+    if not path.is_file():
+        raise GoogleDriveSourceError(f"Google Drive service-account path is not a file: {path}")
+    return path
+
+
+def _resolve_service_account_credentials(cfg: dict, scopes: list[str]):
+    credentials_cls = _load_service_account_credentials_class()
+
+    env_json = _service_account_json_from_env(cfg)
+    if env_json is not None:
+        env_name, payload = env_json
+        try:
+            return credentials_cls.from_service_account_info(payload, scopes=scopes)
+        except Exception as e:
+            raise GoogleDriveSourceError(
+                f"Google Drive {env_name} contains invalid service-account credential payload."
+            ) from e
+
+    path = _resolve_service_account_file_path(cfg)
+    try:
+        return credentials_cls.from_service_account_file(str(path), scopes=scopes)
+    except Exception as e:
+        raise GoogleDriveSourceError(
+            f"Google Drive service-account JSON contains invalid credential payload: {path}"
+        ) from e
+
+
 def resolve_google_drive_credentials(
     app_config: dict,
     *,
     oauth_client_secret_path: str | None = None,
     force_interactive: bool = False,
 ):
-    """Resolve OAuth credentials, refreshing or launching browser auth when needed."""
+    """Resolve Google Drive credentials for the configured auth mode."""
 
     cfg = _drive_config(app_config)
     scopes = _drive_scopes(cfg)
+    mode = _normalize_google_drive_auth_mode(cfg)
+    if mode == "service_account":
+        return _resolve_service_account_credentials(cfg, scopes)
+
     token_path = _token_path(cfg)
     creds = None
 

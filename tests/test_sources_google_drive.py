@@ -387,6 +387,236 @@ def _install_fake_google_oauth_modules(monkeypatch, fake_credentials_cls, fake_f
     monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", flow_mod)
 
 
+def _install_fake_google_service_account_modules(monkeypatch, fake_credentials_cls):
+    google_mod = sys.modules.get("google") or ModuleType("google")
+    oauth2_mod = sys.modules.get("google.oauth2") or ModuleType("google.oauth2")
+    service_account_mod = ModuleType("google.oauth2.service_account")
+
+    service_account_mod.Credentials = fake_credentials_cls
+
+    monkeypatch.setitem(sys.modules, "google", google_mod)
+    monkeypatch.setitem(sys.modules, "google.oauth2", oauth2_mod)
+    monkeypatch.setitem(sys.modules, "google.oauth2.service_account", service_account_mod)
+
+
+def test_resolve_google_drive_credentials_service_account_config_file_uses_scopes_without_oauth_flow(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["scopes"] = ["scope-a", "scope-b"]
+    service_account_file = tmp_path / "config-service-account.json"
+    cfg["service_account_file"] = str(service_account_file)
+    cfg["service_account_file_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+    service_account_file.write_text('{"client_email": "config@example.test"}', encoding="utf-8")
+    monkeypatch.delenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", raising=False)
+    monkeypatch.setitem(sys.modules, "google_auth_oauthlib.flow", None)
+    calls = []
+
+    class FakeServiceAccountCredentials:
+        service_account_email = "config@example.test"
+        scopes = ["scope-a", "scope-b"]
+
+        @classmethod
+        def from_service_account_info(cls, info, scopes):
+            calls.append(("info", info, scopes))
+            return cls()
+
+        @classmethod
+        def from_service_account_file(cls, path, scopes):
+            calls.append(("file", path, scopes))
+            return cls()
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    creds = gd.resolve_google_drive_credentials(config)
+
+    assert isinstance(creds, FakeServiceAccountCredentials)
+    assert calls == [("file", str(service_account_file), ["scope-a", "scope-b"])]
+
+
+def test_resolve_google_drive_credentials_service_account_json_env_wins(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["service_account_file"] = str(tmp_path / "config-service-account.json")
+    cfg["service_account_file_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+
+    (tmp_path / "config-service-account.json").write_text('{"client_email": "config@example.test"}')
+    env_file = tmp_path / "env-service-account.json"
+    env_file.write_text('{"client_email": "file-env@example.test"}')
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", str(env_file))
+    monkeypatch.setenv(
+        "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON",
+        '{"client_email": "json-env@example.test", "private_key": "secret"}',
+    )
+
+    calls = []
+
+    class FakeServiceAccountCredentials:
+        service_account_email = "json-env@example.test"
+        scopes = ["scope-a"]
+
+        @classmethod
+        def from_service_account_info(cls, info, scopes):
+            calls.append(("info", info, scopes))
+            return cls()
+
+        @classmethod
+        def from_service_account_file(cls, path, scopes):
+            calls.append(("file", path, scopes))
+            return cls()
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    creds = gd.resolve_google_drive_credentials(config, force_interactive=True)
+
+    assert isinstance(creds, FakeServiceAccountCredentials)
+    assert calls == [
+        (
+            "info",
+            {"client_email": "json-env@example.test", "private_key": "secret"},
+            ["https://www.googleapis.com/auth/drive"],
+        )
+    ]
+
+
+def test_resolve_google_drive_credentials_service_account_file_env_before_config(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["service_account_file"] = str(tmp_path / "config-service-account.json")
+    cfg["service_account_file_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+    (tmp_path / "config-service-account.json").write_text('{"client_email": "config@example.test"}')
+    env_file = tmp_path / "env-service-account.json"
+    env_file.write_text('{"client_email": "file-env@example.test"}')
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", str(env_file))
+
+    calls = []
+
+    class FakeServiceAccountCredentials:
+        @classmethod
+        def from_service_account_info(cls, info, scopes):
+            calls.append(("info", info, scopes))
+            return cls()
+
+        @classmethod
+        def from_service_account_file(cls, path, scopes):
+            calls.append(("file", path, scopes))
+            return cls()
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    gd.resolve_google_drive_credentials(config)
+
+    assert calls == [("file", str(env_file), ["https://www.googleapis.com/auth/drive"])]
+
+
+def test_resolve_google_drive_credentials_rejects_unsupported_auth_mode(tmp_path: Path):
+    config = _app_config(tmp_path)
+    config["sources"]["google_drive"]["auth_mode"] = "adc"
+
+    with pytest.raises(
+        gd.GoogleDriveSourceError,
+        match="Unsupported Google Drive auth_mode: adc.*Supported values: oauth, service_account",
+    ):
+        gd.resolve_google_drive_credentials(config)
+
+
+def test_resolve_google_drive_credentials_errors_for_missing_service_account_source(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["service_account_file"] = str(tmp_path / "missing-service-account.json")
+    cfg["service_account_file_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+    monkeypatch.delenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE", raising=False)
+    monkeypatch.delenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", raising=False)
+
+    class FakeServiceAccountCredentials:
+        pass
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="service-account JSON not found"):
+        gd.resolve_google_drive_credentials(config)
+
+
+def test_resolve_google_drive_credentials_errors_for_malformed_service_account_json(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", '{"private_key":')
+
+    class FakeServiceAccountCredentials:
+        pass
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="malformed service-account JSON"):
+        gd.resolve_google_drive_credentials(config)
+
+
+def test_resolve_google_drive_credentials_errors_for_non_object_service_account_json(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["service_account_json_env"] = "TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON", '["not", "an", "object"]')
+
+    class FakeServiceAccountCredentials:
+        pass
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="invalid service-account JSON payload"):
+        gd.resolve_google_drive_credentials(config)
+
+
+def test_resolve_google_drive_credentials_errors_for_invalid_service_account_file_payload(
+    tmp_path: Path,
+    monkeypatch,
+):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    service_account_file = tmp_path / "service-account.json"
+    cfg["service_account_file"] = str(service_account_file)
+    service_account_file.write_text('{"client_email": "broken@example.test"}', encoding="utf-8")
+
+    class FakeServiceAccountCredentials:
+        @classmethod
+        def from_service_account_file(cls, path, scopes):
+            raise ValueError("bad private key")
+
+    _install_fake_google_service_account_modules(monkeypatch, FakeServiceAccountCredentials)
+
+    with pytest.raises(gd.GoogleDriveSourceError, match="invalid credential payload"):
+        gd.resolve_google_drive_credentials(config)
+
+
 def test_resolve_google_drive_credentials_loads_valid_token(tmp_path: Path, monkeypatch):
     config = _app_config(tmp_path)
     token = tmp_path / "token.json"

@@ -217,9 +217,27 @@ For Gemini, copy [`.env.example`](.env.example) to `.env` and set e.g. `GOOGLE_A
 
 ### Optional: Google Drive invoice source
 
-Google Drive ingestion uses OAuth for the first version. The app reads PDFs from a Drive folder, downloads each PDF temporarily for processing, and deletes the downloaded copy after the run. Normal outputs, logs, rendered pages, and CSV files are preserved.
+Google Drive ingestion reads PDFs from a Drive folder, downloads each PDF temporarily for processing, and deletes the downloaded copy after the run. Normal outputs, logs, rendered pages, and CSV files are preserved.
 
-Setup:
+The app supports two authentication modes under `sources.google_drive.auth_mode`:
+
+```yaml
+sources:
+  google_drive:
+    auth_mode: oauth
+```
+
+```yaml
+sources:
+  google_drive:
+    auth_mode: service_account
+```
+
+When `--pdf` is provided, local PDF processing is used. When `--pdf` is omitted and a Drive folder is configured, Drive ingestion is used.
+
+#### OAuth mode
+
+Use `auth_mode: oauth` for local browser-based authentication with a personal Google account.
 
 1. Enable the **Google Drive API** in your Google Cloud project.
 2. Configure an OAuth consent screen.
@@ -238,7 +256,43 @@ Authenticate once:
 python main.py --drive-auth
 ```
 
-Process a Drive folder:
+OAuth access tokens refresh automatically. If the OAuth app remains in Google's Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
+
+#### Service-account mode
+
+Use `auth_mode: service_account` for non-browser local, Docker, CI, and AWS-style runs. A service account is a separate Google identity; it cannot see files in a personal Drive until those folders or files are explicitly shared with its `client_email`.
+
+1. Enable the **Google Drive API** in your Google Cloud project.
+2. Create a service account in Google Cloud IAM.
+3. Create and download a JSON key for that service account.
+4. Save the key locally as:
+
+```bash
+.secrets/google-drive-service-account.json
+```
+
+5. Set service-account auth in `config/config.yaml`:
+
+```yaml
+sources:
+  google_drive:
+    auth_mode: service_account
+    service_account_file: ".secrets/google-drive-service-account.json"
+    service_account_file_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE
+    service_account_json_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON
+```
+
+`sources.google_drive.service_account_file` points to the local key file. `sources.google_drive.service_account_file_env` names the env var that can override the file path, usually `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE`. `sources.google_drive.service_account_json_env` names the env var that can contain the full JSON secret text, usually `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`; this takes priority when set.
+
+6. Share the Drive invoice folder with the service account's `client_email` from the downloaded JSON key.
+7. If Drive-backed configuration files or folders are used, share those config folders/files with the same `client_email` too. Share only the required folders/files, not broad personal Drive access.
+8. Validate credentials without launching a browser:
+
+```bash
+python main.py --drive-auth
+```
+
+9. Process a Drive folder:
 
 ```bash
 python main.py --google-drive-folder-id <folder-id>
@@ -252,8 +306,6 @@ sources:
     folder_url: "https://drive.google.com/drive/folders/<folder-id>"
 ```
 
-When `--pdf` is provided, local PDF processing is used. When `--pdf` is omitted and a Drive folder is configured, Drive ingestion is used.
-
 Drive-backed config is separate from Drive PDF ingestion. If `sources.google_drive.config_folder.enabled: true`,
 the app loads `invoice_types.csv`, `extraction_fields.csv`, `compliance_rules.csv`, and optional config files
 from that Drive folder even when `--pdf` points to a local file. To force local `config_dir` CSVs for one run:
@@ -264,7 +316,7 @@ python main.py --pdf invoices/my_invoice.pdf --local-config
 
 `--no-drive-config` is accepted as an alias for the same behavior.
 
-OAuth access tokens refresh automatically. If the OAuth app remains in Google’s Testing state, Drive refresh tokens may need re-authentication after 7 days; run `python main.py --drive-auth` again if that happens.
+Never commit service-account JSON keys. Keep `.secrets/google-drive-service-account.json` in `.secrets/`, pass the key through `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE`, or inject the secret text through `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`.
 
 ### Optional: Google Sheets workbook output
 
@@ -401,6 +453,60 @@ docker compose --profile ollama run --rm agent-ollama python main.py --pdf invoi
 ```
 
 Results land in `./output/` on the host. Ollama is for local dev only — AWS deployment uses Gemini.
+
+---
+
+## Docker
+
+The service-account credential options are the same in containers as local runs:
+
+- Mount a key file and set `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE`.
+- Inject the full key JSON as `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON` through the container runtime or managed secret platform.
+
+For Docker Compose, keep the key at `.secrets/google-drive-service-account.json` on the host and mount `.secrets` read-only:
+
+```bash
+docker compose run --rm agent python main.py --drive-auth
+docker compose run --rm agent python main.py --google-drive-folder-id <folder-id>
+```
+
+The included `docker-compose.yml` sets `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE=/app/.secrets/google-drive-service-account.json` and mounts `./.secrets:/app/.secrets:ro` for both `agent` and `agent-ollama`. Local PDF-only runs do not need the secret file unless `sources.google_drive.auth_mode: service_account` is selected.
+
+Plain `docker run` with a mounted service-account file:
+
+```bash
+docker run --rm \
+  -e GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE=/app/.secrets/google-drive-service-account.json \
+  -v "${PWD}/.secrets:/app/.secrets:ro" \
+  -v "${PWD}/invoices:/app/invoices" \
+  -v "${PWD}/output:/app/output" \
+  -v "${PWD}/learnings:/app/learnings" \
+  -v "${PWD}/config:/app/config:ro" \
+  invoice-agent:local python main.py --google-drive-folder-id <folder-id>
+```
+
+Plain `docker run` with secret text injected by the caller:
+
+```bash
+docker run --rm \
+  --env GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON \
+  -v "${PWD}/invoices:/app/invoices" \
+  -v "${PWD}/output:/app/output" \
+  -v "${PWD}/learnings:/app/learnings" \
+  -v "${PWD}/config:/app/config:ro" \
+  invoice-agent:local python main.py --google-drive-folder-id <folder-id>
+```
+
+Do not bake service-account JSON keys into container images or commit them to the repository.
+
+### AWS managed secrets
+
+For ECS, Lambda, or similar AWS deployments, store the service-account JSON key in AWS Secrets Manager or SSM Parameter Store. Prefer managed secret injection over committed files:
+
+- Inject the full secret text into `GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON`.
+- Or mount the managed secret as a file and set `GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE` to that runtime path.
+
+The app reads the injected env var or mounted file directly and does not need direct AWS SDK access for this phase.
 
 ---
 
