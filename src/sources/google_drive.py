@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 DRIVE_PDF_MIME_TYPE = "application/pdf"
 DEFAULT_DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
 DEFAULT_GOOGLE_DRIVE_AUTH_MODE = "oauth"
+DEFAULT_GOOGLE_DRIVE_AUTH_MODE_ENV = "GOOGLE_DRIVE_AUTH_MODE"
 DEFAULT_SERVICE_ACCOUNT_FILE = ".secrets/google-drive-service-account.json"
 DEFAULT_SERVICE_ACCOUNT_FILE_ENV = "GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE"
 DEFAULT_SERVICE_ACCOUNT_JSON_ENV = "GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON"
@@ -112,8 +113,17 @@ def _drive_scopes(cfg: dict) -> list[str]:
     return cleaned or [DEFAULT_DRIVE_SCOPE]
 
 
+def _auth_mode_env_name(cfg: dict) -> str:
+    return str(cfg.get("auth_mode_env") or DEFAULT_GOOGLE_DRIVE_AUTH_MODE_ENV).strip()
+
+
 def _normalize_google_drive_auth_mode(cfg: dict) -> str:
-    raw = str(cfg.get("auth_mode") or DEFAULT_GOOGLE_DRIVE_AUTH_MODE).strip().lower()
+    # An env override (default GOOGLE_DRIVE_AUTH_MODE) wins over the committed config, so
+    # headless deployments (Docker/CI/AWS) can select service_account without editing the
+    # committed oauth default. Falls back to config, then the oauth default.
+    env_name = _auth_mode_env_name(cfg)
+    env_value = os.getenv(env_name) if env_name else None
+    raw = str(env_value or cfg.get("auth_mode") or DEFAULT_GOOGLE_DRIVE_AUTH_MODE).strip().lower()
     mode = raw.replace("-", "_")
     if mode in {"oauth", "service_account"}:
         return mode

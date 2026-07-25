@@ -196,6 +196,9 @@ output:
 sources:
   google_drive:
     auth_mode: oauth
+    # Env var that overrides auth_mode at runtime (headless Docker/CI/AWS deploys set it to
+    # service_account without editing this committed oauth default).
+    auth_mode_env: GOOGLE_DRIVE_AUTH_MODE
     # Set one of these to make Drive ingestion the default source when --pdf is omitted.
     folder_url: "https://drive.google.com/drive/folders/1dd3Rlq_zMF9NG0j9zQTTfiiocQhQ5QVO?usp=drive_link"
     # folder_id: ""

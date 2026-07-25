@@ -702,3 +702,36 @@ def test_resolve_google_drive_credentials_errors_for_missing_client_json(tmp_pat
 
     with pytest.raises(gd.GoogleDriveSourceError, match="OAuth client JSON not found"):
         gd.resolve_google_drive_credentials(config)
+
+
+def test_google_drive_auth_mode_env_override_beats_config(tmp_path: Path, monkeypatch):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "oauth"
+    cfg["auth_mode_env"] = "TEST_GOOGLE_DRIVE_AUTH_MODE"
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_AUTH_MODE", "service_account")
+
+    assert gd.google_drive_auth_mode(config) == "service_account"
+
+
+def test_google_drive_auth_mode_falls_back_to_config_without_env(tmp_path: Path, monkeypatch):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode"] = "service_account"
+    cfg["auth_mode_env"] = "TEST_GOOGLE_DRIVE_AUTH_MODE"
+    monkeypatch.delenv("TEST_GOOGLE_DRIVE_AUTH_MODE", raising=False)
+
+    assert gd.google_drive_auth_mode(config) == "service_account"
+
+
+def test_google_drive_auth_mode_env_override_rejects_unsupported(tmp_path: Path, monkeypatch):
+    config = _app_config(tmp_path)
+    cfg = config["sources"]["google_drive"]
+    cfg["auth_mode_env"] = "TEST_GOOGLE_DRIVE_AUTH_MODE"
+    monkeypatch.setenv("TEST_GOOGLE_DRIVE_AUTH_MODE", "adc")
+
+    with pytest.raises(
+        gd.GoogleDriveSourceError,
+        match="Unsupported Google Drive auth_mode: adc.*Supported values: oauth, service_account",
+    ):
+        gd.google_drive_auth_mode(config)
