@@ -1,4 +1,4 @@
-# Local development only — not used for AWS deployment.
+# Local development only - not used for AWS deployment.
 #
 # Gemini:
 #   cp .env.example .env   # set GOOGLE_API_KEY
@@ -9,6 +9,12 @@
 #   docker exec -it $(docker compose --profile ollama ps -q ollama) ollama pull qwen3:1.7b
 #   docker exec -it $(docker compose --profile ollama ps -q ollama) ollama pull qwen2.5vl:32b
 #   docker compose --profile ollama run --rm agent-ollama python main.py --pdf invoices/your.pdf
+#
+# Service-account Google Drive example:
+#   mkdir -p .secrets
+#   # place the key at .secrets/google-drive-service-account.json
+#   docker compose run --rm agent python main.py --drive-auth
+#   docker compose run --rm agent python main.py --google-drive-folder-id <folder-id>
 
 services:
   agent:
@@ -20,11 +26,15 @@ services:
         required: false
     environment:
       CONFIG_PATH: config/config.yaml
+      GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE: /app/.secrets/google-drive-service-account.json
+      # Alternative for managed secret injection:
+      # GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: ${GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON}
     volumes:
       - ./invoices:/app/invoices
       - ./output:/app/output
       - ./learnings:/app/learnings
       - ./config:/app/config:ro
+      - ./.secrets:/app/.secrets:ro
 
   agent-ollama:
     build: .
@@ -35,11 +45,16 @@ services:
         condition: service_started
     environment:
       CONFIG_PATH: config/config.docker-ollama.yaml
+      GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE: /app/.secrets/google-drive-service-account.json
+      OLLAMA_HOST: http://ollama:11434
+      # Alternative for managed secret injection:
+      # GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON: ${GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON}
     volumes:
       - ./invoices:/app/invoices
       - ./output:/app/output
       - ./learnings:/app/learnings
       - ./config:/app/config:ro
+      - ./.secrets:/app/.secrets:ro
 
   ollama:
     image: ollama/ollama:latest

@@ -65,6 +65,7 @@ from src.sources.google_drive import (
     discover_google_drive_documents,
     google_drive_config_folder_enabled,
     google_drive_cleanup_enabled,
+    google_drive_auth_mode,
     google_drive_output_dir,
     materialize_google_drive_config_folder,
     materialize_google_drive_document,
@@ -647,6 +648,7 @@ def main():
 
     if args.drive_auth:
         try:
+            drive_auth_mode = google_drive_auth_mode(app_config)
             creds = resolve_google_drive_credentials(
                 app_config,
                 oauth_client_secret_path=args.drive_oauth_client_secret,
@@ -656,6 +658,20 @@ def main():
             print(str(e))
             sys.exit(1)
         drive_cfg = ((app_config or {}).get("sources") or {}).get("google_drive") or {}
+        if drive_auth_mode == "service_account":
+            identity = (
+                getattr(creds, "service_account_email", None)
+                or getattr(creds, "client_email", None)
+                or drive_cfg.get("client_email")
+            )
+            granted = sorted(getattr(creds, "scopes", None) or drive_cfg.get("scopes", []) or [])
+            print("Google Drive service-account credentials validated.")
+            if identity:
+                print(f"  Identity: {identity}")
+            if granted:
+                print(f"  Scopes  : {', '.join(granted)}")
+            return
+
         token_path = drive_cfg.get("token_path", ".secrets/google-drive-token.json")
         granted = sorted(getattr(creds, "scopes", None) or drive_cfg.get("scopes", []) or [])
         print("Google Drive OAuth token saved.")

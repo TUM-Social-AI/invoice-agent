@@ -492,7 +492,6 @@ def _drive_doc(tmp_path: Path) -> MaterializedDocument:
         run_identity=run_identity,
     )
 
-
 def _drive_doc_named(tmp_path: Path, name: str, source_id: str, revision_id: str, source_hash: str) -> MaterializedDocument:
     pdf = tmp_path / f"{Path(name).stem}.pdf"
     pdf.write_bytes(b"%PDF")
@@ -528,7 +527,7 @@ def _drive_doc_named(tmp_path: Path, name: str, source_id: str, revision_id: str
     )
 
 
-def test_main_drive_auth_saves_token_without_constructing_agent(tmp_path: Path, monkeypatch):
+def test_main_drive_auth_saves_token_without_constructing_agent(tmp_path: Path, monkeypatch, capsys):
     _patch_cli_runtime(monkeypatch)
     calls = []
 
@@ -546,7 +545,44 @@ def test_main_drive_auth_saves_token_without_constructing_agent(tmp_path: Path, 
 
     cli.main()
 
+    output = capsys.readouterr().out
     assert calls == [{"oauth_client_secret_path": str(tmp_path / "c.json"), "force_interactive": True}]
+    assert "Google Drive OAuth token saved." in output
+    assert "scope-a" in output
+    assert "service-account credentials validated" not in output
+
+
+def test_main_drive_auth_validates_service_account_without_token_message(monkeypatch, capsys):
+    _patch_cli_runtime(monkeypatch)
+    config = {"sources": {"google_drive": {"auth_mode": "service_account", "scopes": ["scope-a"]}}}
+    calls = []
+
+    monkeypatch.setattr(cli, "load_app_config", lambda path: config)
+    monkeypatch.setattr(
+        cli,
+        "resolve_google_drive_credentials",
+        lambda cfg, **kwargs: calls.append((cfg, kwargs)) or SimpleNamespace(
+            client_email="drive-service@example.test",
+            scopes=["scope-a"],
+        ),
+    )
+    monkeypatch.setattr(
+        cli,
+        "InvoiceAgent",
+        lambda config, store: (_ for _ in ()).throw(AssertionError("agent should not be constructed")),
+    )
+    monkeypatch.setattr("sys.argv", ["main.py", "--drive-auth", "--drive-oauth-client-secret", "ignored.json"])
+
+    cli.main()
+
+    output = capsys.readouterr().out
+    assert calls == [(config, {"oauth_client_secret_path": "ignored.json", "force_interactive": True})]
+    assert "Google Drive service-account credentials validated." in output
+    assert "drive-service@example.test" in output
+    assert "scope-a" in output
+    assert "Google Drive OAuth token saved." not in output
+    assert "Token :" not in output
+    assert ".secrets/google-drive-token.json" not in output
 
 
 def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: Path, monkeypatch):
@@ -554,11 +590,23 @@ def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: 
     output = tmp_path / "output"
     doc = _drive_doc(tmp_path)
     calls = []
+    credential_calls = []
+    service_calls = []
     cleaned = []
     summaries = []
+    fake_credentials = object()
+    fake_service = object()
 
-    monkeypatch.setattr(cli, "resolve_google_drive_credentials", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli, "build_google_drive_service", lambda *args, **kwargs: object())
+    def fake_resolve_credentials(config, **kwargs):
+        credential_calls.append((config, kwargs))
+        return fake_credentials
+
+    def fake_build_service(credentials, config):
+        service_calls.append((credentials, config))
+        return fake_service
+
+    monkeypatch.setattr(cli, "resolve_google_drive_credentials", fake_resolve_credentials)
+    monkeypatch.setattr(cli, "build_google_drive_service", fake_build_service)
     monkeypatch.setattr(cli, "discover_google_drive_documents", lambda *args, **kwargs: [doc.ref])
     monkeypatch.setattr(cli, "materialize_google_drive_document", lambda *args, **kwargs: doc)
 
@@ -577,6 +625,8 @@ def test_main_google_drive_folder_routes_as_batch_and_cleans_download(tmp_path: 
 
     cli.main()
 
+    assert credential_calls == [({}, {"oauth_client_secret_path": None})]
+    assert service_calls == [(fake_credentials, {})]
     assert len(calls) == 1
     assert calls[0][0] == str(tmp_path / "materialized.pdf")
     assert calls[0][1] == str(output / "drive-invoice-abc123def456")
