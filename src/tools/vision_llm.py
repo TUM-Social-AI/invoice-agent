@@ -27,9 +27,12 @@ from src.prompts.llm_prompts import (
     format_extraction_accuracy_block,
     ocr_transcript_section,
 )
-from src.tools.pdf_pages import _image_to_base64
+from src.tools.pdf_pages import _image_to_base64, render_single_page
 
 logger = logging.getLogger(__name__)
+
+# Re-render DPI for classification: enough to read line items, one page only.
+CLASSIFY_DPI = 150
 
 # Lower than chat; reduces invented tokens on dense forms.
 EXTRACTION_TEMPERATURE = 0.05
@@ -69,8 +72,19 @@ def classify_document_type(
 
     first_page = state.page_image_paths[0]
 
+    # page_image_paths may still be compress_pages' 48-DPI thumbnails: fine for
+    # layout, too blurry to read line items. Re-render page 1 if so.
+    if first_page in state.compressed_page_paths:
+        legible = render_single_page(state, page_num=1, dpi=CLASSIFY_DPI)
+        if legible:
+            logger.info(f"  classify: rendered page 1 at {CLASSIFY_DPI} DPI (was a thumbnail)")
+            first_page = legible
+
+    # agent_context holds per-type keywords and "do not classify as X" rules.
+    # They only reached the extraction prompt before; the classifier needs them too.
     type_descriptions = "\n".join(
         f'- "{t.invoice_type_id}": {t.display_name} — {t.description}'
+        + (f"\n  Context: {t.agent_context}" if t.agent_context else "")
         for t in store.invoice_types.values()
     )
 
@@ -117,6 +131,8 @@ def classify_document_type(
             }
 
         state.invoice_type_id = detected
+        state.invoice_type_confidence = float(confidence)
+        state.invoice_type_reasoning = reasoning
         logger.info(f"Document classified as: {detected} (confidence={confidence}) — {reasoning}")
         return {
             "success": True,

@@ -97,10 +97,14 @@ def run_fixed_pipeline(
     presenter: PresenterProtocol | None = None,
     log_turn_start: Callable[..., None] | None = None,
     log_tool_result_fn: Callable[..., None] | None = None,
+    classify_only: bool = False,
 ) -> None:
     """
     Mutates `state` until finish, error, or unrecoverable tool failure.
     Caller opens log_handle and sets state.run_log_path.
+
+    With classify_only, stops once the document type is known: no page
+    inventory, no full-quality render, no extraction, no compliance.
     """
     last_phase: list[str | None] = [None]
     pres = presenter or NullPresenter()
@@ -131,11 +135,14 @@ def run_fixed_pipeline(
         state.finish_reason = r.get("error", "compress_pages failed")
         return
 
-    r = _run("inventory_pages", {}, "pipeline: page inventory")
-    if isinstance(r, dict) and r.get("success") is False:
-        state.status = AgentStatus.ERROR
-        state.finish_reason = r.get("error", "inventory_pages failed")
-        return
+    # Page inventory is only needed by the steps classify_only skips, and it is
+    # the expensive part of SCAN (a vision call per batch of pages).
+    if not classify_only:
+        r = _run("inventory_pages", {}, "pipeline: page inventory")
+        if isinstance(r, dict) and r.get("success") is False:
+            state.status = AgentStatus.ERROR
+            state.finish_reason = r.get("error", "inventory_pages failed")
+            return
 
     if not state.invoice_type_id:
         r = _run("classify_document_type", {}, "pipeline: document type")
@@ -143,6 +150,20 @@ def run_fixed_pipeline(
             state.status = AgentStatus.ERROR
             state.finish_reason = r.get("error", "classify_document_type failed")
             return
+
+    if classify_only:
+        # Terminal state is set here rather than via finish(), whose guard
+        # rightly rejects a run with no extracted fields.
+        if not state.invoice_type_id:
+            state.status = AgentStatus.ERROR
+            state.finish_reason = "classify-only: no document type determined"
+            return
+        state.status = AgentStatus.CLASSIFIED
+        state.finish_reason = (
+            f"classify-only: {state.invoice_type_id} "
+            f"(confidence {state.invoice_type_confidence:.2f})"
+        )
+        return
 
     if planning_enabled and generate_plan_fn and state.invoice_type_id and not state.execution_plan:
         state.execution_plan = generate_plan_fn(state)

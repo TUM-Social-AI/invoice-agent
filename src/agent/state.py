@@ -20,6 +20,7 @@ class AgentStatus(Enum):
     NEEDS_REVIEW = "needs_review"  # agent flagged fields for human
     ERROR = "error"             # unrecoverable error
     INTERRUPTED = "interrupted" # user cancelled (Ctrl+C)
+    CLASSIFIED = "classified"   # classify-only run: categorised, no extraction or compliance
 
 
 class FieldResult(BaseModel):
@@ -77,6 +78,10 @@ class AgentState(BaseModel):
     pdf_path: str
     output_dir: str
     invoice_type_id: str = ""       # empty until classify_document_type is called
+    # Set alongside invoice_type_id by classify_document_type. Kept on state so
+    # callers (folder routing, reports) can act on how sure the model was.
+    invoice_type_confidence: float = 0.0
+    invoice_type_reasoning: str = ""
 
     # --- Runtime ---
     status: AgentStatus = AgentStatus.RUNNING

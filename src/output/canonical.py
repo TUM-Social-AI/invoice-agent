@@ -16,6 +16,7 @@ CANONICAL_STATUS_VALUES = {
     "flagged",
     "needs_review",
     "error",
+    "classified",
     "unknown",
 }
 

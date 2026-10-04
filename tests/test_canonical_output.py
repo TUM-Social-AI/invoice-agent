@@ -302,6 +302,7 @@ def test_status_normalization_uses_canonical_vocabulary() -> None:
         "flagged",
         "needs_review",
         "error",
+        "classified",
         "unknown",
     }
     assert normalize_rule_status("passed", "error") == "passed"
@@ -313,6 +314,8 @@ def test_status_normalization_uses_canonical_vocabulary() -> None:
     assert normalize_agent_status(AgentStatus.PASSED) == "passed"
     assert normalize_agent_status(AgentStatus.NEEDS_REVIEW) == "needs_review"
     assert normalize_agent_status(AgentStatus.INTERRUPTED) == "error"
+    # classify-only runs stay distinguishable from compliance outcomes
+    assert normalize_agent_status(AgentStatus.CLASSIFIED) == "classified"
     assert normalize_agent_status("strange") == "unknown"
 
 

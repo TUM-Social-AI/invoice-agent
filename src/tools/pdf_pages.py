@@ -213,6 +213,61 @@ def render_medium_pages(
     }
 
 
+def render_single_page(
+    state: AgentState,
+    page_num: int = 1,
+    dpi: int = 150,
+    quality: int = 85,
+    max_width: int = 1800,
+) -> Optional[str]:
+    """
+    Render one page at `dpi` and return its path.
+
+    For when page_image_paths still holds compress_pages' low-res thumbnails and
+    the caller needs a readable image. Leaves state untouched, reuses an existing
+    render, and returns None on failure so the caller can fall back.
+    """
+    try:
+        import pypdfium2 as pdfium
+    except ImportError:
+        return None
+
+    out_dir = Path(state.tmp_dir) / "single_pages"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"page_{page_num:03d}_dpi{dpi}.jpg"
+    if out_path.exists():
+        return str(out_path)
+
+    try:
+        pdf = pdfium.PdfDocument(state.pdf_path)
+    except Exception as e:
+        logger.warning(f"render_single_page: could not open PDF ({e})")
+        return None
+
+    try:
+        if page_num < 1 or page_num > len(pdf):
+            return None
+        page = pdf[page_num - 1]
+        bitmap = page.render(scale=dpi / 72.0, rotation=0)
+        pil_img = bitmap.to_pil()
+        bitmap.close()
+        page.close()
+
+        if pil_img.mode in ("RGBA", "P"):
+            pil_img = pil_img.convert("RGB")
+        if pil_img.width > max_width:
+            ratio = max_width / pil_img.width
+            pil_img = pil_img.resize((max_width, int(pil_img.height * ratio)), Image.LANCZOS)
+
+        pil_img.save(out_path, "JPEG", quality=quality, optimize=True)
+        return str(out_path)
+    except Exception as e:
+        logger.warning(f"render_single_page: render failed for page {page_num} ({e})")
+        return None
+    finally:
+        pdf.close()
+
+
 REGION_CROPS = {
     "header":        (0.0, 0.0,  1.0, 0.25),   # top 25%
     "footer":        (0.0, 0.75, 1.0, 1.0),    # bottom 25%

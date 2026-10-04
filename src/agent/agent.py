@@ -96,6 +96,11 @@ class InvoiceAgent:
         _plim = prompt_limits_for_config(config)
         self.planning_learnings_max_chars = _plim["planning_learnings_max_chars"]
         self.orchestration = str(config.get("agent", {}).get("orchestration", "loop")).strip().lower()
+        # Classify-only is a fixed three-step sequence, so it always runs through
+        # the deterministic pipeline regardless of the configured orchestration.
+        self.classify_only = bool(config.get("agent", {}).get("classify_only", False))
+        if self.classify_only:
+            self.orchestration = "pipeline"
         self.log_line_max_chars = int(config.get("agent", {}).get("log_line_max_chars", 120))
         timeouts = _timeout_cfg(config)
         self.chat_timeout_s = timeouts["chat_timeout_s"]
@@ -596,6 +601,7 @@ class InvoiceAgent:
                     presenter=self.presenter,
                     log_turn_start=self._log_turn_start if self.presenter.active else None,
                     log_tool_result_fn=self._log_tool_result if self.presenter.active else None,
+                    classify_only=self.classify_only,
                 )
             except KeyboardInterrupt:
                 raise

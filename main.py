@@ -30,7 +30,7 @@ from dotenv import load_dotenv
 from src.config.loader import ConfigStore, load_config
 from src.llm.config_resolve import active_rule_groups_from_config
 from src.agent.agent import InvoiceAgent
-from src.agent.state import AgentState, rule_verdict_summary
+from src.agent.state import AgentState, AgentStatus, rule_verdict_summary
 from src.output.canonical_csv import write_workbook_csvs
 from src.output.writer import write_results
 from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter
@@ -221,9 +221,27 @@ def process_invoice(
         source_provenance=source_provenance,
         run_identity=run_identity,
     )
-    paths = write_results(state, output_dir)
+    classify_only = bool(getattr(agent, "classify_only", False))
 
     presenter = getattr(agent, "presenter", NullPresenter())
+
+    if classify_only:
+        # No fields and no rule results, so the usual CSVs would be empty files
+        # implying extraction and compliance ran. The batch writes
+        # classification.csv instead.
+        if not presenter.active:
+            print(f"\n{'='*60}")
+            print(f"  {Path(pdf_path).name}")
+            print(f"  Status   : {state.status.value.upper()}")
+            print(f"  Type     : {state.invoice_type_id or '(undetermined)'}")
+            print(f"  Confidence: {state.invoice_type_confidence:.2f}")
+            if state.invoice_type_reasoning:
+                print(f"  Reason   : {state.invoice_type_reasoning}")
+            print(f"{'='*60}\n")
+        return state, None, None
+
+    paths = write_results(state, output_dir)
+
     if not presenter.active:
         print(f"\n{'='*60}")
         print(f"  {Path(pdf_path).name}")
@@ -463,6 +481,12 @@ def _write_batch_workbook_outputs(
     if not successful_states:
         return
 
+    # Classify-only runs extract no fields and evaluate no rules, so every table
+    # here would be empty. Skip rather than publish a blank compliance report
+    # (and, when Sheets output is enabled, fail on credentials it doesn't need).
+    if all(s.status == AgentStatus.CLASSIFIED for s in successful_states):
+        return
+
     active_rule_groups = active_rule_groups_from_config(app_config)
     rule_metadata = []
     if store is not None and hasattr(store, "get_rules"):
@@ -529,6 +553,11 @@ def main():
         dest="local_config",
         action="store_true",
         help="Load config CSVs from local config_dir even when Google Drive config_folder is enabled",
+    )
+    parser.add_argument(
+        "--classify-only",
+        action="store_true",
+        help="Only determine the document type: no extraction, no compliance checks",
     )
     parser.add_argument("--list-types", action="store_true", help="List available invoice types")
     parser.add_argument("--learn", action="store_true",
@@ -618,6 +647,8 @@ def main():
         sys.exit(0)
 
     app_config = load_app_config(args.config)
+    if args.classify_only:
+        app_config.setdefault("agent", {})["classify_only"] = True
     pres_on = presentation_enabled(app_config, args.presentation)
     apply_configured_log_level(app_config, presentation=pres_on)
 
