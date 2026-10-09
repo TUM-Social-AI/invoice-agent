@@ -34,6 +34,30 @@ Rules:
 - Lower confidence when the page is ambiguous, blank, or unlike any listed type."""
 
 
+def classify_from_inventory_prompt(type_descriptions_block: str, inventory_block: str) -> str:
+    """
+    Text-only classification from the page inventory (category + description per page).
+    type_descriptions_block: newline-separated "- \"TYPE_ID\": ..." lines from config.
+    inventory_block: one "- page N: CATEGORY — description" line per page.
+    """
+    return f"""You are an invoice classification expert. Below is an inventory of every page of one expense document
+(page category + a short description of what is visible). The first page is often a generic internal fund-request
+form; decide from what is actually being paid for across all pages (the supplier invoice, line items, receipts).
+
+Available types:
+{type_descriptions_block}
+
+Page inventory:
+{inventory_block}
+
+Respond with ONLY valid JSON, no markdown fences:
+{{"invoice_type_id": "<one id from the list>", "confidence": 0.0-1.0, "reasoning": "one concise sentence citing the pages that decided it"}}
+
+Rules:
+- Pick exactly one invoice_type_id from the list; never invent new ids.
+- Lower confidence when the pages describe nothing that clearly fits a listed type."""
+
+
 # --- Field extraction (per page / crop) ---
 
 _EXTRACTION_LANG_NOTE = (

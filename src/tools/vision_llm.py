@@ -1,6 +1,7 @@
 """Moved implementations for vision_llm.py."""
 
 import base64
+import io
 import ast
 import json
 import logging
@@ -25,6 +26,7 @@ from src.trace.evidence import Evidence, coerce_line_ids
 from src.prompts.llm_prompts import (
     build_extract_fields_vision_prompt,
     classify_document_type_prompt,
+    classify_from_inventory_prompt,
     format_extraction_accuracy_block,
     ocr_transcript_section,
 )
@@ -53,6 +55,39 @@ def _sanitize_extracted_string_value(value: Any, ftype: str) -> Any:
     return s
 
 
+# Page 1 resolution for image-based classification (fallback when there is no page inventory).
+CLASSIFY_PAGE_DPI = 150
+
+
+def _inventory_block(state: AgentState) -> str:
+    """One line per inventoried page; empty when there is no usable inventory."""
+    lines = []
+    for e in sorted(state.page_inventory or [], key=lambda x: int(x.get("page", 0) or 0)):
+        desc = str(e.get("description", "") or "").strip()
+        if not desc or desc.startswith("(no response") or desc.startswith("(error"):
+            continue
+        lines.append(f"- page {e.get('page')}: {e.get('category', 'UNKNOWN')} — {desc}")
+    return "\n".join(lines)
+
+
+def _first_page_b64(state: AgentState) -> str:
+    """Page 1 rendered at CLASSIFY_PAGE_DPI from the PDF; the first page image when rendering fails."""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(state.pdf_path)
+        try:
+            img = pdf[0].render(scale=CLASSIFY_PAGE_DPI / 72.0).to_pil().convert("RGB")
+        finally:
+            pdf.close()
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:
+        logger.warning("classify_document_type: could not render page 1 (%s); using %s", e, state.page_image_paths[0])
+        return _image_to_base64(state.page_image_paths[0])
+
+
 def classify_document_type(
     state: AgentState,
     store: "ConfigStore",
@@ -62,26 +97,37 @@ def classify_document_type(
     timeout_s: int = 240,
 ) -> dict:
     """
-    Look at the first rendered page and determine which invoice type this document is.
-    Sets state.invoice_type_id. Must be called after convert_pdf_to_images or compress_pages.
+    Determine which invoice type this document is. Sets state.invoice_type_id.
+
+    With a page inventory (inventory_pages ran), classify from the descriptions of all
+    pages, text only: page 1 is often a generic fund-request form that looks the same for
+    every expense type, and what is being paid for shows on the later pages. Without an
+    inventory, classify from page 1 rendered at CLASSIFY_PAGE_DPI; the 48 DPI thumbnails
+    from compress_pages are too small to read and led to guessed types.
+    Must be called after convert_pdf_to_images or compress_pages.
     """
     if not state.page_image_paths:
         return {"success": False, "error": "No pages rendered yet. Call convert_pdf_to_images or compress_pages first."}
-
-    first_page = state.page_image_paths[0]
 
     type_descriptions = "\n".join(
         f'- "{t.invoice_type_id}": {t.display_name} — {t.description}'
         for t in store.invoice_types.values()
     )
 
-    prompt = classify_document_type_prompt(type_descriptions)
+    inventory_block = _inventory_block(state)
+    if inventory_block:
+        basis = "page_inventory"
+        prompt = classify_from_inventory_prompt(type_descriptions, inventory_block)
+        images: list[str] = []
+    else:
+        basis = "first_page_image"
+        prompt = classify_document_type_prompt(type_descriptions)
+        images = [_first_page_b64(state)]
 
-    img_b64 = _image_to_base64(first_page)
     payload = {
         "model": vision_model,
         "prompt": prompt,
-        "images": [img_b64],
+        "images": images,
         "stream": False,
         "options": {"temperature": 0.1},
     }
@@ -92,7 +138,7 @@ def classify_document_type(
             llm_result = provider.generate_json(
                 model=vision_model,
                 prompt=prompt,
-                images_b64=[img_b64],
+                images_b64=images or None,
                 temperature=0.1,
                 timeout_s=timeout_s,
                 response_format=provider_json_mode(pname),
@@ -118,12 +164,13 @@ def classify_document_type(
             }
 
         state.invoice_type_id = detected
-        logger.info(f"Document classified as: {detected} (confidence={confidence}) — {reasoning}")
+        logger.info(f"Document classified as: {detected} (confidence={confidence}, from {basis}) — {reasoning}")
         return {
             "success": True,
             "invoice_type_id": detected,
             "confidence": confidence,
             "reasoning": reasoning,
+            "basis": basis,
         }
 
     except json.JSONDecodeError as e:
