@@ -15,6 +15,7 @@ from typing import Any, Optional
 import requests
 from PIL import Image
 
+from src.tools.value_parsing import parse_amount
 from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule, unresolved_rule_params
@@ -175,72 +176,8 @@ def _policy_refs_for_rule(state: AgentState, rule: ComplianceRule) -> list[dict]
     return refs
 
 def _normalize_numeric(value: Any) -> Optional[float]:
-    """
-    Parse numbers from common OCR formats:
-    - thousands separators: "1.190,00" -> 1190.00
-    - decimal separators: "1,90" -> 1.90
-    - currency symbols: "€ 1.190,00" -> 1190.00
-    - percent suffix: "19%" -> 19.0
-    """
-    if value is None:
-        return None
-
-    s = str(value).strip()
-    if not s or s.lower() in ("null", "none"):
-        return None
-
-    # Strip HTML/XML fragments (OCR / PDF text sometimes embeds tags).
-    s = re.sub(r"<[^>]+>", "", s)
-    s = s.replace("&nbsp;", " ").replace("&#160;", " ").replace("\xa0", " ")
-    s = s.strip()
-    if not s or s.lower() in ("null", "none"):
-        return None
-
-    negative = False
-    if s.startswith("(") and s.endswith(")"):
-        negative = True
-        s = s[1:-1].strip()
-
-    # Remove currency symbols and whitespace, then try to extract the first numeric token.
-    # OCR strings are often like: "Total: 1.190,00 EUR" or "€ 1 190,00".
-    s = re.sub(r"[€$£]", "", s)
-    s = s.replace(" ", "")
-    s = s.rstrip("%")
-
-    m = re.search(r"[+-]?\d[\d\.,]*", s)
-    if not m:
-        return None
-    s = m.group(0)
-
-    # If both separators are present, assume "." is thousands and "," is decimal.
-    if "," in s and "." in s:
-        s = s.replace(".", "")
-        s = s.replace(",", ".")
-    elif "," in s:
-        # Heuristic: single comma is treated as decimal separator.
-        # If multiple commas exist, treat them as thousands separators.
-        if s.count(",") == 1:
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif s.count(".") > 1:
-        # Multiple dots but no comma: dots are thousands separators ("1.700.000" -> 1700000).
-        # A non-3-digit last group is read as decimals ("1.234.56" -> 1234.56).
-        parts = s.split(".")
-        if len(parts[-1]) == 3:
-            s = "".join(parts)
-        else:
-            s = "".join(parts[:-1]) + "." + parts[-1]
-
-    if s in ("", "-", "+"):
-        return None
-
-    try:
-        v = float(s)
-    except (ValueError, TypeError):
-        return None
-
-    return -v if negative else v
+    """Parse a printed amount ("1.190,00 EUR", "425 000 FCFA", "19%"); see value_parsing.parse_amount."""
+    return parse_amount(value)
 
 def _safe_eval_numeric(expr: str) -> float:
     """

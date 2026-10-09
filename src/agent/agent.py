@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.state import AgentState, AgentStatus
+from src.models.tool_io_models import inventory_label
 from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
 from src.llm.config_resolve import prompt_limits_for_config, reasoning_model_for_config
@@ -199,7 +200,7 @@ class InvoiceAgent:
         if state.page_inventory:
             for pg in state.page_inventory:
                 inventory_lines.append(
-                    f"  Page {pg.get('page')}: {pg.get('category', '?')} — {pg.get('description', '')[:120]}"
+                    f"  Page {pg.get('page')}: {inventory_label(pg)} — {pg.get('description', '')[:120]}"
                 )
         inventory_hint = (
             "Page inventory (already completed):\n" + "\n".join(inventory_lines)

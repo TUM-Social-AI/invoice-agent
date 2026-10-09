@@ -13,6 +13,26 @@ class ClassificationResultModel(BaseModel):
     reasoning: str = ""
 
 
+# Who issued a page and what it proves, independent of its layout category. Lets extraction
+# rank pages per field (e.g. vendor fields from the supplier's invoice, never from the payer's
+# own funds request). "" = unknown (no role given).
+DOCUMENT_ROLES = (
+    "funds_request",
+    "internal_other",
+    "supplier_invoice",
+    "supplier_other",
+    "payment_proof",
+    "other",
+)
+
+
+def inventory_label(entry: dict) -> str:
+    """Category plus document role for prompts and summaries, e.g. "INVOICE_HEADER, funds_request"."""
+    category = str(entry.get("category") or "UNKNOWN")
+    role = str(entry.get("document_role") or "")
+    return f"{category}, {role}" if role else category
+
+
 class InventoryItemModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -26,12 +46,19 @@ class InventoryItemModel(BaseModel):
         "BLANK",
         "UNKNOWN",
     ] = "UNKNOWN"
+    document_role: str = ""
     description: str = ""
 
     @field_validator("category", mode="before")
     @classmethod
     def normalize_category(cls, value: Any) -> str:
         return str(value or "UNKNOWN").strip().upper()
+
+    @field_validator("document_role", mode="before")
+    @classmethod
+    def normalize_document_role(cls, value: Any) -> str:
+        role = str(value or "").strip().lower()
+        return role if role in DOCUMENT_ROLES else ""
 
 
 class VisualVerdictModel(BaseModel):

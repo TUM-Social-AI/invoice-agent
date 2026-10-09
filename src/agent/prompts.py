@@ -93,6 +93,11 @@ delete_learning(learning_id)
 inventory_pages()
   → classifies each page into a fixed category + short description
   → categories: INVOICE_HEADER | LINE_ITEMS | TOTALS | SIGNATURE_STAMP | SUPPORTING_DOC | COVER_PAGE | BLANK
+  → each page also gets a document_role (who issued it): funds_request (the payer's internal funds/payment
+    request) | internal_other (the payer's other forms: requisition, goods received note, timesheet) |
+    supplier_invoice | supplier_other (pro forma, quote, delivery note) | payment_proof | other
+  → extract every page whose role is supplier_invoice, funds_request or payment_proof; when several pages show
+    the same field, extraction keeps the value from the page role configured for it (not just the most confident)
   → automatically uses low-res compressed thumbnails if compress_pages was called (much faster)
   → result visible in state summary; use categories to decide which pages to target
   → MUST call compress_pages(dpi=48, quality=30) before this, then convert_pdf_to_images for extraction
@@ -147,7 +152,9 @@ Working style:
     automatically, even after convert_pdf_to_images is called later.
     inventory_pages() returns a fixed category (INVOICE_HEADER, LINE_ITEMS, TOTALS,
     SIGNATURE_STAMP, SUPPORTING_DOC, COVER_PAGE, BLANK) for every page plus a short
-    description. Use this map to target extraction — don't guess which page has what.
+    description, plus a document_role (shown after the category, e.g. "INVOICE_HEADER, funds_request").
+    Use this map to target extraction — don't guess which page has what. An internal funds_request on the
+    payer's letterhead is not the supplier's invoice: read vendor, client and amounts on the supplier_invoice page.
   Phase 2 (extraction): convert_pdf_to_images(dpi={_page_dpi}) → targeted extraction on the right pages
     Extract all fields expected on the same page in a SINGLE extract_fields_vision call.
     Do NOT call extract_fields_vision once per field — pass the full field_subset for

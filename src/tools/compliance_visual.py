@@ -24,7 +24,7 @@ from src.models.tool_io_models import VisualVerdictModel
 from src.trace.evidence import parse_line_id
 from src.trace.ocr_cache import format_lines_with_ids, lines_with_ids
 from src.prompts.llm_prompts import build_compliance_visual_prompt
-from src.tools.vision_llm import _sanitize_extracted_string_value
+from src.tools.vision_llm import _sanitize_extracted_string_value, normalize_extracted_value
 from src.tools.pdf_pages import image_to_base64_scaled
 from src.tools.compliance_eval import VISUAL_SKIP_KEY, _evaluate_rule, _policy_refs_for_rule
 
@@ -72,10 +72,16 @@ def _merge_visual_field_updates(
             logger.debug("check_compliance_visual: skip field_updates[%s] (not in schema)", key)
             continue
         ftype = str(schema[key].get("type") or "string").strip().lower()
-        val = _sanitize_extracted_string_value(raw, ftype if ftype in ("string", "date") else "string")
-        if val is None or (isinstance(val, str) and not val.strip()):
-            continue
-        val = str(val).strip()
+        if ftype in ("decimal", "date"):
+            # Same parsing as extraction: amounts from printed text, complete dates only.
+            val, _reason = normalize_extracted_value(raw, schema[key])
+            if val is None:
+                continue
+        else:
+            val = _sanitize_extracted_string_value(raw, "string")
+            if val is None or (isinstance(val, str) and not val.strip()):
+                continue
+            val = str(val).strip()
         if key == "employee_name" and _reject_employee_name_role_like(val, store.employee_name_role_denylist):
             continue
         if key == "payment_method" and _is_short_date_fragment(val):
@@ -109,7 +115,7 @@ def _merge_visual_field_updates(
             "check_compliance_visual: merged field_updates[%s] from %s (%d chars)",
             key,
             rule_id,
-            len(val),
+            len(str(val)),
         )
     return applied
 

@@ -10,6 +10,7 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.models.tool_io_models import inventory_label
 from src.sources.models import RunIdentity, SourceProvenance
 from src.trace.evidence import Evidence
 
@@ -308,7 +309,7 @@ class AgentState(BaseModel):
                     f"pages 1..{len(inv)}) ...\n"
                 )
             inv_lines = "\n".join(
-                f"  p{e['page']} [{e.get('category', '?')}]: "
+                f"  p{e['page']} [{inventory_label(e)}]: "
                 f"{_truncate_desc(str(e.get('description', '')), inventory_desc_chars)}"
                 for e in slice_inv
             )

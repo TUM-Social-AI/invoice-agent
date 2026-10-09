@@ -271,7 +271,8 @@ def test_project_ground_truth_files_are_consistent():
 
     with open(config["agent"]["ground_truth_csv_path"], newline="", encoding="utf-8") as f:
         rows = list(csv.DictReader(f))
-    assert {r["Currency"] for r in rows} == {"XAF"}
+    # Chad corpus in XAF, except the UNHAS flights (A3223) invoiced in USD.
+    assert {r["Id"]: r["Currency"] for r in rows if r["Currency"] != "XAF"} == {"A3223": "USD"}
     assert all(r["Invoice Type"] for r in rows)
 
     taxonomy = {

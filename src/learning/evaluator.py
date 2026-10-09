@@ -39,6 +39,7 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from src.agent.state import AgentState, rule_verdict_summary
 from src.sources.models import SourceProvenance
+from src.tools.value_parsing import parse_amount
 
 if TYPE_CHECKING:
     from src.config.loader import ConfigStore
@@ -55,65 +56,8 @@ SCORED_ISSUE_LEVELS = ("fail", "verify")
 
 
 def _normalize_number_for_eval(v) -> Optional[float]:
-    if v is None:
-        return None
-    s = str(v).strip()
-    if not s or s.lower() in ("null", "none"):
-        return None
-    s = s.replace(" ", "")
-    s = re.sub(r"[€$£%]", "", s)
-
-    # European-style: 1.190,00 -> 1190.00
-    if "," in s and "." in s:
-        if s.rfind(",") > s.rfind("."):
-            # comma is decimal separator
-            s = s.replace(".", "").replace(",", ".")
-        else:
-            # dot is decimal separator; remove commas (thousands)
-            s = s.replace(",", "")
-    elif "," in s:
-        # single comma likely decimal separator; multiple commas likely thousands
-        if s.count(",") == 1:
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif "." in s:
-        # multiple dots: treat all but last as thousands separators
-        if s.count(".") > 1:
-            parts = s.split(".")
-            s = "".join(parts[:-1]) + "." + parts[-1]
-
-    # Extract first numeric token (handles +/- and stray OCR punctuation)
-    m = re.search(r"[+-]?\d[\d\.,]*", s)
-    if not m:
-        return None
-    s = m.group(0)
-    # Apply separators heuristics on the extracted numeric token.
-    t = s
-    if "," in t and "." in t:
-        if t.rfind(",") > t.rfind("."):
-            # comma is decimal separator; remove '.' thousands
-            t = t.replace(".", "").replace(",", ".")
-        else:
-            # dot is decimal separator; remove ',' thousands
-            t = t.replace(",", "")
-    elif "," in t:
-        if t.count(",") == 1:
-            t = t.replace(",", ".")
-        else:
-            t = t.replace(",", "")
-    elif "." in t:
-        if t.count(".") > 1:
-            parts = t.split(".")
-            t = "".join(parts[:-1]) + "." + parts[-1]
-
-    if t in ("", "-", "+"):
-        return None
-
-    try:
-        return float(t)
-    except ValueError:
-        return None
+    """A number only when the whole value is an amount: "0007932" is, "006/09/2025" is not."""
+    return parse_amount(v, strict=True)
 
 
 def _ground_truth_match_key(label: str) -> str:

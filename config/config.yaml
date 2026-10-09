@@ -69,6 +69,36 @@ agent:
   max_field_retries: 5
   confidence_threshold: 0.65 # below this → blocking human-review flag
   batch_review_threshold: 0.85 # between confidence_threshold and this → non-blocking batch review
+  # Day/month order for numeric dates read during extraction (DMY or MDY) when both are <= 12.
+  extraction_date_order: DMY
+  # Which page wins when several documents in one bundle show the same field (an internal funds
+  # request and the supplier's invoice both carry a number, a date, a party and an amount).
+  # Per field: document roles from the page inventory, best first. A value read on a higher-ranked
+  # page replaces one from a lower-ranked page whatever the confidences, once it reaches
+  # confidence_threshold; roles not listed rank last. Fields not listed keep the most confident value.
+  # Roles: funds_request, internal_other, supplier_invoice, supplier_other, payment_proof, other.
+  document_role_priority:
+    # Reference and date of the expense: the internal funds request number (reviewer convention).
+    invoice_number: &request_first [funds_request, supplier_invoice, supplier_other, payment_proof]
+    invoice_date: *request_first
+    # Parties and amounts: the supplier's own invoice; the payer's internal forms last.
+    vendor_name: &supplier_first [supplier_invoice, supplier_other, payment_proof, other, internal_other, funds_request]
+    vendor_tax_id: *supplier_first
+    beneficiary: *supplier_first
+    employee_name: *supplier_first
+    total_amount: *supplier_first
+    net_amount: *supplier_first
+    vat_amount: *supplier_first
+    currency: *supplier_first
+    # How it was paid: the payment evidence first, a "Payé par" line on the request last.
+    payment_method: [payment_proof, supplier_invoice, supplier_other, other, internal_other, funds_request]
+  # Before check_compliance, extract the fields above from every page with one of these roles that
+  # no extraction covered yet (the agent often skips the funds request). [] disables.
+  auto_extract_page_roles: [funds_request, supplier_invoice, payment_proof]
+  # true: OCR label matching fills fields directly (label + adjacent text) or crops around them
+  # before the vision call. false: OCR only goes into the vision prompt as context and the vision
+  # model reads every field from the full page (label matching took line totals and stamp text).
+  ocr_direct_extraction: false
   planning_enabled: true # generate an execution plan before the main loop
   fallback_reasoning_model: null # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
   # Processing orchestration:

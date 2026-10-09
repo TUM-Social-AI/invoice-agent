@@ -33,7 +33,7 @@ from src.agent.agent import InvoiceAgent
 from src.agent.state import AgentState, rule_verdict_summary
 from src.output.canonical_csv import write_workbook_csvs
 from src.output.writer import write_results
-from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter
+from src.output.presenter import ConfigLoadSummary, NullPresenter, RunPresenter, ground_truth_review_lines
 from src.agent.agent_settings import clip_for_log, parse_agent_runtime_settings
 from src.learning.evaluator import (
     evaluate,
@@ -204,6 +204,15 @@ def load_config_store(app_config: dict, *, force_local: bool = False):
     return store, _config_summary("Google Drive config folder", config_dir, store)
 
 
+def _write_eval_json(diff: dict, pdf_path: str, output_dir: str) -> Path:
+    """Persist the ground-truth comparison (field diffs, reviewer issue recall, scores) for one PDF."""
+    path = Path(output_dir) / f"eval_{Path(pdf_path).stem}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {"pdf": Path(pdf_path).name, **diff}
+    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False, default=str), encoding="utf-8")
+    return path
+
+
 def process_invoice(
     agent: InvoiceAgent,
     pdf_path: str,
@@ -262,6 +271,8 @@ def process_invoice(
     ground_truth_csv_only = False
     if truth is not None:
         diff = evaluate(state, truth, store=agent.store, date_parse=date_parse, config=cfg)
+        eval_path = _write_eval_json(diff, pdf_path, output_dir)
+        logger.info(f"Ground truth comparison written to {eval_path}")
         _last_score = diff["score"]
         _last_field_results = diff["field_results"]
         diff_text = format_diff_for_agent(diff)
@@ -285,19 +296,8 @@ def process_invoice(
                 print(f"  Ground truth: fields not scored ({diff['field_scoring_skipped']})")
             else:
                 print("  Ground truth: no overlapping fields to score")
-            for level in ("fail", "verify"):
-                if s.get(f"issue_{level}_recall") is not None:
-                    print(
-                        f"                 reviewer {level} issues caught: "
-                        f"{s[f'issues_{level}_caught']}/{s[f'issues_{level}_total']} "
-                        f"({s[f'issue_{level}_recall']:.0%})"
-                    )
-            if s.get("overall_compliant_match") is not None:
-                print(
-                    f"                 overall verdict vs reviewer: "
-                    f"{'agree' if s['overall_compliant_match'] else 'disagree'}"
-                    f" · issue codes raised but not in review: {s.get('issue_false_alarms', 0)}"
-                )
+            for review_line in ground_truth_review_lines(s):
+                print(f"                 {review_line[0].lower()}{review_line[1:]}")
             if s.get("rule_accuracy") is not None:
                 rt = s.get("rules_total") or 0
                 print(

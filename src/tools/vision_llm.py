@@ -21,7 +21,7 @@ from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
 from src.llm.response_format import provider_json_mode
-from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel
+from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel, inventory_label
 from src.trace.evidence import Evidence, coerce_line_ids
 from src.prompts.llm_prompts import (
     build_extract_fields_vision_prompt,
@@ -31,6 +31,7 @@ from src.prompts.llm_prompts import (
     ocr_transcript_section,
 )
 from src.tools.pdf_pages import _image_to_base64
+from src.tools.value_parsing import parse_amount, parse_full_date
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +67,7 @@ def _inventory_block(state: AgentState) -> str:
         desc = str(e.get("description", "") or "").strip()
         if not desc or desc.startswith("(no response") or desc.startswith("(error"):
             continue
-        lines.append(f"- page {e.get('page')}: {e.get('category', 'UNKNOWN')} — {desc}")
+        lines.append(f"- page {e.get('page')}: {inventory_label(e)} — {desc}")
     return "\n".join(lines)
 
 
@@ -226,7 +227,10 @@ def _build_extraction_response_schema(
             ftype = (meta.get("type") or "string").strip().lower()
             allowed = meta.get("enum")
             if ftype == "decimal":
-                prop: dict = {"anyOf": [{"type": "number"}, {"type": "null"}]}
+                # Amounts come back as the printed text ("425 000", "50.000 R") and are parsed
+                # by parse_amount in merge_extracted_fields: a JSON number makes the model
+                # resolve thousands separators itself, and it reads "50.000" as 50.
+                prop: dict = {"anyOf": [{"type": "string"}, {"type": "null"}]}
             elif ftype == "boolean":
                 prop = {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
             elif allowed:
@@ -245,7 +249,7 @@ def _build_extraction_response_schema(
             ftype = (meta.get("type") or "string").strip().lower()
             allowed = meta.get("enum")
             if ftype == "decimal":
-                prop = {"type": "NUMBER", "nullable": True}
+                prop = {"type": "STRING", "nullable": True}
             elif ftype == "boolean":
                 prop = {"type": "BOOLEAN", "nullable": True}
             elif allowed:
@@ -375,41 +379,82 @@ def extract_fields_vision(
     except requests.RequestException as e:
         return {"success": False, "error": f"Ollama request failed: {e}"}
 
+def normalize_extracted_value(value: Any, meta: dict, date_order: str = "DMY") -> tuple[Any, str | None]:
+    """
+    Clean one extracted value for its field type. Returns (value, reject_reason):
+    amounts are parsed from the printed text, dates must be complete and come back as
+    YYYY-MM-DD, enum fields snap to an allowed value. A rejected value is (None, reason).
+    """
+    if value is None:
+        return None, None
+    ftype = (meta.get("type") or meta.get("data_type") or "").strip().lower()
+    if ftype == "decimal":
+        n = parse_amount(value)
+        if n is None:
+            return None, f"not a readable amount: {str(value)[:40]!r}"
+        return n, None
+    value = _sanitize_extracted_string_value(value, ftype)
+    if value is None:
+        return None, None
+    if ftype == "date":
+        iso = parse_full_date(value, order=date_order)
+        if iso is None:
+            return None, f"not a complete date (day, month and year): {str(value)[:40]!r}"
+        return iso, None
+    allowed_enum = meta.get("enum")
+    if allowed_enum and isinstance(value, str):
+        _norm = lambda s: re.sub(r"[\s\-]+", "_", s.strip().lower())
+        snapped = next((v for v in allowed_enum if _norm(v) == _norm(value)), None)
+        if snapped is None:
+            return None, f"not an allowed value: {value[:40]!r}"
+        return snapped, None
+    return value, None
+
+
+def _role_rank(role_priority: dict | None, field_name: str, role: str) -> int | None:
+    """Position of a page's document role in the field's priority list (0 = best); None when the
+    field has no list. Roles missing from the list rank after every listed role."""
+    order = (role_priority or {}).get(field_name)
+    if not order:
+        return None
+    return order.index(role) if role in order else len(order)
+
+
 def merge_extracted_fields(
     state: AgentState,
     new_extraction: dict,
     schema: dict,
     source_page: int,
     source_region: str,
+    *,
+    role_priority: dict | None = None,
+    date_order: str = "DMY",
 ) -> dict:
     """
     Merge new extraction results into state.extracted_fields.
-    Only updates a field if the new confidence is higher than existing.
+
+    A field is updated when the new confidence is higher than the stored one, except for fields
+    listed in role_priority (field -> document roles, best first): there a value read on a page
+    whose inventory document_role ranks higher replaces a lower-ranked one, and a lower-ranked one
+    never replaces a higher-ranked one, as long as the better-ranked value clears
+    state.confidence_threshold. Amounts are parsed from their printed text and partial dates
+    are rejected (see normalize_extracted_value); rejections count as null attempts.
     """
-    from src.tools.compliance_eval import _normalize_numeric as _coerce_numeric
+    from src.tools.page_inventory import page_document_role
 
     updated = []
     skipped = []
     null_fields = []
+    rejected: dict[str, str] = {}
+    new_role = page_document_role(state, source_page)
 
     for field_name, meta in schema.items():
-        value = new_extraction.get(field_name)
+        raw_value = new_extraction.get(field_name)
         confidence = float(new_extraction.get(f"{field_name}_confidence", 0.5))
-
-        if value is not None:
-            ftype = (meta.get("type") or meta.get("data_type") or "").strip().lower()
-            if ftype == "decimal" and isinstance(value, str):
-                n = _coerce_numeric(value)
-                if n is not None:
-                    value = n
-            else:
-                value = _sanitize_extracted_string_value(value, ftype)
-
-            # Enforce enum constraint: snap to canonical allowed value or reject.
-            allowed_enum = meta.get("enum")
-            if allowed_enum and isinstance(value, str):
-                _norm = lambda s: re.sub(r"[\s\-]+", "_", s.strip().lower())
-                value = next((v for v in allowed_enum if _norm(v) == _norm(value)), None)
+        value, reject_reason = normalize_extracted_value(raw_value, meta, date_order)
+        if reject_reason:
+            rejected[field_name] = reject_reason
+            logger.info("  merge: rejected %s from page %s (%s)", field_name, source_page, reject_reason)
 
         if value is None:
             # The model explicitly returned null for this field.
@@ -431,12 +476,21 @@ def merge_extracted_fields(
                     source_region=source_region,
                     extraction_attempts=state.get_field_retry_count(field_name),
                     flagged_for_review=False,
-                    review_reason=None,
+                    review_reason=f"Rejected on page {source_page}: {reject_reason}" if reject_reason else None,
                 )
             continue
 
         existing = state.extracted_fields.get(field_name)
-        if existing and existing.confidence >= confidence:
+        keep_existing = bool(existing and existing.confidence >= confidence)
+        new_rank = _role_rank(role_priority, field_name, new_role)
+        if existing is not None and existing.extracted_value is not None and new_rank is not None:
+            old_rank = _role_rank(role_priority, field_name, page_document_role(state, existing.source_page))
+            threshold = state.confidence_threshold
+            if new_rank < old_rank and confidence >= threshold:
+                keep_existing = False
+            elif new_rank > old_rank and existing.confidence >= threshold:
+                keep_existing = True
+        if keep_existing:
             # Still count as an attempt even though confidence didn't improve,
             # so the agent knows when to stop retrying and flag for review
             state.increment_field_retry(field_name)
@@ -479,4 +533,10 @@ def merge_extracted_fields(
     # "already_have_better" = fields where we already had a higher-confidence value stored;
     # the new extraction was NOT an improvement — existing values are fine, do NOT retry.
     # "null_fields" = fields the model returned null for (could not extract from this image).
-    return {"updated": updated, "already_have_better": skipped, "null_fields": null_fields}
+    # "rejected" = values dropped as unreadable amounts, partial dates or values outside the enum.
+    return {
+        "updated": updated,
+        "already_have_better": skipped,
+        "null_fields": null_fields,
+        "rejected": rejected,
+    }

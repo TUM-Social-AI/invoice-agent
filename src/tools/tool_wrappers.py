@@ -52,6 +52,8 @@ from src.tools.tools import (
     _save_image_crop,
 )
 from src.tools.compliance_eval import visual_not_evaluated_ids
+from src.tools.page_inventory import page_document_role
+from src.prompts.llm_prompts import page_role_note
 from src.trace.evidence import restrict_citations
 from src.trace.ocr_cache import lines_in_box, lines_with_ids, page_ocr
 from src.trace.orientation import fix_orientation
@@ -434,6 +436,11 @@ def make_extract(ctx: ToolContext):
                 ),
             }
         full_schema = ctx.store.build_extraction_schema(state.invoice_type_id)
+        page_role = page_document_role(state, page_num)
+        merge_opts = {
+            "role_priority": ctx.agent_cfg.get("document_role_priority") or {},
+            "date_order": str(ctx.agent_cfg.get("extraction_date_order", "DMY")),
+        }
 
         # ── Batch auto-expansion ──────────────────────────────────────────────
         if ctx.agent_cfg.get("batch_auto_expand", True):
@@ -467,8 +474,11 @@ def make_extract(ctx: ToolContext):
             ocr_crop: dict = {}     # field_name → FieldLocalization
             fallback: dict = {}     # field_name → field_meta
 
+            # ocr_direct_extraction=false: OCR only goes into the prompt as context; the vision
+            # model reads every field from the full page (no label-matched values or crops).
+            ocr_routing = bool(ctx.agent_cfg.get("ocr_direct_extraction", True))
             for field_name, field_meta in schema.items():
-                loc = _localize_field_in_ocr(field_meta, ocr)
+                loc = _localize_field_in_ocr(field_meta, ocr) if ocr_routing else None
                 if loc is None:
                     fallback[field_name] = field_meta
                 elif loc.value_confidence >= OCR_DIRECT_THRESHOLD and loc.value_text:
@@ -482,8 +492,10 @@ def make_extract(ctx: ToolContext):
                 f"{len(ocr_crop)} OCR-crop, {len(fallback)} fallback-vision"
             )
 
-            hints = kwargs.get("hints", "")
-            combined_merge: dict = {"updated": [], "kept_existing": 0, "null_fields": 0, "skipped": 0}
+            hints = "\n".join(h for h in (page_role_note(page_role), kwargs.get("hints", "")) if h)
+            combined_merge: dict = {
+                "updated": [], "kept_existing": 0, "null_fields": 0, "skipped": 0, "rejected": {},
+            }
             any_success = False
 
             def _accumulate(merge_r: dict) -> None:
@@ -493,6 +505,7 @@ def make_extract(ctx: ToolContext):
                 combined_merge["null_fields"] += (
                     _null_raw if isinstance(_null_raw, int) else len(_null_raw)
                 )
+                combined_merge["rejected"].update(merge_r.get("rejected") or {})
 
             # ── Step 1: OCR-direct fields (no vision needed) ──────────────────
             if ocr_direct:
@@ -505,7 +518,7 @@ def make_extract(ctx: ToolContext):
                 direct_schema = {k: schema[k] for k in ocr_direct}
                 _accumulate(merge_extracted_fields(
                     state, direct_extraction, direct_schema,
-                    source_page=page_num, source_region="ocr_direct",
+                    source_page=page_num, source_region="ocr_direct", **merge_opts,
                 ))
                 any_success = True
 
@@ -557,7 +570,7 @@ def make_extract(ctx: ToolContext):
                             restrict_citations(crop_result["extracted"], crop_shown)
                         _accumulate(merge_extracted_fields(
                             state, crop_result["extracted"], sub_schema,
-                            source_page=page_num, source_region=f"ocr_crop_{region}",
+                            source_page=page_num, source_region=f"ocr_crop_{region}", **merge_opts,
                         ))
                         any_success = True
 
@@ -587,7 +600,7 @@ def make_extract(ctx: ToolContext):
                         restrict_citations(last_result["extracted"], page_shown)
                     _accumulate(merge_extracted_fields(
                         state, last_result["extracted"], fallback_schema,
-                        source_page=page_num, source_region=kwargs.get("region", "unknown"),
+                        source_page=page_num, source_region=kwargs.get("region", "unknown"), **merge_opts,
                     ))
                     any_success = True
             elif not any_success:
@@ -631,16 +644,54 @@ def make_extract(ctx: ToolContext):
     return _extract
 
 
+def _extract_uncovered_role_pages(state: AgentState, extract, agent_cfg: dict, store: ConfigStore) -> list[int]:
+    """
+    Run extract_fields_vision once on every inventoried page whose document_role is listed in
+    agent.auto_extract_page_roles and that no extraction has covered yet, so the role ranking in
+    merge_extracted_fields can choose between the pages that matter (the agent often skips the
+    funds request). Returns the pages extracted here.
+    """
+    roles = set(agent_cfg.get("auto_extract_page_roles") or [])
+    if not roles or not state.page_image_paths or not state.invoice_type_id:
+        return []
+    # Ask only for the fields whose source page is ranked by role; the others keep the agent's choice.
+    ranked = set(agent_cfg.get("document_role_priority") or {})
+    fields = [f for f in store.build_extraction_schema(state.invoice_type_id) if f in ranked]
+    if not fields:
+        return []
+    covered: set[int] = set()
+    for action in state.action_history:
+        out = action.tool_output if isinstance(action.tool_output, dict) else {}
+        if action.tool_name == "extract_fields_vision" and out.get("success"):
+            covered.add(_coerce_page_num(action.tool_input.get("page_num")))
+        covered.update(out.get("auto_extracted_pages") or [])
+    done: list[int] = []
+    for entry in sorted(state.page_inventory or [], key=lambda e: int(e.get("page", 0) or 0)):
+        page = int(entry.get("page", 0) or 0)
+        if page < 1 or page in covered or entry.get("document_role") not in roles:
+            continue
+        logger.info("  check_compliance: extracting uncovered %s page %d first", entry.get("document_role"), page)
+        res = extract(state, page_num=page, region="body", field_subset=fields)
+        if isinstance(res, dict) and res.get("success"):
+            done.append(page)
+    return done
+
+
 def make_check(ctx: ToolContext):
     """Return the check_compliance tool callable.
 
     Includes a redundancy guard: if the result is identical to the previous
     call and occurred within 3 turns, warns the agent not to repeat the call.
     """
+    extract = make_extract(ctx)
+
     def _check(state: AgentState, **kwargs):
         import hashlib
+        auto_pages = _extract_uncovered_role_pages(state, extract, ctx.agent_cfg, ctx.store)
         rules = ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
         result = check_compliance(state, rules, store=ctx.store)
+        if auto_pages:
+            result["auto_extracted_pages"] = auto_pages
 
         result_hash = hashlib.md5(
             json.dumps(result, sort_keys=True, default=str).encode()
