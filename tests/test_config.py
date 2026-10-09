@@ -109,3 +109,80 @@ def test_unknown_type_returns_empty(store):
     assert store.get_fields("NONEXISTENT") == []
     assert store.get_rules("NONEXISTENT") == []
     assert store.get_type("NONEXISTENT") is None
+
+
+def test_aexcid_types_loaded_with_budget_lines(store):
+    lines = {tid: t.budget_line for tid, t in store.invoice_types.items()}
+    assert lines == {
+        "VIAJES": "A.6",
+        "PERS_LOCAL": "A.5.a",
+        "PERS_SEDE": "A.5.b",
+        "EQUIPOS": "A.4.a",
+        "CONSUMIBLES": "A.4.c",
+        "VOLUNTARIOS": "A.5.d",
+        "SERV_TECNICOS": "A.7",
+        "FUNCIONAMIENTO": "A.8",
+    }
+    for t in store.invoice_types.values():
+        assert t.display_name.startswith(t.budget_line + " ")
+
+
+def test_new_types_have_fields_and_required_rules(store):
+    for type_id, prefix in (("VOLUNTARIOS", "VOL_"), ("SERV_TECNICOS", "SRV_"), ("FUNCIONAMIENTO", "FUN_")):
+        fields = store.get_fields(type_id)
+        assert fields and all(f.field_id.startswith(prefix) for f in fields)
+        field_ids = {f.field_id for f in fields}
+        rules = store.get_rules(type_id, ["general"])
+        assert rules
+        for r in rules:
+            assert r.check_type in ("required", "range", "enum")
+            assert r.field_id in field_ids, f"{r.rule_id} points at a field of another type"
+
+
+def test_service_and_operating_fields_cover_supplier_and_client(store):
+    for type_id in ("SERV_TECNICOS", "FUNCIONAMIENTO", "EQUIPOS", "CONSUMIBLES"):
+        names = {f.field_name for f in store.get_fields(type_id)}
+        assert {"vendor_name", "vendor_tax_id", "beneficiary", "total_amount", "currency"} <= names, type_id
+
+
+def test_volunteer_fields_reuse_payroll_names_without_salary_fields(store):
+    names = {f.field_name for f in store.get_fields("VOLUNTARIOS")}
+    assert {"employee_name", "pay_period", "role", "total_amount", "payment_method"} <= names
+    assert not names & {"gross_salary", "net_salary", "irpf_retention", "social_security_employee"}
+    rule_fields = {store.get_field_by_id(r.field_id).field_name for r in store.get_rules("VOLUNTARIOS")}
+    assert not rule_fields & {"gross_salary", "net_salary", "irpf_retention"}
+
+
+def test_expense_category_allowed_values_per_type(store):
+    def cats(type_id):
+        return next(f.allowed_values for f in store.get_fields(type_id) if f.field_name == "expense_category")
+
+    assert cats("VOLUNTARIOS") == ["personal_voluntario"]
+    assert "personal_voluntario" not in cats("PERS_LOCAL")
+    assert cats("SERV_TECNICOS") == ["repair_maintenance", "professional_services", "other_services"]
+    assert cats("FUNCIONAMIENTO") == ["utilities", "communications", "rent", "other_operating"]
+    assert "consulting" not in cats("EQUIPOS")
+
+
+def test_descriptions_route_repairs_away_from_goods_types(store):
+    assert "repair" in store.get_type("SERV_TECNICOS").description.lower()
+    for type_id in ("EQUIPOS", "CONSUMIBLES"):
+        assert "SERV_TECNICOS" in store.get_type(type_id).description
+    assert "groupe électrogène" in store.get_type("FUNCIONAMIENTO").description
+    assert "relais communautaire" in store.get_type("VOLUNTARIOS").description
+
+
+def test_budget_line_column_is_optional(tmp_path):
+    (tmp_path / "invoice_types.csv").write_text(
+        "invoice_type_id,display_name,description,agent_context,enabled\nX,X,x,x,true\n", encoding="utf-8"
+    )
+    (tmp_path / "extraction_fields.csv").write_text(
+        "field_id,invoice_type_id,field_name,field_label,data_type,required,extraction_hint,page_region,aliases\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "compliance_rules.csv").write_text(
+        "rule_id,invoice_type_id,rule_name,field_id,check_type,check_value,severity,agent_hint,error_message,"
+        "page_region,enabled,rule_group\n",
+        encoding="utf-8",
+    )
+    assert load_config(str(tmp_path)).get_type("X").budget_line == ""

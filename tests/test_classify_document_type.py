@@ -10,7 +10,8 @@ from PIL import Image
 from src.agent.state import AgentState
 from src.config.loader import load_config
 from src.llm.base import LLMResult
-from src.tools.vision_llm import CLASSIFY_PAGE_DPI, classify_document_type
+from src.sources.models import SourceProvenance
+from src.tools.vision_llm import CLASSIFY_PAGE_DPI, budget_line_hint, classify_document_type
 
 
 class FakeProvider:
@@ -85,3 +86,62 @@ def test_unknown_type_is_rejected(tmp_path, store):
 
     assert not res["success"]
     assert st.invoice_type_id == ""
+
+
+def _inventory_state(tmp_path, pdf_name="doc.pdf"):
+    """Inventory-based classification never renders the PDF, so a thumbnail is enough."""
+    thumb = tmp_path / "thumb.jpg"
+    Image.new("RGB", (40, 56), "white").save(thumb)
+    st = AgentState(pdf_path=str(tmp_path / pdf_name), output_dir=str(tmp_path))
+    st.page_image_paths = [str(thumb)]
+    return st
+
+
+def test_prompt_lists_all_configured_types(tmp_path, store):
+    st = _inventory_state(tmp_path)
+    st.page_inventory = [{"page": 1, "category": "LINE_ITEMS", "description": "Décharge de prime animateur"}]
+    fake = FakeProvider({"invoice_type_id": "VOLUNTARIOS", "confidence": 0.9, "reasoning": "page 1"})
+
+    res = classify_document_type(st, store, "", "model", provider=fake)
+
+    assert res["success"] and st.invoice_type_id == "VOLUNTARIOS"
+    for type_id in ("VOLUNTARIOS", "SERV_TECNICOS", "FUNCIONAMIENTO", "VIAJES", "CONSUMIBLES"):
+        assert f'"{type_id}"' in fake.calls[0]["prompt"]
+    assert "File name hint" not in fake.calls[0]["prompt"], "doc.pdf has no budget-line prefix"
+
+
+@pytest.mark.parametrize(
+    "name, expected",
+    [
+        ("A.7. Serv técn y prof-U0256-25.pdf", "SERV_TECNICOS"),
+        ("A.8.- Fonctionnement-U0324-25.pdf", "FUNCIONAMIENTO"),
+        ("A.5.d.- Personnel volontaire-U0223-25.pdf", "VOLUNTARIOS"),
+        ("A.4.c.- Consumibles-A2745-25.pdf", "CONSUMIBLES"),
+        ("A.6.- Viajes, alojamientos y dietas-A3693-25.pdf", "VIAJES"),
+        ("a-7-serv-t-cn-y-prof-u0256-25.pdf", "SERV_TECNICOS"),
+        ("A.10.- Auditoria-X1.pdf", None),
+        ("A.5.- Personal-X1.pdf", None),
+        ("invoice.pdf", None),
+    ],
+)
+def test_budget_line_hint_from_file_name(store, name, expected):
+    st = AgentState(pdf_path=f"/tmp/{name}", output_dir="/tmp/out")
+    hint = budget_line_hint(st, store)
+    if expected is None:
+        assert hint == ""
+    else:
+        assert f'"{expected}"' in hint and "prior" in hint
+
+
+def test_budget_line_hint_prefers_original_name_and_reaches_prompt(tmp_path, store):
+    st = _inventory_state(tmp_path, "a-7-serv-t-cn-y-prof-pc0060-25.pdf")
+    st.source_provenance = SourceProvenance.from_local_path_minimal(st.pdf_path).model_copy(
+        update={"display_name": "A.7. Serv técn y prof-PC0060-25.pdf"}
+    )
+    st.page_inventory = [{"page": 1, "category": "LINE_ITEMS", "description": "Airtel SIM cards and data credit"}]
+    fake = FakeProvider({"invoice_type_id": "FUNCIONAMIENTO", "confidence": 0.8, "reasoning": "SIM cards"})
+
+    res = classify_document_type(st, store, "", "model", provider=fake)
+
+    assert res["success"] and st.invoice_type_id == "FUNCIONAMIENTO", "the hint does not override the model"
+    assert 'budget line A.7, which maps to "SERV_TECNICOS"' in fake.calls[0]["prompt"]
