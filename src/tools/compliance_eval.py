@@ -17,10 +17,54 @@ from PIL import Image
 
 from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
-from src.config.loader import ConfigStore, ComplianceRule
+from src.config.loader import ConfigStore, ComplianceRule, unresolved_rule_params
 from src.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+# agent_notes markers for skips that never block finish():
+# - not_configured: a {section.key} config value the rule references is unset.
+# - not_applicable: a conditional_check whose condition does not hold for this document.
+NOT_CONFIGURED_NOTE = "not_configured"
+NOT_APPLICABLE_NOTE = "not_applicable"
+
+# "<lo>,<hi> EUR": range bounds, optionally in a currency the value is converted to first.
+_RANGE_RE = re.compile(r"^\s*([^,]+?)\s*,\s*([^,\s]+)\s*(?:([A-Za-z]{3,4}))?\s*$")
+# "total_amount<2500 EUR": numeric consequence of a conditional_check.
+_COMPARE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|<|>)\s*([0-9.]+)\s*(?:([A-Za-z]{3,4}))?$")
+
+
+def is_not_configured(result: RuleResult) -> bool:
+    return result.status == "skipped" and result.agent_notes == NOT_CONFIGURED_NOTE
+
+
+def is_non_blocking_skip(result: RuleResult) -> bool:
+    return result.status == "skipped" and result.agent_notes in (NOT_CONFIGURED_NOTE, NOT_APPLICABLE_NOTE)
+
+
+def _convert_currency(
+    amount: float, from_cur: Any, to_cur: str, store: Optional[ConfigStore]
+) -> tuple[Optional[float], str]:
+    """
+    Convert amount between currencies using compliance.currency_per_eur (units of currency per 1 EUR).
+    Returns (converted, "") or (None, reason).
+    """
+    src = str(from_cur or "").strip().upper()
+    dst = str(to_cur or "").strip().upper()
+    if not src:
+        return None, "document currency not extracted"
+    if src == dst:
+        return amount, ""
+    rates_raw = ((store.rule_params if store else {}).get("compliance") or {}).get("currency_per_eur") or {}
+    rates = {str(k).strip().upper(): v for k, v in rates_raw.items()}
+    try:
+        src_rate = float(rates[src])
+        dst_rate = float(rates[dst])
+    except (KeyError, TypeError, ValueError):
+        return None, f"no rate for {src} or {dst} in compliance.currency_per_eur"
+    if src_rate <= 0:
+        return None, f"invalid rate for {src} in compliance.currency_per_eur"
+    return amount / src_rate * dst_rate, ""
 
 
 def _extract_entities_from_text(text: str) -> dict:
@@ -166,9 +210,13 @@ def _normalize_numeric(value: Any) -> Optional[float]:
         else:
             s = s.replace(",", "")
     elif s.count(".") > 1:
-        # Multiple dots but no comma: assume dots are thousands separators.
+        # Multiple dots but no comma: dots are thousands separators ("1.700.000" -> 1700000).
+        # A non-3-digit last group is read as decimals ("1.234.56" -> 1234.56).
         parts = s.split(".")
-        s = "".join(parts[:-1]) + "." + parts[-1]
+        if len(parts[-1]) == 3:
+            s = "".join(parts)
+        else:
+            s = "".join(parts[:-1]) + "." + parts[-1]
 
     if s in ("", "-", "+"):
         return None
@@ -281,6 +329,20 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
             message="OK",
         )
 
+    missing_params = unresolved_rule_params(rule)
+    if missing_params:
+        return RuleResult(
+            rule_id=rule.rule_id,
+            rule_name=rule.rule_name,
+            field_id=rule.field_id,
+            status="skipped",
+            severity=rule.severity,
+            message=(
+                f"Not configured: set {', '.join(missing_params)} in config.yaml to run this check"
+            ),
+            agent_notes=NOT_CONFIGURED_NOTE,
+        )
+
     if rule.check_type == "visual_check":
         # Visual rules require a page image — skip here, handled by check_compliance_visual()
         return RuleResult(
@@ -323,8 +385,22 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
                 message="Value missing/null — skipping range check",
             )
         try:
-            lo, hi = map(float, rule.check_value.split(","))
+            m = _RANGE_RE.match(rule.check_value or "")
+            if not m:
+                raise ValueError(f"Bad range check_value {rule.check_value!r}")
+            lo, hi, unit = float(m.group(1)), float(m.group(2)), m.group(3)
             v = _normalize_numeric(value)
+            if v is not None and unit:
+                v, why = _convert_currency(v, _get_field_value(state, "currency"), unit, store)
+                if v is None:
+                    return RuleResult(
+                        rule_id=rule.rule_id,
+                        rule_name=rule.rule_name,
+                        field_id=rule.field_id,
+                        status="skipped",
+                        severity=rule.severity,
+                        message=f"Range check in {unit} skipped: {why}",
+                    )
             if v is None:
                 if not _field_is_required():
                     return RuleResult(
@@ -446,6 +522,33 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
                     rule_id=rule.rule_id, rule_name=rule.rule_name,
                     field_id=rule.field_id, status="skipped", severity=rule.severity,
                     message="Condition not met, rule skipped",
+                    agent_notes=NOT_APPLICABLE_NOTE,
+                )
+
+            cmp = _COMPARE_RE.match(consequence_part)
+            if cmp:
+                cons_field, op, limit_s, unit = cmp.groups()
+                actual_num = _normalize_numeric(_get_field_value(state, cons_field))
+                if actual_num is None:
+                    raise ValueError(f"no numeric value for {cons_field}")
+                if unit:
+                    actual_num, why = _convert_currency(
+                        actual_num, _get_field_value(state, "currency"), unit, store
+                    )
+                    if actual_num is None:
+                        raise ValueError(why)
+                limit = float(limit_s)
+                ok = {
+                    "<": actual_num < limit,
+                    "<=": actual_num <= limit,
+                    ">": actual_num > limit,
+                    ">=": actual_num >= limit,
+                }[op]
+                if ok:
+                    return passed()
+                return fail(
+                    f"{rule.error_message} ({cons_field} = {actual_num:,.2f}"
+                    f"{' ' + unit.upper() if unit else ''}, limit {op} {limit:,.2f})"
                 )
 
             cons_field, cons_val = consequence_part.split("=")
@@ -579,9 +682,10 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     # Non-visual skips mean a check couldn't run because a required field value was missing.
     # These are NOT safe to ignore — the math/format check simply didn't execute.
     # Surfaced separately so the agent knows it needs to extract the missing fields first.
+    not_configured = [r for r in results if is_not_configured(r)]
     field_missing_skips = [
         r for r in results
-        if r.status == "skipped" and "visual" not in r.message.lower()
+        if r.status == "skipped" and "visual" not in r.message.lower() and not is_non_blocking_skip(r)
     ]
     state.skipped_checks = [
         {"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
@@ -601,5 +705,6 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
         "skipped_checks": [{"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
                            for r in field_missing_skips],
         "visual_checks_pending": [r.rule_id for r in visual_pending],
+        "not_configured_checks": [{"rule_id": r.rule_id, "reason": r.message} for r in not_configured],
         "all_errors_resolved": len(errors) == 0 and len(visual_pending) == 0 and len(error_skips) == 0,
     }

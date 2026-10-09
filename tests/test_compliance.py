@@ -282,6 +282,12 @@ class TestConditionalChecks:
         assert rule_result.status == "skipped"
 
 
+def _per_diem_store():
+    store = load_config("config/csv")
+    store.set_rule_params({"compliance": {"subsistence_abroad_max_eur_per_day": 95, "currency_per_eur": {"EUR": 1}}})
+    return store
+
+
 class TestRangeChecks:
     def test_standard_vat_rate_passes(self, store):
         state = make_state({"vat_rate": "19"})
@@ -310,16 +316,18 @@ class TestRangeChecks:
         assert result["all_errors_resolved"] is True
         assert len(result["failed_warnings"]) == 1
 
-    def test_dietas_range_parses_european_number_format(self, store):
-        # R_VIA_006 range: 0..500 EUR/day, value is 1.190,00 -> should fail (warning)
-        state = make_state({"per_diem_rate": "1.190,00"}, invoice_type_id="VIAJES")
+    def test_dietas_range_parses_european_number_format(self):
+        # R_VIA_006 range: 0..subsistence cap (95 EUR/day), value is 1.190,00 EUR -> should fail (warning)
+        store = _per_diem_store()
+        state = make_state({"per_diem_rate": "1.190,00", "currency": "EUR"}, invoice_type_id="VIAJES")
         rules = [r for r in store.get_rules("VIAJES") if r.rule_id == "R_VIA_006"]
         result = check_compliance(state, rules, store=store)
         assert result["all_errors_resolved"] is True
         assert len(result["failed_warnings"]) == 1
 
-    def test_dietas_range_missing_is_skipped(self, store):
+    def test_dietas_range_missing_is_skipped(self):
         # per_diem_rate is optional in extraction; if it's missing, the range rule should be skipped (not failed).
+        store = _per_diem_store()
         state = make_state({}, invoice_type_id="VIAJES")
         rules = [r for r in store.get_rules("VIAJES") if r.rule_id == "R_VIA_006"]
         result = check_compliance(state, rules, store=store)
