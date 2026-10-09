@@ -236,6 +236,9 @@ Evidence (image order → document page):
 {evidence_lines_block}
 
 For each requirement below, decide pass or fail using evidence across all images. Reference page_num=N when you cite where something appears.
+"passes": true means the requirement is satisfied; false means it is not. Write the observation first, then set
+"passes" so it agrees with it: an observation saying the requirement is met must have "passes": true.
+Judge only what is visible. Do not assume or infer that a required document or mark exists.
 
 Requirements:
 {rule_lines}
@@ -243,9 +246,9 @@ Requirements:
 Respond with ONLY valid JSON — one top-level key per rule_id, no markdown fences. Shape per rule:
 {{
   "RULE_ID": {{
+    "observation": "one or two short sentences: what you saw, where (page_num), and why pass/fail",
     "passes": true,
     "confidence": 0.0-1.0,
-    "observation": "one or two short sentences: what you saw, where (page_num), and why pass/fail",
     "field_updates": {{}}
   }}
 }}
