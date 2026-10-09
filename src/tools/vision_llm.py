@@ -70,6 +70,38 @@ def _inventory_block(state: AgentState) -> str:
     return "\n".join(lines)
 
 
+def _name_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+
+
+def budget_line_hint(state: AgentState, store: "ConfigStore") -> str:
+    """
+    Classification prior from the file name: filers often prefix the file with its budget line
+    ("A.7. Serv técn y prof-U0256-25.pdf"), matched against invoice_types.budget_line.
+    Names are compared as slugs so "a-7-serv-t-cn-..." (a Drive download) matches too, and the
+    longest configured code wins ("A.5.d" over "A.5"). Empty when nothing matches.
+    """
+    name = ""
+    if state.source_provenance is not None:
+        name = state.source_provenance.display_name or ""
+    name = name or Path(state.pdf_path).name
+    stem = _name_slug(Path(name).stem)
+    best = None
+    best_len = 0
+    for t in store.invoice_types.values():
+        code = _name_slug(t.budget_line)
+        if code and (stem == code or stem.startswith(code + "-")) and len(code) > best_len:
+            best, best_len = t, len(code)
+    if best is None:
+        return ""
+    return (
+        f'The file name "{name}" starts with budget line {best.budget_line}, '
+        f'which maps to "{best.invoice_type_id}". Use it as a prior, not a rule: '
+        "files are sometimes filed under the wrong budget line, so choose another type "
+        "when the pages clearly show one."
+    )
+
+
 def _first_page_b64(state: AgentState) -> str:
     """Page 1 rendered at CLASSIFY_PAGE_DPI from the PDF; the first page image when rendering fails."""
     try:
@@ -114,14 +146,15 @@ def classify_document_type(
         for t in store.invoice_types.values()
     )
 
+    filename_hint = budget_line_hint(state, store)
     inventory_block = _inventory_block(state)
     if inventory_block:
         basis = "page_inventory"
-        prompt = classify_from_inventory_prompt(type_descriptions, inventory_block)
+        prompt = classify_from_inventory_prompt(type_descriptions, inventory_block, filename_hint)
         images: list[str] = []
     else:
         basis = "first_page_image"
-        prompt = classify_document_type_prompt(type_descriptions)
+        prompt = classify_document_type_prompt(type_descriptions, filename_hint)
         images = [_first_page_b64(state)]
 
     payload = {

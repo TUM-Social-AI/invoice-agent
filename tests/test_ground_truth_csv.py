@@ -348,11 +348,11 @@ def test_evaluate_schema_filters_truth_fields_not_in_type():
     truth = {
         "fields": {
             "vendor_name": "Shop",
-            "beneficiary": "Should not score for CONSUMIBLES",
+            "travel_purpose": "Should not score for CONSUMIBLES",
         },
     }
     diff = evaluate(state, truth, store=store, date_parse="DMY")
-    assert "beneficiary" not in diff["field_results"]
+    assert "travel_purpose" not in diff["field_results"]
     assert diff["score"]["fields_total"] == 1
     assert diff["score"]["fields_wrong"] == 0
 

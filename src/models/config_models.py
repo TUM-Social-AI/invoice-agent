@@ -13,6 +13,7 @@ class InvoiceTypeModel(BaseModel):
     description: str
     agent_context: str
     enabled: bool = True
+    budget_line: str = ""
 
 
 class ExtractionFieldModel(BaseModel):

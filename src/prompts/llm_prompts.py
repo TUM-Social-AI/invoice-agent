@@ -15,17 +15,22 @@ from src.learnings.vision_hints import vision_model_extraction_bullets
 # --- Document classification (first page) ---
 
 
-def classify_document_type_prompt(type_descriptions_block: str) -> str:
+def _filename_hint_section(filename_hint: str) -> str:
+    return f"\nFile name hint:\n{filename_hint}\n" if filename_hint else ""
+
+
+def classify_document_type_prompt(type_descriptions_block: str, filename_hint: str = "") -> str:
     """
     type_descriptions_block: newline-separated "- \"TYPE_ID\": ..." lines from config.
+    filename_hint: optional budget-line prior derived from the file name.
     """
     return f"""You are an invoice classification expert. Examine the first page image and choose the single best matching type from the list below.
 
-Use layout, language, headings, logos, and line-item structure — not filename or assumptions.
+Use layout, language, headings, logos, and line-item structure. A file name hint, if given, is only a prior; the page decides.
 
 Available types:
 {type_descriptions_block}
-
+{_filename_hint_section(filename_hint)}
 Respond with ONLY valid JSON, no markdown fences:
 {{"invoice_type_id": "<one id from the list>", "confidence": 0.0-1.0, "reasoning": "one concise sentence citing visible cues"}}
 
@@ -34,11 +39,14 @@ Rules:
 - Lower confidence when the page is ambiguous, blank, or unlike any listed type."""
 
 
-def classify_from_inventory_prompt(type_descriptions_block: str, inventory_block: str) -> str:
+def classify_from_inventory_prompt(
+    type_descriptions_block: str, inventory_block: str, filename_hint: str = ""
+) -> str:
     """
     Text-only classification from the page inventory (category + description per page).
     type_descriptions_block: newline-separated "- \"TYPE_ID\": ..." lines from config.
     inventory_block: one "- page N: CATEGORY — description" line per page.
+    filename_hint: optional budget-line prior derived from the file name.
     """
     return f"""You are an invoice classification expert. Below is an inventory of every page of one expense document
 (page category + a short description of what is visible). The first page is often a generic internal fund-request
@@ -49,7 +57,7 @@ Available types:
 
 Page inventory:
 {inventory_block}
-
+{_filename_hint_section(filename_hint)}
 Respond with ONLY valid JSON, no markdown fences:
 {{"invoice_type_id": "<one id from the list>", "confidence": 0.0-1.0, "reasoning": "one concise sentence citing the pages that decided it"}}
 
