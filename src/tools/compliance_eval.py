@@ -22,6 +22,19 @@ from src.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
 
+# rule_evidence key set by check_compliance_visual when it could not judge a rule
+# (no verdict, or the pages it needs were not sent). The rule result is then "skipped".
+VISUAL_SKIP_KEY = "visual_skip_reason"
+
+
+def visual_not_evaluated_ids(state: AgentState) -> set[str]:
+    """Rule ids that check_compliance_visual ran but left unevaluated (terminal, needs a human)."""
+    return {
+        r.rule_id
+        for r in state.rule_results
+        if r.status == "skipped" and state.rule_evidence.get(r.rule_id, {}).get(VISUAL_SKIP_KEY)
+    }
+
 
 def _extract_entities_from_text(text: str) -> dict:
     """Lightweight entity extraction for evidence grounding."""
@@ -507,12 +520,15 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     # Visual verdicts committed by check_compliance_visual are reused so we don't
     # re-add them to visual_checks_pending. Field-based rules are always re-evaluated:
     # a field extracted after an earlier failed check must be able to flip the verdict.
+    # A visual rule the visual tool could not evaluate is also final: re-queuing it would
+    # send the agent back to the same vision call in a loop.
     visual_rule_ids = {r.rule_id for r in rules if r.check_type == "visual_check"}
+    visual_unevaluated = visual_not_evaluated_ids(state) & visual_rule_ids
     definitive_rule_ids: set[str] = {
         r.rule_id
         for r in state.rule_results
         if r.status in ("passed", "failed") and r.rule_id in visual_rule_ids
-    }
+    } | visual_unevaluated
 
     for rule in rules:
         # If check_compliance_visual has already evaluated this rule (passed/failed),
@@ -582,7 +598,9 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     field_missing_skips = [
         r for r in results
         if r.status == "skipped" and "visual" not in r.message.lower()
+        and r.rule_id not in visual_unevaluated
     ]
+    visual_skips = [r for r in results if r.rule_id in visual_unevaluated]
     state.skipped_checks = [
         {"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
         for r in field_missing_skips
@@ -601,5 +619,11 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
         "skipped_checks": [{"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
                            for r in field_missing_skips],
         "visual_checks_pending": [r.rule_id for r in visual_pending],
-        "all_errors_resolved": len(errors) == 0 and len(visual_pending) == 0 and len(error_skips) == 0,
+        # Final: the visual check ran but could not judge these; they need human review.
+        "visual_not_evaluated": [{"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
+                                 for r in visual_skips],
+        "all_errors_resolved": (
+            len(errors) == 0 and len(visual_pending) == 0 and len(error_skips) == 0
+            and not any(r.severity == "error" for r in visual_skips)
+        ),
     }

@@ -238,6 +238,8 @@ def build_trace(
                 "confidence": trace.get("confidence"),
                 "pages_sent": trace.get("pages_sent"),
                 "verdict_missing": trace.get("verdict_missing"),
+                "skip_reason": trace.get("skip_reason"),
+                "pages_dropped": trace.get("pages_dropped"),
             } if trace else None,
             "page": page,
             "evidence": evidence,

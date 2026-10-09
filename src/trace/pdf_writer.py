@@ -512,8 +512,11 @@ def build_summary(trace: dict) -> Summary:
         rows = []
         for f in open_findings:
             reason = f["error_message"] if f["status"] in ("failed", "warning") and f["error_message"] else f["message"]
-            if f["status"] == "not_evaluated" and f.get("visual") and f["visual"].get("verdict_missing"):
-                reason = "The vision model returned no verdict for this rule."
+            if f["status"] == "not_evaluated" and f.get("visual"):
+                if f["visual"].get("skip_reason"):
+                    reason = f["visual"]["skip_reason"]
+                elif f["visual"].get("verdict_missing"):
+                    reason = "The vision model returned no verdict for this rule."
             page, nbox = _finding_target(f)
             loc = "box" if nbox else ("page" if page else "-")
             if f.get("expected") and not f.get("evidence"):
@@ -590,8 +593,13 @@ def _finding_comment_text(f: dict) -> str:
         lines.append(f"Agent: {f['message']}")
     v = f.get("visual") or {}
     if v:
-        if v.get("verdict_missing"):
-            lines.append("The vision model returned no verdict for this rule; the run's CSV counts it as failed.")
+        if v.get("skip_reason"):
+            # The reason itself is already shown as the agent message above.
+            lines.append("The run's CSV lists this rule as skipped.")
+        elif v.get("verdict_missing"):
+            lines.append("The vision model returned no verdict for this rule; the run's CSV lists it as skipped.")
+        if v.get("pages_dropped"):
+            lines.append("Pages not sent (page cap): " + ", ".join(f"p{p}" for p in v["pages_dropped"]))
         lines.append(f"Evidence kind: {v.get('evidence_kind') or '-'}, confidence {v.get('confidence')}")
     if f.get("field_names"):
         lines.append("Fields: " + ", ".join(f["field_names"]))
