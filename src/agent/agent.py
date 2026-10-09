@@ -538,6 +538,12 @@ class InvoiceAgent:
             run_identity=run_identity,
         )
 
+        if (self.config.get("traceability", {}) or {}).get("enabled", False):
+            # The output dir may hold an earlier run of the same document; its OCR may not match.
+            from src.trace.ocr_cache import clear_page_ocr_cache
+
+            clear_page_ocr_cache(state)
+
         # Learnings hydration: load prior insights into state BEFORE the agent
         # starts extracting or evaluating compliance.
         # - If invoice_type_id is provided: load that type + GENERAL
@@ -615,6 +621,7 @@ class InvoiceAgent:
                         "elapsed_ms": 0,
                     })
                 log_handle.close()
+            self._write_trace(state)
             return state
 
         self._run_agent_loop(state, log_handle, log_path)
@@ -628,4 +635,17 @@ class InvoiceAgent:
         logger.info(
             f"Agent done | status={state.status.value} | turns={state.turn} | log={log_path}"
         )
+        self._write_trace(state)
         return state
+
+    def _write_trace(self, state: AgentState) -> None:
+        """Flagged PDF + trace.json (traceability.enabled); never fails the run."""
+        try:
+            from src.trace.finalize import write_trace_outputs
+
+            state.trace_paths = write_trace_outputs(
+                state, self.store, self.config, surya_models=self.surya_models,
+                silent=bool(getattr(self.presenter, "active", False)),
+            )
+        except Exception as e:
+            logger.error(f"Trace output failed (non-fatal): {e}", exc_info=True)

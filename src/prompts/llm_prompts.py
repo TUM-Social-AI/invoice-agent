@@ -57,12 +57,14 @@ def build_extract_fields_vision_prompt(
     hints: str,
     accuracy_block: str,
     fields_text: str,
+    cite_lines: bool = False,
 ) -> str:
     """
     text_section: OCR block including labels, or empty string.
     hints: optional agent hints for this call.
     accuracy_block: output of format_extraction_accuracy_block(state).
     fields_text: bullet list of fields from schema.
+    cite_lines: OCR lines carry [L<n>] IDs; ask for a <field>_evidence list per field.
     """
     parts = [
         _EXTRACTION_INTRO,
@@ -81,19 +83,43 @@ def build_extract_fields_vision_prompt(
             "",
             fields_text,
             "",
-            "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence key.",
-            "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
-            "Example:",
-            "{{",
-            '  "vendor_name": "Acme GmbH",',
-            '  "vendor_name_confidence": 0.95,',
-            '  "invoice_number": null,',
-            '  "invoice_number_confidence": 0.0',
-            "}}",
-            "",
-            "Do not include any text outside the JSON object.",
         ]
     )
+    if cite_lines:
+        parts.extend(
+            [
+                "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence and *_evidence keys.",
+                "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
+                "Evidence keys use the pattern <field_name>_evidence: the IDs of the OCR transcript lines (e.g. [\"L12\"]) "
+                "on which you read that value. Cite only lines that contain the value itself (not just its label); "
+                "cite several IDs when the value spans lines. Use [] when the value is null or not in the OCR transcript "
+                "(e.g. handwriting the OCR missed). Never invent IDs.",
+                "Example:",
+                "{{",
+                '  "vendor_name": "Acme GmbH",',
+                '  "vendor_name_confidence": 0.95,',
+                '  "vendor_name_evidence": ["L3"],',
+                '  "invoice_number": null,',
+                '  "invoice_number_confidence": 0.0,',
+                '  "invoice_number_evidence": []',
+                "}}",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence key.",
+                "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
+                "Example:",
+                "{{",
+                '  "vendor_name": "Acme GmbH",',
+                '  "vendor_name_confidence": 0.95,',
+                '  "invoice_number": null,',
+                '  "invoice_number_confidence": 0.0',
+                "}}",
+            ]
+        )
+    parts.extend(["", "Do not include any text outside the JSON object."])
     return "\n".join(parts)
 
 
@@ -137,11 +163,41 @@ def ocr_transcript_section(text_context: str) -> str:
 # --- Visual compliance (multi-page) ---
 
 
-def build_compliance_visual_prompt(evidence_lines_block: str, rule_lines: str) -> str:
+def build_compliance_visual_prompt(
+    evidence_lines_block: str,
+    rule_lines: str,
+    ocr_block: str = "",
+    cite_lines: bool = False,
+) -> str:
     """
     evidence_lines_block: joined lines describing each image index and page_num.
     rule_lines: newline-separated rule descriptions from config.
+    ocr_block: OCR lines of the pages sent, each prefixed with a [p<page>_L<n>] ID.
+    cite_lines: ask for evidence_line_ids / evidence_kind per rule.
     """
+    base = _compliance_visual_prompt_base(evidence_lines_block, rule_lines)
+    if not cite_lines:
+        return base
+    return (
+        base
+        + f"""
+
+OCR transcript of the pages above (may contain OCR errors; each line starts with its ID):
+{ocr_block}
+
+Also add to every rule object:
+  "evidence_line_ids": IDs of the OCR lines that show what you based the verdict on, e.g. ["p2_L39", "p2_L40"]
+     (the stamp text, the date, the signature label next to the signature). [] if none apply.
+  "evidence_kind": one of
+     "text"   — the evidence is printed or stamped text in the cited lines,
+     "anchor" — the evidence is not text (signature, seal graphic); cite the nearest label or stamp text lines,
+     "absent" — you looked and the required item is not in the document (cite nothing),
+     "none"   — you could not judge.
+Only cite IDs listed in the OCR transcript. Never invent IDs."""
+    )
+
+
+def _compliance_visual_prompt_base(evidence_lines_block: str, rule_lines: str) -> str:
     return f"""You are a document compliance inspector. You receive one or more page images in order.
 
 Evidence (image order → document page):

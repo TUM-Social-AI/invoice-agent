@@ -21,6 +21,7 @@ from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
 from src.llm.response_format import provider_json_mode
 from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel
+from src.trace.evidence import Evidence, coerce_line_ids
 from src.prompts.llm_prompts import (
     build_extract_fields_vision_prompt,
     classify_document_type_prompt,
@@ -130,7 +131,9 @@ def classify_document_type(
     except requests.RequestException as e:
         return {"success": False, "error": f"Ollama request failed: {e}"}
 
-def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict | None:
+def _build_extraction_response_schema(
+    schema: dict, provider_name: str, cite_lines: bool = False
+) -> dict | None:
     """Build a provider-specific JSON Schema to constrain the vision model's output.
 
     Reads ``enum`` from each field's schema meta (populated from allowed_values.csv)
@@ -152,6 +155,8 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
                 prop = {"anyOf": [{"type": "string"}, {"type": "null"}]}
             props[field_name] = prop
             props[f"{field_name}_confidence"] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+            if cite_lines:
+                props[f"{field_name}_evidence"] = {"type": "array", "items": {"type": "string"}}
         return {"type": "object", "properties": props}
 
     if provider_name == "gemini":
@@ -169,6 +174,8 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
                 prop = {"type": "STRING", "nullable": True}
             props[field_name] = prop
             props[f"{field_name}_confidence"] = {"type": "NUMBER", "nullable": False}
+            if cite_lines:
+                props[f"{field_name}_evidence"] = {"type": "ARRAY", "items": {"type": "STRING"}}
         return {"type": "OBJECT", "properties": props}
 
     return None
@@ -184,6 +191,7 @@ def extract_fields_vision(
     text_context: str = "",
     provider: "LLMProvider | None" = None,
     timeout_s: int = 240,
+    cite_lines: bool = False,
 ) -> dict:
     """
     Send image + schema to Qwen2-VL via Ollama.
@@ -212,6 +220,7 @@ def extract_fields_vision(
         hints=hints,
         accuracy_block=acc,
         fields_text=fields_text,
+        cite_lines=cite_lines,
     )
 
     img_b64 = _image_to_base64(image_path)
@@ -232,7 +241,7 @@ def extract_fields_vision(
             # fall back to plain JSON mode so _build_extraction_response_schema returning
             # None still produces valid output.
             extraction_response_format: Any = (
-                _build_extraction_response_schema(schema, pname)
+                _build_extraction_response_schema(schema, pname, cite_lines=cite_lines)
                 or (
                     "json"
                     if pname == "ollama"
@@ -364,6 +373,16 @@ def merge_extracted_fields(
         is_batch_review = (
             state.confidence_threshold <= confidence < state.batch_review_threshold
         )
+        cited = coerce_line_ids(new_extraction.get(f"{field_name}_evidence"))
+        evidence = (
+            [Evidence(
+                page=source_page,
+                line_ids=cited,
+                source="ocr_direct" if source_region == "ocr_direct" else "model_cited",
+            )]
+            if cited
+            else []
+        )
         state.extracted_fields[field_name] = FieldResult(
             field_id=field_id,
             field_name=field_name,
@@ -373,6 +392,7 @@ def merge_extracted_fields(
             source_region=source_region,
             extraction_attempts=state.get_field_retry_count(field_name),
             batch_review=is_batch_review,
+            evidence=evidence,
         )
         updated.append(field_name)
 

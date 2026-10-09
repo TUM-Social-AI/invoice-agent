@@ -42,6 +42,22 @@ class VisualVerdictModel(BaseModel):
     observation: str = "No observation"
     # Optional: extraction field names → values the vision model is confident about for this rule.
     field_updates: dict[str, str] = Field(default_factory=dict)
+    # Traceability: OCR line IDs the verdict is based on (p<page>_L<n>) and what kind of evidence it is.
+    evidence_line_ids: list[str] = Field(default_factory=list)
+    evidence_kind: str = ""
+
+    @field_validator("evidence_line_ids", mode="before")
+    @classmethod
+    def _coerce_line_ids(cls, value: Any) -> list[str]:
+        from src.trace.evidence import coerce_line_ids
+
+        return coerce_line_ids(value)
+
+    @field_validator("evidence_kind", mode="before")
+    @classmethod
+    def _coerce_kind(cls, value: Any) -> str:
+        v = str(value or "").strip().lower()
+        return v if v in ("text", "anchor", "absent", "none") else ""
 
     @model_validator(mode="before")
     @classmethod

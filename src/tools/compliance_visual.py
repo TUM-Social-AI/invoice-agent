@@ -10,7 +10,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 from PIL import Image
@@ -21,6 +21,8 @@ from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
 from src.llm.response_format import provider_json_mode
 from src.models.tool_io_models import VisualVerdictModel
+from src.trace.evidence import parse_line_id
+from src.trace.ocr_cache import format_lines_with_ids, lines_with_ids
 from src.prompts.llm_prompts import build_compliance_visual_prompt
 from src.tools.vision_llm import _sanitize_extracted_string_value
 from src.tools.pdf_pages import image_to_base64_scaled
@@ -152,6 +154,42 @@ def _parse_payment_phrase_from_visual_observation(text: str) -> str | None:
     return None
 
 
+def _visual_trace_record(
+    verdict: VisualVerdictModel,
+    raw_verdict: Any,
+    page_num: int,
+    final_pages: list[int],
+    ocr_by_page: dict[int, Any],
+    max_chars_per_page: int = 0,
+) -> dict:
+    """Latest visual verdict's evidence, keeping only line IDs that were shown in the final attempt."""
+    shown: set[str] = set()
+    for p in final_pages:
+        if p in ocr_by_page:
+            shown |= lines_with_ids(ocr_by_page[p], page=p, max_chars=max_chars_per_page)[1]
+    valid: list[str] = []
+    for lid in verdict.evidence_line_ids:
+        p, idx = parse_line_id(lid)
+        if p is None and len(final_pages) == 1:
+            p = final_pages[0]  # bare "L39" is unambiguous when one page was sent
+        if p is None or idx is None:
+            continue
+        lid = f"p{p}_L{idx}"
+        if lid in shown and lid not in valid:
+            valid.append(lid)
+    return {
+        "page_num": page_num,
+        "pages_sent": list(final_pages),
+        "line_ids": valid,
+        "cited_line_ids": list(verdict.evidence_line_ids),
+        "evidence_kind": verdict.evidence_kind,
+        # A rule the model skipped silently defaults to passes=False; report it as not evaluated.
+        "verdict_missing": not isinstance(raw_verdict, dict) or not raw_verdict,
+        "observation": verdict.observation,
+        "confidence": float(verdict.confidence),
+    }
+
+
 def check_compliance_visual(
     state: AgentState,
     image_path: str,
@@ -164,6 +202,8 @@ def check_compliance_visual(
     timeout_s: int = 240,
     hybrid_visual: bool = True,
     store: Optional[ConfigStore] = None,
+    trace_ocr: Optional[Callable[[int], Any]] = None,
+    trace_ocr_max_chars_per_page: int = 3000,
 ) -> dict:
     """
     Run visual_check compliance rules against a page image.
@@ -230,6 +270,28 @@ def check_compliance_visual(
         selected_pages.append(1)
 
     selected_pages = [p for p in selected_pages if p in page_by_num_full][: max(1, int(max_evidence_pages))]
+
+    # Traceability: OCR of every page that may be sent, so the model can cite lines.
+    ocr_by_page: dict[int, Any] = {}
+    if trace_ocr is not None:
+        for p in selected_pages:
+            try:
+                ocr_p = trace_ocr(p)
+            except Exception as e:  # tracing must never break the compliance check
+                logger.warning("check_compliance_visual: OCR for page %d failed: %s", p, e)
+                ocr_p = None
+            if ocr_p is not None and not ocr_p.is_empty():
+                ocr_by_page[p] = ocr_p
+
+    def _ocr_block_for(pages: list[int]) -> str:
+        blocks = []
+        for p in pages:
+            if p in ocr_by_page:
+                blocks.append(
+                    f"--- page_num={p} ---\n"
+                    + format_lines_with_ids(ocr_by_page[p], page=p, max_chars=trace_ocr_max_chars_per_page)
+                )
+        return "\n".join(blocks) if blocks else "(no OCR text available)"
 
     def _evidence_lines_for(pages: list[int]) -> list[str]:
         lines = []
@@ -308,7 +370,12 @@ def check_compliance_visual(
                 logger.warning("check_compliance_visual: %s", err)
                 continue
             ev_lines = _evidence_lines_for(pages_try)
-            prompt = build_compliance_visual_prompt("\n".join(ev_lines), rule_lines)
+            prompt = build_compliance_visual_prompt(
+                "\n".join(ev_lines),
+                rule_lines,
+                ocr_block=_ocr_block_for(pages_try) if trace_ocr is not None else "",
+                cite_lines=trace_ocr is not None,
+            )
             ver, raw_l, err = _run_vision(images_b64, prompt)
             if ver is not None:
                 finals = pages_try
@@ -348,7 +415,8 @@ def check_compliance_visual(
     validated_verdicts: dict[str, VisualVerdictModel] = {}
 
     for rule in visual_rules:
-        verdict = VisualVerdictModel.model_validate(verdicts.get(rule.rule_id, {}))
+        raw_verdict = verdicts.get(rule.rule_id)
+        verdict = VisualVerdictModel.model_validate(raw_verdict or {})
         validated_verdicts[rule.rule_id] = verdict
         passes = verdict.passes
         confidence = float(verdict.confidence)
@@ -413,6 +481,10 @@ def check_compliance_visual(
             "missing_slots": missing_slots,
             "refs": refs,
         }
+        if trace_ocr is not None:
+            state.rule_evidence[rule.rule_id]["trace"] = _visual_trace_record(
+                verdict, raw_verdict, page_num, final_pages, ocr_by_page, trace_ocr_max_chars_per_page
+            )
         policy_refs = _policy_refs_for_rule(state, rule)
         state.rule_policy_refs[rule.rule_id] = policy_refs
         # A visual PASS is definitive for compliance state; missing optional linkage

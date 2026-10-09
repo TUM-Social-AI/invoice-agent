@@ -2,6 +2,9 @@ Pillow>=10.0.0
 PyYAML>=6.0
 python-dotenv>=1.0.0
 pypdfium2>=4.30.0
+# Flagged PDF output (src/trace/pdf_writer.py)
+pypdf>=5.0
+reportlab>=4.0
 requests>=2.31.0
 google-genai>=1.0.0
 openai>=1.0.0

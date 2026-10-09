@@ -504,18 +504,14 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     failed = []
     passed = []
 
-    # Build a lookup of results already committed by check_compliance_visual so we
-    # don't re-evaluate visual rules and re-add them to visual_checks_pending.
-    already_evaluated: dict[str, RuleResult] = {
-        r.rule_id: r
-        for r in state.rule_results
-        if r.status in ("passed", "failed") and r.rule_id not in (
-            r2.rule_id for r2 in state.rule_results if r2.status == "skipped"
-        )
-    }
-    # Simpler: build a set of rule IDs that already have a definitive verdict
+    # Visual verdicts committed by check_compliance_visual are reused so we don't
+    # re-add them to visual_checks_pending. Field-based rules are always re-evaluated:
+    # a field extracted after an earlier failed check must be able to flip the verdict.
+    visual_rule_ids = {r.rule_id for r in rules if r.check_type == "visual_check"}
     definitive_rule_ids: set[str] = {
-        r.rule_id for r in state.rule_results if r.status in ("passed", "failed")
+        r.rule_id
+        for r in state.rule_results
+        if r.status in ("passed", "failed") and r.rule_id in visual_rule_ids
     }
 
     for rule in rules:

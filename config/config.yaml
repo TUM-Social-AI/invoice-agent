@@ -176,6 +176,20 @@ agent:
   max_same_action_warn: 2 # warn after this many identical consecutive tool calls
   max_same_action_stop: 5 # hard-stop the loop after this many identical calls
 
+traceability:
+  # Flagged PDF + trace.json per invoice: every extracted value and compliance finding
+  # boxed where it was found. Turns on OCR line IDs in vision prompts (the model cites the
+  # lines it read) and caches one surya OCR per page under <output>/tmp/ocr/.
+  enabled: true
+  # OCR characters per page added to the visual compliance prompt so the model can cite lines.
+  visual_ocr_max_chars_per_page: 3000
+  # After the run, OCR pages that have no cached OCR yet so values recorded on the wrong page
+  # can still be located (about 10-15 s per page on CPU). 0 disables.
+  export_ocr_max_pages: 12
+  # Turn pages scanned sideways upright before extraction (OCR line shapes + confidence).
+  # OCRs every page once when images are rendered; that OCR is reused by later steps.
+  auto_rotate: true
+
 ocr:
   # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
   # Uses BCP-47 codes. Add languages that appear in your invoices.
