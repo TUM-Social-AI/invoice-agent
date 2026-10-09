@@ -202,7 +202,9 @@ agent:
 project:
   # AEXCID project file number (expediente) printed on the funding stamp. Empty: any number accepted.
   file_number: ""
-  # Implementation period, YYYY-MM-DD. Empty: the execution-period rules are skipped.
+  # Implementation period, YYYY-MM-DD (grant award decision / actual start date notified to AEXCID;
+  # also in Section C of the financial report). The project_execution_within_period rules are
+  # disabled in compliance_rules.csv until these are known: set both dates and enable those rules.
   start_date: ""
   end_date: ""
   # Full legal names accepted as the invoice client/payer: beneficiary organisation, consortium

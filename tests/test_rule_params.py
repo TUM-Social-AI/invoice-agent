@@ -3,7 +3,12 @@ Config placeholders in compliance rules ({project.*} / {compliance.*}), currency
 (cash limit, per-diem range) and non-blocking skips. Offline.
 """
 
+import csv
+import shutil
+import tempfile
 from datetime import date
+from functools import lru_cache
+from pathlib import Path
 
 from PIL import Image
 
@@ -23,8 +28,25 @@ COMPLIANCE = {
 PROJECT = {"start_date": date(2025, 1, 1), "end_date": "2025-12-31"}
 
 
+@lru_cache(maxsize=1)
+def _config_dir_with_period_rules() -> str:
+    """Copy of config/csv with the period rules enabled; they are disabled until project dates are known."""
+    dst = Path(tempfile.mkdtemp()) / "csv"
+    shutil.copytree("config/csv", dst)
+    path = dst / "compliance_rules.csv"
+    with open(path, newline="", encoding="utf-8") as f:
+        rows = list(csv.reader(f))
+    header = rows[0]
+    for row in rows[1:]:
+        if row[header.index("rule_name")] == "project_execution_within_period":
+            row[header.index("enabled")] = "true"
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        csv.writer(f, lineterminator="\n").writerows(rows)
+    return str(dst)
+
+
 def _store(project=None, compliance=None):
-    store = load_config("config/csv")
+    store = load_config(_config_dir_with_period_rules())
     store.set_rule_params({"project": project or {}, "compliance": compliance or {}})
     return store
 
