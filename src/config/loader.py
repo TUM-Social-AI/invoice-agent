@@ -5,8 +5,10 @@ typed objects to the rest of the system. No hardcoded rules anywhere else.
 
 import csv
 import logging
+import re
+from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -45,6 +47,102 @@ def _load_employee_name_role_denylist(base: Path) -> list[str]:
     return phrases
 
 
+# Config sections a rule's check_value may reference as {section.key} placeholders.
+RULE_PARAM_SECTIONS = ("project", "compliance")
+
+# {project.start_date}, {project.file_number|fallback text}, {eur:compliance.cash_limit_eur}
+_PLACEHOLDER_RE = re.compile(
+    r"\{(?:(?P<fmt>eur):)?(?P<path>[a-z_][a-z0-9_]*(?:\.[a-z0-9_]+)+)(?:\|(?P<fallback>[^{}]*))?\}"
+)
+
+
+def _render_param(value: Any) -> str | None:
+    """Render a config value for rule text. None when the value is unset/empty."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, (int, float)):
+        return str(int(value)) if float(value).is_integer() else str(value)
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    if isinstance(value, (list, tuple)):
+        items = [r for r in (_render_param(v) for v in value) if r]
+        return " or ".join(f'"{i}"' for i in items) if items else None
+    if isinstance(value, dict):
+        items = [f"{k} {r}" for k, r in ((k, _render_param(v)) for k, v in value.items()) if r]
+        return ", ".join(items) if items else None
+    s = str(value).strip()
+    return s or None
+
+
+def _lookup_param(params: dict, path: str) -> Any:
+    node: Any = params
+    for part in path.split("."):
+        if not isinstance(node, dict):
+            return None
+        node = node.get(part)
+    return node
+
+
+def _render_eur_amount(amount: Any, params: dict) -> str | None:
+    """'2500 EUR (= 1,639,892 XAF/XOF)' using compliance.currency_per_eur for the equivalents."""
+    try:
+        eur = float(amount)
+    except (TypeError, ValueError):
+        return None
+    rates = _lookup_param(params, "compliance.currency_per_eur") or {}
+    by_rate: dict[float, list[str]] = {}  # currencies sharing a rate (pegged aliases) are listed once
+    for cur, rate in rates.items():
+        try:
+            r = float(rate)
+        except (TypeError, ValueError):
+            continue
+        if str(cur).upper() != "EUR" and r > 0:
+            by_rate.setdefault(r, []).append(str(cur))
+    equivalents = []
+    for r, curs in by_rate.items():
+        local = eur * r
+        amount_s = f"{local:,.0f}" if local >= 1000 else f"{local:,.2f}"
+        equivalents.append(f"{amount_s} {'/'.join(curs)}")
+    base = f"{_render_param(eur)} EUR"
+    return f"{base} (= {', '.join(equivalents)})" if equivalents else base
+
+
+def resolve_rule_text(text: str, params: dict) -> tuple[str, list[str]]:
+    """
+    Substitute {section.key} placeholders in rule text with config values.
+    Returns (text, unresolved placeholder paths). An unset value with a |fallback uses the fallback;
+    without one the placeholder is left in place and reported as unresolved.
+    """
+    unresolved: list[str] = []
+
+    def _sub(m: re.Match) -> str:
+        path = m.group("path")
+        raw = _lookup_param(params, path)
+        if m.group("fmt") == "eur" and raw not in (None, ""):
+            rendered = _render_eur_amount(raw, params)
+        else:
+            rendered = _render_param(raw)
+        if rendered is not None:
+            return rendered
+        if m.group("fallback") is not None:
+            return m.group("fallback").strip()
+        unresolved.append(path)
+        return m.group(0)
+
+    return _PLACEHOLDER_RE.sub(_sub, text or ""), unresolved
+
+
+def unresolved_rule_params(rule: ComplianceRule) -> list[str]:
+    """Placeholder paths still left in a rule's check_value (config value not set)."""
+    return [
+        m.group("path")
+        for m in _PLACEHOLDER_RE.finditer(rule.check_value or "")
+        if m.group("fallback") is None
+    ]
+
+
 def filter_compliance_rules_by_groups(
     rules: list[ComplianceRule],
     active_groups: list[str] | None,
@@ -71,6 +169,11 @@ class ConfigStore(BaseModel):
     compliance_rules: dict[str, list[ComplianceRule]] = Field(default_factory=dict)     # keyed by invoice_type_id
     schema_cache: dict[str, dict] = Field(default_factory=dict, repr=False)            # cache for build_extraction_schema
     employee_name_role_denylist: list[str] = Field(default_factory=list, repr=False)
+    # Config sections (RULE_PARAM_SECTIONS) substituted into {section.key} rule placeholders.
+    rule_params: dict = Field(default_factory=dict, repr=False)
+
+    def set_rule_params(self, app_config: dict) -> None:
+        self.rule_params = {k: (app_config or {}).get(k) or {} for k in RULE_PARAM_SECTIONS}
 
     def get_type(self, invoice_type_id: str) -> Optional[InvoiceType]:
         return self.invoice_types.get(invoice_type_id)
@@ -83,8 +186,14 @@ class ConfigStore(BaseModel):
         invoice_type_id: str,
         active_rule_groups: list[str] | None = None,
     ) -> list[ComplianceRule]:
-        rules = list(self.compliance_rules.get(invoice_type_id, []))
-        return filter_compliance_rules_by_groups(rules, active_rule_groups)
+        rules = filter_compliance_rules_by_groups(
+            list(self.compliance_rules.get(invoice_type_id, [])), active_rule_groups
+        )
+        resolved = []
+        for r in rules:
+            text, _ = resolve_rule_text(r.check_value, self.rule_params)
+            resolved.append(r if text == r.check_value else r.model_copy(update={"check_value": text}))
+        return resolved
 
     def get_field_by_id(self, field_id: str) -> Optional[ExtractionField]:
         for fields in self.extraction_fields.values():

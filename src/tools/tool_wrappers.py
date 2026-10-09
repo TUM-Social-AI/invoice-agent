@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.state import AgentState, AgentStatus, rule_verdict_summary
-from src.config.loader import ConfigStore
+from src.config.loader import ConfigStore, unresolved_rule_params
+from src.tools.compliance_eval import is_non_blocking_skip
 from src.llm.base import LLMProvider
 from src.agent.param_resolver import resolve_param
 from src.tools.tools import (
@@ -804,7 +805,12 @@ def make_check_visual(ctx: ToolContext):
                     "Visual stamp/signature checks require full-quality images."
                 ),
             }
-        rules = ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
+        # Rules whose {section.key} config value is unset are reported by check_compliance as
+        # not configured; they never go to the vision model.
+        rules = [
+            r for r in ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
+            if not unresolved_rule_params(r)
+        ]
         return check_compliance_visual(
             state,
             image_path,
@@ -897,11 +903,12 @@ def make_finish(ctx: ToolContext):
             (rr.status == "failed" and rr.severity == "error") for rr in state.rule_results
         )
         error_skipped = any(
-            (rr.status == "skipped" and rr.severity == "error") for rr in state.rule_results
+            (rr.status == "skipped" and rr.severity == "error" and not is_non_blocking_skip(rr))
+            for rr in state.rule_results
         )
         unresolved_error_evidence = False
         for rr in state.rule_results:
-            if rr.severity != "error":
+            if rr.severity != "error" or is_non_blocking_skip(rr):
                 continue
             if rr.status == "passed":
                 continue

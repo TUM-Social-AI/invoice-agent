@@ -114,10 +114,14 @@ agent:
   visual_max_evidence_pages: 8
 
   # Compliance rule groups (see rule_group column in config/csv/compliance_rules.csv).
-  # Chad / non-Galicia field projects: general only (no Xunta stamp, 2023 window, PR811A, etc.).
-  # For Galicia grant paperwork, add: - xunta_galicia
+  #   general:       any funder (invoice arithmetic, document consistency, non-eligible costs, three quotes)
+  #   aexcid:        AEXCID / Junta de Extremadura (Decree 5/2019): stamp, payment proof, invoice contents, travel caps
+  #   xunta_galicia: Galicia grant paperwork (Xunta stamp, PR811A, audit/evaluation caps)
+  #   spain:         Spanish VAT rates (4/10/21 %); only for invoices issued in Spain
+  # Chad (AEXCID-funded): general + aexcid.
   active_rule_groups:
     - general
+    - aexcid
 
   # Ground truth CSV: compared after every run when a row matches the PDF (or use <stem>_truth.json).
   # Prefer ISO dates (YYYY-MM-DD) in the CSV; slash dates use ground_truth_date_parse for ambiguous days/months.
@@ -191,6 +195,36 @@ agent:
   max_consecutive_failures: 3 # hard-stop a tool after this many back-to-back failures
   max_same_action_warn: 2 # warn after this many identical consecutive tool calls
   max_same_action_stop: 5 # hard-stop the loop after this many identical calls
+
+# Project and funder values referenced by compliance rules as {project.<key>} / {compliance.<key>}
+# placeholders in config/csv/compliance_rules.csv (check_value). A rule whose placeholder is unset
+# is reported as "Not configured" and skipped; it does not fail the invoice or block finish.
+project:
+  # AEXCID project file number (expediente) printed on the funding stamp. Empty: any number accepted.
+  file_number: ""
+  # Implementation period, YYYY-MM-DD. Empty: the execution-period rules are skipped.
+  start_date: ""
+  end_date: ""
+  # Full legal names accepted as the invoice client/payer: beneficiary organisation, consortium
+  # partners, local partner. Empty: the client rule only requires a full legal name, not a match.
+  payer_legal_names: []
+
+compliance:
+  # Units of each currency per 1 EUR. Used to convert amounts for EUR limits (cash limit, per-diem caps)
+  # and shown to the vision model next to EUR thresholds. XAF/XOF are pegged at 655.957 per EUR.
+  currency_per_eur:
+    EUR: 1
+    XAF: 655.957
+    XOF: 655.957
+    CFA: 655.957
+    FCFA: 655.957
+  # AEXCID Decree 5/2019 limits (Normas de seguimiento y justificación).
+  cash_limit_eur: 2500                       # cash payments must be below this (4.2.3, PDF p.16)
+  three_quotes_supplies_eur: 15000           # supplies, equipment, services: three quotes above this (PDF p.23, p.29)
+  three_quotes_works_eur: 40000              # construction works: three quotes above this (PDF p.21)
+  accommodation_abroad_max_eur_per_day: 143  # A.6, VAT included
+  subsistence_abroad_max_eur_per_day: 95     # A.6, VAT included
+  fuel_max_eur_per_km: 0.21                  # A.6, when fuel is claimed per km
 
 traceability:
   # Flagged PDF + trace.json per invoice: every extracted value and compliance finding

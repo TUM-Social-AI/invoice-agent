@@ -86,6 +86,7 @@ class InvoiceAgent:
     ):
         self.config = config
         self.store = store
+        store.set_rule_params(config)
         cfg = _agent_cfg(config)
         self.max_turns = cfg["max_turns"]
         self.max_field_retries = cfg["max_field_retries"]
