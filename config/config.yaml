@@ -131,20 +131,36 @@ agent:
   #   VIAJES: "config/csv/ground_truth_viajes.csv"
   ground_truth_csv_by_invoice_type: {}
   ground_truth_source_column: "Source file"
+  ground_truth_id_column: "Id"
+  # Expected invoice_type_id per row (scored as type_correct).
+  ground_truth_invoice_type_column: "Invoice Type"
   # CSV column header -> extraction field_name (see config/csv/extraction_fields.csv).
+  # A list gives candidate field_names in priority order; the first one the detected
+  # invoice type defines is scored.
+  # Several rows with the same Source file (two invoices in one PDF) skip field scoring.
   ground_truth_column_map:
     "Invoice Number": "invoice_number"
     "Date": "invoice_date"
     "Supplier/Issuer": "vendor_name"
     "Items/Services": "item_description"
-    "Description": "travel_purpose"
+    "Description": ["travel_purpose"]
     "Total Amount": "total_amount"
     "Currency": "currency"
     "Payment Method": "payment_method"
     "Expense Category": "expense_category"
-    "Client Name": "beneficiary"
+    "Client Name": ["beneficiary"]
     "Employee": "employee_name"
     "Pay period": "pay_period"
+  # Values treated as equal during comparison: {field_name: {canonical: [aliases]}}.
+  ground_truth_value_aliases:
+    currency:
+      XAF: ["CFA", "FCFA", "F CFA", "F.CFA", "Franc CFA"]
+  # Reviewer findings, one row per (PDF, issue_code). Matched to PDFs like ground_truth_csv_path.
+  # Scored via compliance_rules.csv issue_code: recall on fail/verify issues, false alarms,
+  # overall verdict agreement.
+  compliance_ground_truth_csv_path: "config/csv/compliance_ground_truth.csv"
+  # Issue codes recorded but never scored (need documents the agent never sees).
+  compliance_unscored_issue_codes: ["external_documents"]
   # Slash-delimited dates when day and month are both ≤12: DMY (EU) or MDY (US).
   ground_truth_date_parse: "DMY"
 

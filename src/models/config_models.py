@@ -55,6 +55,8 @@ class ComplianceRuleModel(BaseModel):
     enabled: bool = True
     # general = any project; xunta_galicia = Galicia grant stamp / 2023 / PR811A / caps (see config active_rule_groups)
     rule_group: str = "general"
+    # Reviewer issue taxonomy (e.g. aexcid_stamp, payment_proof); empty when the CSV has no issue_code column.
+    issue_code: str = ""
 
     @field_validator("page_region")
     @classmethod

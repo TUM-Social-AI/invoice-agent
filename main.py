@@ -261,7 +261,7 @@ def process_invoice(
     no_ground_truth = False
     ground_truth_csv_only = False
     if truth is not None:
-        diff = evaluate(state, truth, store=agent.store, date_parse=date_parse)
+        diff = evaluate(state, truth, store=agent.store, date_parse=date_parse, config=cfg)
         _last_score = diff["score"]
         _last_field_results = diff["field_results"]
         diff_text = format_diff_for_agent(diff)
@@ -281,8 +281,23 @@ def process_invoice(
                         f"                 lenient {s['field_accuracy']:.0%} (exact + partial)  "
                         f"· strict {(exa if exa is not None else 0):.0%} (exact only)"
                     )
+            elif diff.get("field_scoring_skipped"):
+                print(f"  Ground truth: fields not scored ({diff['field_scoring_skipped']})")
             else:
                 print("  Ground truth: no overlapping fields to score")
+            for level in ("fail", "verify"):
+                if s.get(f"issue_{level}_recall") is not None:
+                    print(
+                        f"                 reviewer {level} issues caught: "
+                        f"{s[f'issues_{level}_caught']}/{s[f'issues_{level}_total']} "
+                        f"({s[f'issue_{level}_recall']:.0%})"
+                    )
+            if s.get("overall_compliant_match") is not None:
+                print(
+                    f"                 overall verdict vs reviewer: "
+                    f"{'agree' if s['overall_compliant_match'] else 'disagree'}"
+                    f" · issue codes raised but not in review: {s.get('issue_false_alarms', 0)}"
+                )
             if s.get("rule_accuracy") is not None:
                 rt = s.get("rules_total") or 0
                 print(
@@ -435,6 +450,19 @@ def _print_batch_summary(
         )
     else:
         print(f"{'TOTALS':<{COL_FILE}}  (no ground truth rows matched any PDF)")
+    scores = [s for _, _, s in results if s]
+    for level in ("fail", "verify"):
+        total = sum(s.get(f"issues_{level}_total") or 0 for s in scores)
+        if total:
+            caught = sum(s.get(f"issues_{level}_caught") or 0 for s in scores)
+            print(f"  Reviewer {level} issues caught: {caught}/{total} ({caught / total:.0%})")
+    verdicts = [s["overall_compliant_match"] for s in scores if s.get("overall_compliant_match") is not None]
+    if verdicts:
+        alarms = sum(s.get("issue_false_alarms") or 0 for s in scores)
+        print(
+            f"  Overall verdict agrees with reviewer: {sum(verdicts)}/{len(verdicts)}"
+            f" · issue codes raised but not in review: {alarms}"
+        )
     print(f"{'='*len(header)}\n")
 
     if csv_path:

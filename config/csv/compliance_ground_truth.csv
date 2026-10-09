@@ -1,0 +1,49 @@
+Id,Source file,overall_compliant,issue_code,level,note
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,aexcid_stamp,fail,AEXCID stamp incomplete: percentage and allocated amount missing
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,payment_proof,fail,Bank payment receipt and statement showing the charge required
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,tax_treatment,verify,"Clarify tax status of the ""HT"" invoice (shown without tax)"
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,client_identification,fail,Invoice must state the full legal name of JRS as the recognised local partner
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,execution_period,verify,Confirm 18/09/2025 falls within the implementation period
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,document_consistency,verify,Check funds request dated 06/11/2025 (after the invoice date)
+A3553,A.4.c.- Consumibles-A3553-25.pdf,no,external_documents,,"Financial report: sequential number, Spanish description, conversion to EUR"
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,document_consistency,fail,Décharge de prime is issued for June 2025 but the payment is for July 2025
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,volunteer_documentation,fail,Volunteer agreement/assignment letter and a document establishing the 50000 FCFA bonus required
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,payment_proof,fail,Proof of payment of 50000 FCFA; signed receipt if paid in cash
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,aexcid_stamp,fail,Complete stamp with percentage and amount charged to AEXCID
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,tax_treatment,verify,Clarify whether social security/tax documentation applies to the volunteer placement under Chadian law
+U0223,A.5.d.- Personnel volontaire-U0223-25.pdf,no,external_documents,,"Financial report: sequential number, Spanish description, conversion to EUR"
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,unrelated_or_multiple_documents,fail,Two invoices from two different suppliers in one file; split by line
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,invoice_arithmetic,fail,IMEFI invoice: total in figures 116000 FCFA but amount in words is 283000 FCFA
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,payment_proof,fail,Proof of payment for both invoices; supplier signature if paid in cash
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,aexcid_stamp,fail,Fill in percentage and amount on the AEXCID stamp
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,tax_treatment,verify,Confirm local tax treatment of both invoices
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,budget_line,verify,Check A.7 classification matches the approved budget
+U0283,A.7. Serv técn y prof-U0283-25.pdf,no,external_documents,,"Financial report: sequential number, translation, conversion to EUR"
+U0259,A.8.- Fonctionnement-U0259-25.pdf,no,payment_proof,fail,Proof of payment of 189600 FCFA outstanding; dated and signed/stamped receipt if cash
+U0259,A.8.- Fonctionnement-U0259-25.pdf,no,tax_treatment,verify,Confirm tax treatment of the invoice in Chad
+U0259,A.8.- Fonctionnement-U0259-25.pdf,no,budget_line,verify,Confirm generator fuel is budgeted under A.8 Operating
+U0259,A.8.- Fonctionnement-U0259-25.pdf,no,unrelated_or_multiple_documents,fail,Page 7 is a 195000 FCFA June 2025 transport certificate belonging to another expense
+U0237,A.7. Serv técn y prof-U0273-25.pdf,,supplier_identification,fail,Supplier NIF and RCCM missing
+U0237,A.7. Serv técn y prof-U0273-25.pdf,,description_insufficient,fail,Must state that the repair relates to vehicle 16C 2042 E
+U0237,A.7. Serv técn y prof-U0273-25.pdf,,aexcid_stamp,fail,100% allocation or amount not clearly shown on the stamp
+U0237,A.7. Serv técn y prof-U0273-25.pdf,,budget_line,verify,Confirm the expense belongs in A.7 per the approved budget
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,invoice_arithmetic,fail,18 x 1500 is 27000 not 26000; 1 x 60000 is 60000 not 43000; corrected invoice required
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,document_consistency,verify,Clarify why the order was 4 panels + 4 batteries + inverter but the invoice has only ancillary materials and labour
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,payment_proof,fail,Proof of payment of 215000 FCFA; signed/stamped supplier receipt if cash
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,aexcid_stamp,fail,Complete AEXCID stamp with 100% and the allocated amount
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,tax_treatment,verify,Clarify tax treatment of the invoice
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,budget_line,verify,Verify the new solar installation can be charged to A.8 and matches the approved budget line
+U0357,A.8.- Fonctionnement-U0357-25.pdf,no,external_documents,,Installation certificate or completion report for the invoiced labour (if it exists)
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,unrelated_or_multiple_documents,fail,50000 FCFA advance spans 3 receipts (39000 + 8000 + 3000); settlement statement required
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,budget_line,fail,"Split communications/SIM, vehicle maintenance and parking into their correct budget lines; telecoms under A.7 questioned"
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,payment_proof,fail,Proof of payment for the 39000 FCFA invoice which states bank transfer or cheque
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,description_insufficient,fail,Identify the vehicle for the 8000 FCFA washing/lubrication; explain link of parking tickets to the project
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,aexcid_stamp,fail,Complete AEXCID stamp on each receipt with percentage and amount
+PC0060,A.7. Serv técn y prof-PC0060-25.pdf,no,tax_treatment,verify,Review tax treatment of the Service Express receipt
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,document_consistency,fail,Pro forma shows 1 litre / 1150 FCFA instead of 435 litres / 500250 FCFA; correct or replace
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,document_consistency,verify,Check the funds request date on the original to confirm the chronological sequence
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,payment_proof,fail,Bank statement for the cheque; breakdown showing this 500250 FCFA invoice is included in the grouped cheque
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,aexcid_stamp,fail,Complete stamp with 100% and 500250 FCFA
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,budget_line,verify,Confirm fuel is correctly classified under A.6 per the approved budget
+A3693,"A.6.- Viajes, alojamientos y dietas-A3693-25.pdf",no,external_documents,,Fuel consumption records showing the 435 litres; link of fuel withdrawals to project trips
+U0205,A.8.- Fonctionnement-U0205-25.pdf,no,,,Marked non-compliant without notes; reasons pending from the reviewer

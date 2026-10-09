@@ -279,6 +279,7 @@ def load_config(config_dir: str = "config/csv") -> ConfigStore:
                 page_region=row["page_region"].strip(),
                 enabled=True,
                 rule_group=rg_raw,
+                issue_code=(row.get("issue_code") or "").strip(),
             )
             store.compliance_rules.setdefault(type_id, []).append(cr)
     total_rules = sum(len(v) for v in store.compliance_rules.values())
