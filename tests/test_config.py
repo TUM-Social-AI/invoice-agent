@@ -135,6 +135,8 @@ def test_new_types_have_fields_and_required_rules(store):
         rules = store.get_rules(type_id, ["general"])
         assert rules
         for r in rules:
+            if r.check_type == "visual_check":
+                continue  # visual rules (aexcid rule set) point at VISUAL, not a field
             assert r.check_type in ("required", "range", "enum")
             assert r.field_id in field_ids, f"{r.rule_id} points at a field of another type"
 
@@ -149,7 +151,11 @@ def test_volunteer_fields_reuse_payroll_names_without_salary_fields(store):
     names = {f.field_name for f in store.get_fields("VOLUNTARIOS")}
     assert {"employee_name", "pay_period", "role", "total_amount", "payment_method"} <= names
     assert not names & {"gross_salary", "net_salary", "irpf_retention", "social_security_employee"}
-    rule_fields = {store.get_field_by_id(r.field_id).field_name for r in store.get_rules("VOLUNTARIOS")}
+    rule_fields = {
+        store.get_field_by_id(r.field_id).field_name
+        for r in store.get_rules("VOLUNTARIOS")
+        if r.check_type != "visual_check"
+    }
     assert not rule_fields & {"gross_salary", "net_salary", "irpf_retention"}
 
 

@@ -26,7 +26,7 @@ from src.trace.ocr_cache import format_lines_with_ids, lines_with_ids
 from src.prompts.llm_prompts import build_compliance_visual_prompt
 from src.tools.vision_llm import _sanitize_extracted_string_value
 from src.tools.pdf_pages import image_to_base64_scaled
-from src.tools.compliance_eval import _evaluate_rule, _policy_refs_for_rule
+from src.tools.compliance_eval import VISUAL_SKIP_KEY, _evaluate_rule, _policy_refs_for_rule
 
 logger = logging.getLogger(__name__)
 
@@ -154,6 +154,11 @@ def _parse_payment_phrase_from_visual_observation(text: str) -> str | None:
     return None
 
 
+def _verdict_missing(raw_verdict: Any) -> bool:
+    """True when the model gave no usable verdict (rule omitted, empty, or no "passes" key)."""
+    return not isinstance(raw_verdict, dict) or "passes" not in raw_verdict
+
+
 def _visual_trace_record(
     verdict: VisualVerdictModel,
     raw_verdict: Any,
@@ -161,6 +166,9 @@ def _visual_trace_record(
     final_pages: list[int],
     ocr_by_page: dict[int, Any],
     max_chars_per_page: int = 0,
+    pages_dropped: Optional[list[int]] = None,
+    attempt: str = "",
+    skip_reason: str = "",
 ) -> dict:
     """Latest visual verdict's evidence, keeping only line IDs that were shown in the final attempt."""
     shown: set[str] = set()
@@ -184,10 +192,153 @@ def _visual_trace_record(
         "cited_line_ids": list(verdict.evidence_line_ids),
         "evidence_kind": verdict.evidence_kind,
         # A rule the model skipped silently defaults to passes=False; report it as not evaluated.
-        "verdict_missing": not isinstance(raw_verdict, dict) or not raw_verdict,
+        "verdict_missing": _verdict_missing(raw_verdict),
+        "pages_dropped": list(pages_dropped or []),
+        "attempt": attempt,
+        "skip_reason": skip_reason,
         "observation": verdict.observation,
         "confidence": float(verdict.confidence),
     }
+
+
+# Keyword fallback for rules without an evidence_categories column value. Patterns are
+# matched on word boundaries against "rule_name check_value" (underscores read as spaces).
+_PAYMENT_TERMS = (
+    r"payments?|paid|proof|receipts?|bank|cheques?|transfers?|transferencia|justificante|"
+    r"pagad[oa]|recibo|virement|re[çc]us?|pay[ée]e?s?|acquitt[ée]e?s?|relev[ée]|statements?"
+)
+_KEYWORD_CATEGORIES: tuple[tuple[str, frozenset[str]], ...] = (
+    (_PAYMENT_TERMS, frozenset({"SUPPORTING_DOC", "SIGNATURE_STAMP", "TOTALS"})),
+    (r"translations?|translated|idioma|language|traduction|traducci[óo]n", frozenset({"SUPPORTING_DOC", "COVER_PAGE"})),
+    (r"quotes?|presupuestos?|budget|suppliers?|proveedor|fournisseur|devis", frozenset({"SUPPORTING_DOC", "LINE_ITEMS"})),
+    (
+        r"stamps?|stamped|seals?|signatures?|signed|sello|firma(do)?|cachet|tampon|sign[ée]e?|aexcid",
+        frozenset({"SIGNATURE_STAMP"}),
+    ),
+    (
+        r"quantit(y|ies)|qty|unit prices?|line items?|totals?|subtotal|amounts? in words|words|arithmetic|"
+        r"sums?|tax(es)?|vat|iva|tva|ht|ttc|tax regime|cantidad|precio unitario|importe|"
+        r"montant( en lettres)?|en lettres|en letras|prix unitaire|quantit[ée]|"
+        r"descriptions?|described|goods|items|articles?|concepto|d[ée]signation",
+        frozenset({"LINE_ITEMS", "TOTALS"}),
+    ),
+    (
+        r"pages|attached|attachments?|supporting|purchase orders?|order forms?|orden de compra|pro ?forma|"
+        r"bon de commande|annex(es)?|anexos?|funds request|solicitud de fondos",
+        frozenset({"SUPPORTING_DOC"}),
+    ),
+    (r"unrelated|all pages|every page|consistency|consistent", frozenset({"ALL"})),
+)
+_KEYWORD_PATTERNS = tuple((re.compile(rf"\b(?:{pat})\b"), cats) for pat, cats in _KEYWORD_CATEGORIES)
+
+# Context pages always considered for selection, even when no rule names them.
+_BASELINE_CATEGORIES = frozenset({"INVOICE_HEADER", "SIGNATURE_STAMP"})
+_CATEGORY_ORDER = ("INVOICE_HEADER", "SIGNATURE_STAMP", "SUPPORTING_DOC", "TOTALS", "LINE_ITEMS", "COVER_PAGE")
+_NON_EVIDENCE_CATEGORIES = frozenset({"BLANK", "UNKNOWN", ""})
+_PAYMENT_PAGE_RE = re.compile(rf"\b(?:{_PAYMENT_TERMS})\b", re.IGNORECASE)
+
+
+def rule_evidence_categories(rule: ComplianceRule) -> set[str]:
+    """Page categories a visual rule needs: the CSV column when set, else the keyword fallback."""
+    if rule.evidence_categories:
+        return set(rule.evidence_categories)
+    text = re.sub(r"[_\-]+", " ", f"{rule.rule_name} {rule.check_value or ''}").lower()
+    cats: set[str] = set()
+    for pattern, pattern_cats in _KEYWORD_PATTERNS:
+        if pattern.search(text):
+            cats |= pattern_cats
+    return cats or {"INVOICE_HEADER"}
+
+
+def _page_category(inv_by_page: dict[int, dict], page: int) -> str:
+    return str(inv_by_page.get(page, {}).get("category", "")).upper()
+
+
+def _is_payment_page(page: int, inv_by_page: dict[int, dict], page_facts: dict) -> bool:
+    if _PAYMENT_PAGE_RE.search(str(inv_by_page.get(page, {}).get("description", ""))):
+        return True
+    return bool((page_facts.get(page) or {}).get("entities", {}).get("payment_markers"))
+
+
+def select_evidence_pages(
+    anchor: int,
+    inv_by_page: dict[int, dict],
+    available: set[int],
+    rule_needs: list[set[str]],
+    max_pages: int,
+    page_facts: Optional[dict] = None,
+) -> tuple[list[int], list[int]]:
+    """
+    Pick the pages sent to the vision model: (selected, dropped).
+
+    Candidates are the anchor, every page whose category some rule needs (or every page
+    when a rule needs ALL), plus page 1. Under the cap all candidates are kept. Over it,
+    pages are picked round-robin across the needed categories (most-needed first), so each
+    category gets one page before any gets a second; within a category, pages with payment
+    evidence come first. The anchor is always kept. Deterministic for a given input.
+    """
+    page_facts = page_facts or {}
+    cap = max(1, int(max_pages))
+    wants_all = any("ALL" in needs for needs in rule_needs)
+    target = set(_BASELINE_CATEGORIES)
+    for needs in rule_needs:
+        target |= needs - {"ALL"}
+
+    candidates: list[int] = [anchor] if anchor in available else []
+    for p in sorted(inv_by_page):
+        if p in available and p not in candidates and (wants_all or _page_category(inv_by_page, p) in target):
+            candidates.append(p)
+    if 1 in available and 1 not in candidates:
+        candidates.append(1)
+    if len(candidates) <= cap:
+        return candidates, []
+
+    def _demand(cat: str) -> int:
+        return sum(1 for needs in rule_needs if cat in needs or "ALL" in needs)
+
+    queues: dict[str, list[int]] = {}
+    for p in candidates:
+        if p == anchor:
+            continue
+        queues.setdefault(_page_category(inv_by_page, p), []).append(p)
+    for pages in queues.values():
+        pages.sort(key=lambda p: (not _is_payment_page(p, inv_by_page, page_facts), p))
+    order = sorted(
+        queues,
+        key=lambda c: (
+            -_demand(c),
+            _CATEGORY_ORDER.index(c) if c in _CATEGORY_ORDER else len(_CATEGORY_ORDER),
+            c,
+        ),
+    )
+    # The anchor's category is already covered, so it waits until the other categories had a turn.
+    anchor_cat = _page_category(inv_by_page, anchor) if anchor in candidates else None
+    if anchor_cat in order:
+        order.remove(anchor_cat)
+        order.append(anchor_cat)
+
+    picked: list[int] = [anchor] if anchor in candidates else []
+    while len(picked) < cap and any(queues[c] for c in order):
+        for cat in order:
+            if len(picked) >= cap:
+                break
+            if queues[cat]:
+                picked.append(queues[cat].pop(0))
+
+    rest = sorted(p for p in picked if p != anchor)
+    selected = ([anchor] if anchor in picked else []) + rest
+    dropped = sorted(p for p in candidates if p not in selected)
+    return selected, dropped
+
+
+def missing_evidence_categories(
+    needs: set[str], inv_by_page: dict[int, dict], pages_sent: list[int]
+) -> list[str]:
+    """Categories the rule needs that exist in the document but were not among the pages sent."""
+    doc_cats = {_page_category(inv_by_page, p) for p in inv_by_page} - _NON_EVIDENCE_CATEGORIES
+    wanted = doc_cats if "ALL" in needs else (needs & doc_cats)
+    sent_cats = {_page_category(inv_by_page, p) for p in pages_sent}
+    return sorted(wanted - sent_cats)
 
 
 def check_compliance_visual(
@@ -241,35 +392,22 @@ def check_compliance_visual(
 
     inv_by_page = {int(e.get("page", 0)): e for e in (state.page_inventory or []) if e.get("page")}
 
-    def _rule_target_categories(rule_text: str) -> set[str]:
-        txt = rule_text.lower()
-        cats = {"INVOICE_HEADER"}
-        if any(k in txt for k in ("payment", "proof", "justificante", "receipt", "bank")):
-            cats |= {"SIGNATURE_STAMP", "SUPPORTING_DOC", "TOTALS"}
-        if any(k in txt for k in ("translation", "translated", "idioma", "language")):
-            cats |= {"SUPPORTING_DOC", "COVER_PAGE"}
-        if any(k in txt for k in ("quote", "presupuesto", "budget", "supplier")):
-            cats |= {"SUPPORTING_DOC", "LINE_ITEMS"}
-        if any(k in txt for k in ("stamp", "seal", "signature", "signed")):
-            cats |= {"SIGNATURE_STAMP"}
-        return cats
-
-    target_categories: set[str] = {"INVOICE_HEADER", "SIGNATURE_STAMP"}
-    for r in visual_rules:
-        target_categories |= _rule_target_categories(f"{r.rule_name} {r.check_value or ''}")
-
-    selected_pages: list[int] = []
-    if page_num not in selected_pages:
-        selected_pages.append(page_num)
-    for p, e in sorted(inv_by_page.items()):
-        cat = str(e.get("category", "")).upper()
-        if cat in target_categories and p not in selected_pages:
-            selected_pages.append(p)
-    # Backstop: include first page if still missing
-    if 1 in page_by_num_full and 1 not in selected_pages:
-        selected_pages.append(1)
-
-    selected_pages = [p for p in selected_pages if p in page_by_num_full][: max(1, int(max_evidence_pages))]
+    rule_needs = {r.rule_id: rule_evidence_categories(r) for r in visual_rules}
+    selected_pages, pages_dropped = select_evidence_pages(
+        page_num,
+        inv_by_page,
+        set(page_by_num_full),
+        list(rule_needs.values()),
+        max_evidence_pages,
+        page_facts=state.page_facts,
+    )
+    if pages_dropped:
+        logger.info(
+            "check_compliance_visual: page cap %d reached; sending %s, dropped %s",
+            max_evidence_pages,
+            selected_pages,
+            pages_dropped,
+        )
 
     # Traceability: OCR of every page that may be sent, so the model can cite lines.
     ocr_by_page: dict[int, Any] = {}
@@ -349,12 +487,13 @@ def check_compliance_visual(
         ("single_anchor", [page_num], 1280),
     ]
 
-    def _run_ladder(pbn: dict[int, str]) -> tuple[dict | None, str, str | None, list[int]]:
+    def _run_ladder(pbn: dict[int, str]) -> tuple[dict | None, str, str | None, list[int], str]:
         seen_signatures: set[tuple[tuple[int, ...], int]] = set()
         ver: dict | None = None
         raw_l = ""
         err: str | None = None
         finals = list(selected_pages)
+        used = ""
         for tag, pages_try, max_side in attempt_plans:
             pages_try = [p for p in pages_try if p in pbn]
             if not pages_try:
@@ -377,8 +516,11 @@ def check_compliance_visual(
                 cite_lines=trace_ocr is not None,
             )
             ver, raw_l, err = _run_vision(images_b64, prompt)
+            if ver is not None and not isinstance(ver, dict):
+                ver, err = None, f"Vision model returned {type(ver).__name__}, expected a JSON object"
             if ver is not None:
                 finals = pages_try
+                used = tag
                 if tag != "multi_resized":
                     logger.info(
                         "check_compliance_visual: succeeded after %s (%d image(s), max_side=%d)",
@@ -392,19 +534,22 @@ def check_compliance_visual(
                 tag,
                 err,
             )
-        return ver, raw_l, err, finals
+        return ver, raw_l, err, finals, used
 
     verdicts: dict | None = None
     raw = ""
     last_err: str | None = None
     final_pages = list(selected_pages)
+    attempt = ""
 
     if page_by_num_medium:
-        verdicts, raw, last_err, final_pages = _run_ladder(page_by_num_medium)
+        verdicts, raw, last_err, final_pages, attempt = _run_ladder(page_by_num_medium)
+        attempt = f"medium:{attempt}" if attempt else ""
     if verdicts is None:
         if page_by_num_medium:
             logger.info("check_compliance_visual: hybrid promoting to full-res disk images for visual check")
-        verdicts, raw, last_err, final_pages = _run_ladder(page_by_num_full)
+        verdicts, raw, last_err, final_pages, attempt = _run_ladder(page_by_num_full)
+        attempt = f"full:{attempt}" if attempt else ""
 
     if verdicts is None:
         return {"success": False, "error": last_err or "Visual model returned no verdict", "raw_response": raw}
@@ -412,33 +557,54 @@ def check_compliance_visual(
     new_results = []
     passed_ids = []
     failed_ids = []
+    not_evaluated: list[dict] = []
     validated_verdicts: dict[str, VisualVerdictModel] = {}
+    if attempt and not attempt.endswith("multi_resized"):
+        logger.info("check_compliance_visual: verdicts from attempt %s, pages %s", attempt, final_pages)
 
     for rule in visual_rules:
         raw_verdict = verdicts.get(rule.rule_id)
-        verdict = VisualVerdictModel.model_validate(raw_verdict or {})
+        verdict = VisualVerdictModel.model_validate(raw_verdict if isinstance(raw_verdict, dict) else {})
         validated_verdicts[rule.rule_id] = verdict
         passes = verdict.passes
         confidence = float(verdict.confidence)
         observation = verdict.observation
 
-        status = "passed" if passes else "failed"
+        # A verdict is only meaningful if the model saw the pages the rule needs and answered it.
+        missing_cats = missing_evidence_categories(rule_needs[rule.rule_id], inv_by_page, final_pages)
+        skip_reason = ""
+        if missing_cats:
+            skip_reason = (
+                f"Not evaluated: evidence pages not sent ({', '.join(missing_cats)}); "
+                f"vision call {attempt or 'unknown'} saw only page(s) {final_pages}"
+            )
+        elif _verdict_missing(raw_verdict):
+            skip_reason = "Not evaluated: vision model returned no verdict for this rule"
+
+        if skip_reason:
+            status = "skipped"
+            message = skip_reason
+        else:
+            status = "passed" if passes else "failed"
+            message = observation
         rr = RuleResult(
             rule_id=rule.rule_id,
             rule_name=rule.rule_name,
             field_id=rule.field_id,
             status=status,
             severity=rule.severity,
-            message=observation,
+            message=message,
             agent_notes=f"visual check page {page_num}, confidence={confidence:.2f}",
         )
         new_results.append(rr)
-        if passes:
+        if status == "passed":
             passed_ids.append(rule.rule_id)
-        else:
+        elif status == "failed":
             failed_ids.append(rule.rule_id)
+        else:
+            not_evaluated.append({"rule_id": rule.rule_id, "severity": rule.severity, "reason": skip_reason})
 
-        logger.info(f"  visual [{status.upper()}] {rule.rule_id}: {observation} (conf={confidence:.2f})")
+        logger.info(f"  visual [{status.upper()}] {rule.rule_id}: {message} (conf={confidence:.2f})")
 
         # Evidence tracking for visual rules.
         required_slots = required_slots_for_rule(rule)
@@ -481,9 +647,20 @@ def check_compliance_visual(
             "missing_slots": missing_slots,
             "refs": refs,
         }
+        if skip_reason:
+            # Marks a terminal "not evaluated" outcome so check_compliance does not re-queue it.
+            state.rule_evidence[rule.rule_id][VISUAL_SKIP_KEY] = skip_reason
         if trace_ocr is not None:
             state.rule_evidence[rule.rule_id]["trace"] = _visual_trace_record(
-                verdict, raw_verdict, page_num, final_pages, ocr_by_page, trace_ocr_max_chars_per_page
+                verdict,
+                raw_verdict,
+                page_num,
+                final_pages,
+                ocr_by_page,
+                trace_ocr_max_chars_per_page,
+                pages_dropped=pages_dropped,
+                attempt=attempt,
+                skip_reason=skip_reason,
             )
         policy_refs = _policy_refs_for_rule(state, rule)
         state.rule_policy_refs[rule.rule_id] = policy_refs
@@ -495,7 +672,8 @@ def check_compliance_visual(
         elif status == "failed":
             state.rule_state[rule.rule_id] = "finalized_fail"
         else:
-            state.rule_state[rule.rule_id] = "candidate"
+            # Re-running the same call would see the same pages; a human has to judge it.
+            state.rule_state[rule.rule_id] = "needs_review"
 
     backfilled_fields: list[str] = []
     if store is not None:
@@ -527,9 +705,12 @@ def check_compliance_visual(
         "success": True,
         "page_num": page_num,
         "evidence_pages": final_pages,
+        "pages_dropped": pages_dropped,
+        "attempt": attempt,
         "visual_rules_checked": len(visual_rules),
         "passed": len(passed_ids),
         "failed_errors": [{"rule_id": r.rule_id, "message": r.message} for r in errors],
         "failed_warnings": [{"rule_id": r.rule_id, "message": r.message} for r in warnings],
+        "not_evaluated": not_evaluated,
         "backfilled_fields": backfilled_fields,
     }

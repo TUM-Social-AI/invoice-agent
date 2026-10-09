@@ -51,6 +51,7 @@ from src.tools.tools import (
     _union_bboxes,
     _save_image_crop,
 )
+from src.tools.compliance_eval import visual_not_evaluated_ids
 from src.trace.evidence import restrict_citations
 from src.trace.ocr_cache import lines_in_box, lines_with_ids, page_ocr
 from src.trace.orientation import fix_orientation
@@ -899,18 +900,26 @@ def make_finish(ctx: ToolContext):
         state.finish_reason = kwargs.get("reason", "done")
         has_flags = any(f.flagged_for_review for f in state.extracted_fields.values())
 
+        # Visual rules the vision call could not judge are neither passed nor failed:
+        # they route the run to human review instead of blocking or failing it.
+        visual_unevaluated = visual_not_evaluated_ids(state)
+        visual_error_unevaluated = sorted(
+            rr.rule_id for rr in state.rule_results
+            if rr.rule_id in visual_unevaluated and rr.severity == "error"
+        )
         error_failed = any(
             (rr.status == "failed" and rr.severity == "error") for rr in state.rule_results
         )
         error_skipped = any(
-            (rr.status == "skipped" and rr.severity == "error" and not is_non_blocking_skip(rr))
+            (rr.status == "skipped" and rr.severity == "error" and not is_non_blocking_skip(rr)
+             and rr.rule_id not in visual_unevaluated)
             for rr in state.rule_results
         )
         unresolved_error_evidence = False
         for rr in state.rule_results:
             if rr.severity != "error" or is_non_blocking_skip(rr):
                 continue
-            if rr.status == "passed":
+            if rr.status == "passed" or rr.rule_id in visual_unevaluated:
                 continue
             ev = state.rule_evidence.get(rr.rule_id, {})
             missing = ev.get("missing_slots", [])
@@ -922,7 +931,8 @@ def make_finish(ctx: ToolContext):
         all_errors_resolved = not error_failed and not error_skipped and not unresolved_error_evidence
 
         if all_errors_resolved:
-            state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.PASSED
+            needs_review = has_flags or bool(visual_error_unevaluated)
+            state.status = AgentStatus.NEEDS_REVIEW if needs_review else AgentStatus.PASSED
         else:
             state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.FAILED
 
@@ -932,6 +942,11 @@ def make_finish(ctx: ToolContext):
         if not all_errors_resolved:
             status_explanation = (
                 "Run status reflects blocking error-severity rule failures or incomplete error evidence."
+            )
+        elif visual_error_unevaluated:
+            status_explanation = (
+                "No blocking error-severity failures, but error-severity visual rules were not "
+                f"evaluated ({', '.join(visual_error_unevaluated)}); a human has to check them."
             )
         elif warning_failures:
             status_explanation = (
@@ -953,6 +968,7 @@ def make_finish(ctx: ToolContext):
                 "unresolved_error_evidence": unresolved_error_evidence,
                 "error_failed": error_failed,
                 "error_skipped": error_skipped,
+                "visual_not_evaluated": sorted(visual_unevaluated),
             },
         }
     return _finish

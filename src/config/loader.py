@@ -362,6 +362,7 @@ def load_config(config_dir: str = "config/csv") -> ConfigStore:
                 enabled=True,
                 rule_group=rg_raw,
                 issue_code=(row.get("issue_code") or "").strip(),
+                evidence_categories=row.get("evidence_categories") or "",
             )
             store.compliance_rules.setdefault(type_id, []).append(cr)
     total_rules = sum(len(v) for v in store.compliance_rules.values())

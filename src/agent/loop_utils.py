@@ -139,6 +139,11 @@ def summarize_tool_result(
             )
         if visual_pending:
             details.append(f"Visual checks pending: {visual_pending}")
+        for s in result.get("visual_not_evaluated", []) or []:
+            details.append(
+                f"NOT EVALUATED (needs human review): {s['rule_id']} [{s['severity']}] — "
+                f"{clip(str(s.get('reason', '')))}"
+            )
         return ToolResultSummary(success=success, primary=primary, details=details)
     if tool_name == "check_compliance_visual":
         errors = result.get("failed_errors", [])
@@ -153,6 +158,13 @@ def summarize_tool_result(
             details.append(f"ERROR: {clip(str(e))}")
         for w in warnings:
             details.append(f"WARN: {clip(str(w))}")
+        for s in result.get("not_evaluated", []) or []:
+            details.append(
+                f"NOT EVALUATED (needs human review): {s['rule_id']} [{s['severity']}] — "
+                f"{clip(str(s.get('reason', '')))}"
+            )
+        if result.get("pages_dropped"):
+            details.append(f"Pages not sent (page cap): {result['pages_dropped']}")
         bf = result.get("backfilled_fields") or []
         if bf:
             details.append(f"Backfilled fields: {', '.join(str(x) for x in bf)}")
