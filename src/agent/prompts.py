@@ -38,7 +38,8 @@ compress_pages(dpi=48, quality=30, max_width=1400)
     Low-res copies are remembered separately so convert_pdf_to_images can still render
     full quality for extraction without losing the thumbnails.
 classify_document_type()
-  → vision model identifies invoice type from first page; call after pages are rendered
+  → identifies the invoice type from the page inventory of all pages (page 1 image when no
+    inventory exists); call after inventory_pages
 convert_pdf_to_images(dpi=150)
   → render all pages at full quality into output/pages/
 crop_region(image_path, region, page_num, custom_bbox=null)

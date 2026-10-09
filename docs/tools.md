@@ -23,7 +23,7 @@ Each **`chat_json`** call is one reasoning/planning/reflection step. Each **`gen
 | Location | Calls | Notes |
 |----------|--------|--------|
 | [`src/tools/page_inventory.py`](../src/tools/page_inventory.py) `inventory_pages` | **One per PDF page** | Dominates for long documents; `compress_pages` first uses smaller thumbnails but still one request per page. |
-| [`src/tools/vision_llm.py`](../src/tools/vision_llm.py) `classify_document_type` | 1 | First page classification. |
+| [`src/tools/vision_llm.py`](../src/tools/vision_llm.py) `classify_document_type` | 1 | Classification from the page inventory (text only); page 1 at 150 DPI when there is no inventory. |
 | [`src/tools/vision_llm.py`](../src/tools/vision_llm.py) `extract_fields_vision` | Per extraction (often per page / crop group) | Full-res or medium image bytes; OCR text capped by `ocr_prompt_max_chars`. |
 | [`src/tools/compliance_visual.py`](../src/tools/compliance_visual.py) `check_compliance_visual` | Batched | Multiple pages in one call, capped by `visual_max_evidence_pages`, images resized before send. |
 
