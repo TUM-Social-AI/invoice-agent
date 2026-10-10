@@ -80,11 +80,10 @@ def classify_document_type(
             logger.info(f"  classify: rendered page 1 at {CLASSIFY_DPI} DPI (was a thumbnail)")
             first_page = legible
 
-    # agent_context holds per-type keywords and "do not classify as X" rules.
-    # They only reached the extraction prompt before; the classifier needs them too.
+    # description alone drives classification; agent_context stays reserved for the
+    # extraction prompt, where its "Buscar:" page labels and field hints belong.
     type_descriptions = "\n".join(
         f'- "{t.invoice_type_id}": {t.display_name} — {t.description}'
-        + (f"\n  Context: {t.agent_context}" if t.agent_context else "")
         for t in store.invoice_types.values()
     )
 
