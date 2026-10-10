@@ -2,17 +2,54 @@
 """
 Invoice Compliance Agent — CLI entrypoint.
 
-Usage:
-  python main.py                                         # process all PDFs in invoices/
-  python main.py --pdf invoices/invoice.pdf              # single file, auto-detect type
-  python main.py --pdf invoices/invoice.pdf --type VIAJES  # override type
-  python main.py --pdf invoices/ --learn                 # learning mode: compare to *_truth.json files
-  python main.py --list-types                            # show configured types
+Ways to run
+-----------
+Input source (mutually exclusive: --pdf and --google-drive-folder-id cannot be combined):
+  python main.py                                         # all PDFs in invoices/ (or the Google Drive
+                                                         #   folder from sources.google_drive in config, if set)
+  python main.py --pdf invoices/invoice.pdf              # single local file, auto-detect type
+  python main.py --pdf invoices/                         # batch: every PDF in a local folder
+  python main.py --google-drive-folder-id <FOLDER_ID>    # batch: every PDF in a Google Drive folder
+
+Options for processing runs:
+  --type VIAJES                  override the auto-detected invoice type (see --list-types)
+  --output DIR                   output directory (default: output/); batch runs also write
+                                 DIR/canonical_workbook/*.csv and, if configured, sync Google Sheets
+  --config PATH                  config file (default: $CONFIG_PATH or config/config.yaml)
+  --local-config                 load config CSVs from local config_dir even when the Google Drive
+                                 config_folder is enabled (alias: --no-drive-config)
+  --presentation                 live-demo mode: Rich phase-aware output, INFO logs suppressed
+  --batch-summary-csv PATH       batch runs: also write the accuracy summary to a CSV
+  --learn                        learning mode (see below)
+
+Utility commands (no invoices are processed):
+  python main.py --list-types                            # show configured invoice types
+  python main.py --reset-learnings [TYPE [CATEGORY]]     # wipe learnings (backs up to .bak first);
+                                                         #   no args = all, TYPE = one type,
+                                                         #   TYPE CATEGORY = one category; add -y/--yes
+                                                         #   to skip the confirmation prompt
+  python main.py --drive-auth                            # Google Drive auth: OAuth flow + token save, or
+                                                         #   service-account credential validation
+                                                         #   (optional: --drive-oauth-client-secret PATH)
+  python main.py --upload-workbook-csv-dir DIR \\
+      (--sheets-spreadsheet-id ID | --sheets-create-title TITLE)
+                                                         # push an existing canonical workbook CSV
+                                                         #   directory to Google Sheets
+
+Scheduled worker (separate entrypoint, used by the AWS container task):
+  CONFIG_PATH=config/config.yaml python -m src.orchestration.worker
+  One invocation = one poll of the input folder with dedup, then exit. Local rehearsal:
+  DRIVE_CLIENT=local LOCAL_INPUT_DIR=invoices LOCAL_OUTPUT_DIR=output/drive \\
+      python -m src.orchestration.worker
 
 Learning mode:
-  Place a <filename>_truth.json alongside each PDF. The agent processes normally,
-  then compares its results to the ground truth and writes learnings to learnings.md.
+  Place a <filename>_truth.json alongside each PDF (or configure a ground-truth CSV). The agent
+  processes normally, then compares its results to the ground truth and writes learnings to
+  learnings.md. Without ground truth for a file, reflection is skipped.
   See invoices/example_truth.json for the expected format.
+  Example: python main.py --pdf invoices/ --learn
+
+Environment: variables are loaded from .env (repo root, then current directory).
 """
 
 import argparse
