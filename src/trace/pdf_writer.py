@@ -34,6 +34,12 @@ GREEN = (0.10, 0.55, 0.25)
 INK = (0.10, 0.10, 0.12)
 QUIET = (0.40, 0.40, 0.45)
 
+# Box stroke widths (points). Thick enough that colour and dashing read without the legend.
+FIELD_WIDTH = 1.8           # extracted value located on the page
+FIELD_UNSURE_WIDTH = 1.4    # candidate location or label area only (dashed)
+FINDING_WIDTH = 2.6         # evidence of a failed rule / warning
+FINDING_EXPECTED_WIDTH = 2.2  # where a missing item was expected (dashed)
+
 STATUS_COLOR = {"failed": RED, "warning": ORANGE, "not_evaluated": GREY, "passed": GREEN}
 STATUS_LABEL = {"failed": "FAILED", "warning": "WARNING", "not_evaluated": "NOT EVALUATED", "passed": "PASSED"}
 QUALITY_LABEL = {
@@ -125,7 +131,7 @@ class Mark:
     color: tuple
     label: str
     dashed: bool = False
-    width: float = 0.9
+    width: float = FIELD_WIDTH
     short: str = ""  # fallback label (field name / finding ref) when the full one does not fit
     tag: str = ""    # last resort: tiny tag on the box, full label listed in the margin
 
@@ -196,7 +202,8 @@ class Overlay:
         c.saveState()
         c.setStrokeColorRGB(*m.color)
         c.setLineWidth(m.width)
-        c.setDash(2.2, 1.6) if m.dashed else c.setDash()
+        # Dash length scales with the stroke so dashed boxes stay distinct from solid ones.
+        c.setDash(3 * m.width, 2 * m.width) if m.dashed else c.setDash()
         c.rect(x1, y1, x2 - x1, y2 - y1, stroke=1, fill=0)
         c.restoreState()
 
@@ -296,7 +303,7 @@ class Overlay:
         for m in self.marks:
             self._draw_box(m)
         # Compliance labels first (they are added after the field marks but matter most).
-        for m in sorted(self.marks, key=lambda m: m.width < 1.0):
+        for m in sorted(self.marks, key=lambda m: m.width < FINDING_EXPECTED_WIDTH):
             self._label(m)
         for args in self.connectors:
             self._draw_connector(*args)
@@ -656,12 +663,12 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
                 color = ORANGE if f["needs_review"] else BLUE
                 lab = f"{name} = {value} ({f['confidence']:.2f}) ?"
                 for k, b in enumerate(ev["boxes"]):
-                    ov.add(Mark(b, color, lab if k == 0 else "", dashed=True, width=0.7, short=f"{name} ?", tag=f"{tag}?"))
+                    ov.add(Mark(b, color, lab if k == 0 else "", dashed=True, width=FIELD_UNSURE_WIDTH, short=f"{name} ?", tag=f"{tag}?"))
             elif q == "ambiguous":
                 for k, b in enumerate(ev["boxes"]):
-                    ov.add(Mark(b, GREY, f"{name}? = {value}" if k == 0 else "", dashed=True, width=0.7, short=f"{name}?", tag=f"{tag}?"))
+                    ov.add(Mark(b, GREY, f"{name}? = {value}" if k == 0 else "", dashed=True, width=FIELD_UNSURE_WIDTH, short=f"{name}?", tag=f"{tag}?"))
             elif q == "anchor":
-                ov.add(Mark(ev["boxes"][0], GREY, f"{name} (label area)", dashed=True, width=0.7, short=name, tag=tag))
+                ov.add(Mark(ev["boxes"][0], GREY, f"{name} (label area)", dashed=True, width=FIELD_UNSURE_WIDTH, short=name, tag=tag))
         # Compliance layer: boxes on the scan, comment icons in the margin strip.
         for f in findings:
             color = STATUS_COLOR[f["status"]]
@@ -674,9 +681,9 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
                 continue
             for b in boxes:
                 grown = [max(0.0, b[0] - 0.004), max(0.0, b[1] - 0.004), min(1.0, b[2] + 0.004), min(1.0, b[3] + 0.004)]
-                ov.add(Mark(grown, color, tag, width=1.2, short=f["ref"], tag=f["ref"]))
+                ov.add(Mark(grown, color, tag, width=FINDING_WIDTH, short=f["ref"], tag=f["ref"]))
             for b in exp_boxes:
-                ov.add(Mark(b, color, f"{tag} expected", dashed=True, width=1.0, short=f"{f['ref']} expected", tag=f["ref"]))
+                ov.add(Mark(b, color, f"{tag} expected", dashed=True, width=FINDING_EXPECTED_WIDTH, short=f"{f['ref']} expected", tag=f["ref"]))
             anchor = (boxes or exp_boxes or [None])[0]
             dy = ov.icon_slot((anchor[1] * g.disp_h) if anchor else 24.0)
             dx = g.disp_w + 6
