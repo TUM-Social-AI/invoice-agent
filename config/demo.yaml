@@ -1,0 +1,345 @@
+# Short live demo: one invoice type (A.7 services), six fields and one rule (R_SRV_103, invoice
+# arithmetic incl. amount in words), with English labels and messages in config/csv_demo.
+# Otherwise identical to config/config.yaml. Run: python -m src.ui --config config/demo.yaml
+
+# LLM backend: ollama (local), gemini (Google AI API key), or openai (OpenAI API key).
+llm:
+  provider: openai
+  # Optional shared HTTP timeouts (seconds); provider blocks can override (see ollama / gemini).
+  # timeout_chat_s: 300
+  # timeout_generate_s: 600
+  # Per-run caps for remote providers (Gemini). When any limit is set, MeteredLLMProvider wraps API calls.
+  # Raise limits if you process very large PDFs (inventory uses one vision request per page).
+  remote_guard:
+    max_chat_requests_per_run: 45
+    max_generate_requests_per_run: 150
+    max_llm_requests_per_run: 220
+    max_total_token_count_per_run: 400000
+    warn_token_threshold: 120000
+
+# Gemini (Google AI). Set llm.provider: gemini and GOOGLE_API_KEY (or gemini.api_key_env).
+# Use current stable model IDs (gemini-2.0-flash is deprecated and may return 404 — see AI Studio docs).
+gemini:
+  api_key_env: GOOGLE_API_KEY
+  # Reasoning loop (tool JSON): Flash keeps latency/cost low.
+  reasoning_model: gemini-2.5-flash
+  # Vision (inventory, extraction, visual compliance): stronger model → better field quality; higher cost.
+  vision_model: gemini-2.5-pro
+  timeout_generate_s: 600
+  # Optional: merge/override llm.remote_guard for Gemini-only stricter caps, e.g. max_generate_requests_per_run: 120
+
+# OpenAI. Set llm.provider: openai and OPENAI_API_KEY (or openai.api_key_env).
+openai:
+  api_key_env: OPENAI_API_KEY
+  reasoning_model: o3-mini
+  vision_model: gpt-4.1-mini
+  timeout_generate_s: 600
+  # base_url: https://api.openai.com/v1
+  # Rate-limit retries (429) are handled automatically with exponential backoff (up to 5 attempts, max 60s wait).
+  # remote_guard: { ... }
+
+ollama:
+  base_url: "http://localhost:11434"
+
+  # Vision model — used for page classification, field extraction, and visual compliance checks.
+  # qwen2.5vl:32b  → ~24 GB RAM  | strong invoice/OCR accuracy, fits with reasoning model  ← RECOMMENDED
+  # qwen2.5vl:72b  → ~57 GB RAM  | best accuracy, run alone or with a tiny reasoning model
+  # qwen2.5vl:7b   → ~6 GB RAM   | current default, weakest on dense tables
+  vision_model: "qwen2.5vl:7b" # ollama pull qwen2.5vl:7b
+
+  # Reasoning model — used only for the agentic loop (tool selection, JSON routing).
+  # Speed and JSON reliability matter more than raw intelligence here.
+  # qwen3:1.7b     → ~2 GB RAM   | #1 tool-calling accuracy in class (score 0.960)  ← RECOMMENDED
+  # qwen3:4b       → ~2.5 GB RAM | slightly higher accuracy ceiling, more headroom
+  # qwen2.5:7b     → ~5 GB RAM   | current default, older generation
+  reasoning_model: "qwen3:1.7b" # ollama pull qwen3:1.7b
+
+  # Total RAM with both loaded: ~26 GB (fits easily in 96 GB)
+  #
+  # Request timeouts (seconds). Increase if your local models are slow under load.
+  timeout_chat_s: 240
+  timeout_generate_s: 420
+  # Optional context caps passed to Ollama options.num_ctx.
+  # Keep vision/generate lower to avoid huge KV-cache pressure on large VL models.
+  num_ctx_chat: 8192
+  num_ctx_generate: 16384
+
+config_dir: "config/csv_demo"
+
+learnings_path: "learnings/learnings.md"
+
+agent:
+  max_turns: 30
+  max_field_retries: 5
+  confidence_threshold: 0.65 # below this → blocking human-review flag
+  batch_review_threshold: 0.85 # between confidence_threshold and this → non-blocking batch review
+  # Day/month order for numeric dates read during extraction (DMY or MDY) when both are <= 12.
+  extraction_date_order: DMY
+  # Which page wins when several documents in one bundle show the same field (an internal funds
+  # request and the supplier's invoice both carry a number, a date, a party and an amount).
+  # Per field: document roles from the page inventory, best first. A value read on a higher-ranked
+  # page replaces one from a lower-ranked page whatever the confidences, once it reaches
+  # confidence_threshold; roles not listed rank last. Fields not listed keep the most confident value.
+  # Roles: funds_request, internal_other, supplier_invoice, supplier_other, payment_proof, other.
+  document_role_priority:
+    # Reference and date of the expense: the internal funds request number (reviewer convention).
+    invoice_number: &request_first [funds_request, supplier_invoice, supplier_other, payment_proof]
+    invoice_date: *request_first
+    # Parties and amounts: the supplier's own invoice; the payer's internal forms last.
+    vendor_name: &supplier_first [supplier_invoice, supplier_other, payment_proof, other, internal_other, funds_request]
+    vendor_tax_id: *supplier_first
+    beneficiary: *supplier_first
+    employee_name: *supplier_first
+    total_amount: *supplier_first
+    net_amount: *supplier_first
+    vat_amount: *supplier_first
+    currency: *supplier_first
+    # How it was paid: the payment evidence first, a "Payé par" line on the request last.
+    payment_method: [payment_proof, supplier_invoice, supplier_other, other, internal_other, funds_request]
+  # Before check_compliance, extract the fields above from every page with one of these roles that
+  # no extraction covered yet (the agent often skips the funds request). [] disables.
+  auto_extract_page_roles: [funds_request, supplier_invoice, payment_proof]
+  # true: OCR label matching fills fields directly (label + adjacent text) or crops around them
+  # before the vision call. false: OCR only goes into the vision prompt as context and the vision
+  # model reads every field from the full page (label matching took line totals and stamp text).
+  ocr_direct_extraction: false
+  planning_enabled: true # generate an execution plan before the main loop
+  fallback_reasoning_model: null # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
+  # Processing orchestration:
+  # - "loop":     primary agentic mode (LLM chooses next tool call)
+  # - "pipeline": deterministic debug fallback
+  orchestration: "loop"
+  # Agentic profile:
+  # - "patterned": macro/composite behavior (default for stable runs)
+  # - "detailed":  finer-grained tool usage (OCR/crop/localization-heavy)
+  loop_profile: "patterned"
+
+  # Tool exposure for the LLM (loop mode only).
+  # Defaults for patterned profile:
+  # - pipeline group ON (stable composite tool surface)
+  # - granular group OFF (unless you explicitly want detailed micro-tools)
+  # - learnings CRUD tools hidden (agent reads hydrated learnings context)
+  tool_groups_enabled: ["pipeline"]
+  tools_extra_allow: []
+  tools_extra_deny: ["install_package"]
+  learnings_tools_enabled: false
+
+  # Prompt sizing: auto uses larger caps for remote LLM (e.g. Gemini), smaller for Ollama.
+  # Omit or set learnings/history keys to null to use profile defaults; explicit integers override.
+  prompt_profile: auto
+  learnings_inject_enabled: true
+  # Richer learnings context for remote (Gemini) runs; raises input tokens slightly.
+  learnings_max_chars: 16000
+  planning_learnings_max_chars: null
+
+  # Logging preview caps (0 = unlimited for console logs).
+  log_line_max_chars: 250
+  # Tool-output preview in recent-actions JSON (remote profile default ~900).
+  history_preview_chars: 900
+
+  # State summary in each agent turn: avoid huge prompts on multi-page PDFs.
+  state_summary_max_page_lines: 28
+  state_summary_max_inventory_lines: 50
+  state_summary_inventory_desc_chars: 180
+
+  # Max characters of Surya OCR text injected into vision extraction prompts (full page + crops).
+  ocr_prompt_max_chars: 24000
+  # Multi-page visual compliance: max page images sent in one visual call.
+  visual_max_evidence_pages: 8
+
+  # Compliance rule groups (see rule_group column in config/csv/compliance_rules.csv).
+  #   general:       any funder (invoice arithmetic, document consistency, non-eligible costs, three quotes)
+  #   aexcid:        AEXCID / Junta de Extremadura (Decree 5/2019): stamp, payment proof, invoice contents, travel caps
+  #   xunta_galicia: Galicia grant paperwork (Xunta stamp, PR811A, audit/evaluation caps)
+  #   spain:         Spanish VAT rates (4/10/21 %); only for invoices issued in Spain
+  # Chad (AEXCID-funded): general + aexcid.
+  active_rule_groups:
+    - general
+    - aexcid
+
+  # Ground truth CSV: compared after every run when a row matches the PDF (or use <stem>_truth.json).
+  # Prefer ISO dates (YYYY-MM-DD) in the CSV; slash dates use ground_truth_date_parse for ambiguous days/months.
+  #
+  # Scoring uses ONLY columns listed below AND only field_names that exist for the detected invoice_type_id
+  # (see config/csv/extraction_fields.csv). Example: "travel_purpose" is ignored for PERS_LOCAL, so payroll rows
+  # should map payroll columns to employee_name, pay_period, etc.
+  ground_truth_csv_path: "config/csv/ground_truth.csv"
+  # Optional per-invoice-type CSV (takes precedence over ground_truth_csv_path when set).
+  # ground_truth_csv_by_invoice_type:
+  #   VIAJES: "config/csv/ground_truth_viajes.csv"
+  ground_truth_csv_by_invoice_type: {}
+  ground_truth_source_column: "Source file"
+  ground_truth_id_column: "Id"
+  # Expected invoice_type_id per row (scored as type_correct).
+  ground_truth_invoice_type_column: "Invoice Type"
+  # CSV column header -> extraction field_name (see config/csv/extraction_fields.csv).
+  # A list gives candidate field_names in priority order; the first one the detected
+  # invoice type defines is scored.
+  # Several rows with the same Source file (two invoices in one PDF) skip field scoring.
+  ground_truth_column_map:
+    "Invoice Number": "invoice_number"
+    "Date": "invoice_date"
+    "Supplier/Issuer": "vendor_name"
+    "Items/Services": "item_description"
+    "Description": ["travel_purpose"]
+    "Total Amount": "total_amount"
+    "Currency": "currency"
+    "Payment Method": "payment_method"
+    "Expense Category": "expense_category"
+    "Client Name": ["beneficiary"]
+    "Employee": "employee_name"
+    "Pay period": "pay_period"
+  # Values treated as equal during comparison: {field_name: {canonical: [aliases]}}.
+  ground_truth_value_aliases:
+    currency:
+      XAF: ["CFA", "FCFA", "F CFA", "F.CFA", "Franc CFA"]
+  # Reviewer findings, one row per (PDF, issue_code). Matched to PDFs like ground_truth_csv_path.
+  # Scored via compliance_rules.csv issue_code: recall on fail/verify issues, false alarms,
+  # overall verdict agreement.
+  compliance_ground_truth_csv_path: "config/csv/compliance_ground_truth.csv"
+  # Issue codes recorded but never scored (need documents the agent never sees).
+  compliance_unscored_issue_codes: ["external_documents"]
+  # Slash-delimited dates when day and month are both ≤12: DMY (EU) or MDY (US).
+  ground_truth_date_parse: "DMY"
+
+  # Optional phase 2 hooks (advanced recovery / more granular extraction).
+  # Keep OFF for patterned profile.
+  micro_tools_phase2: false
+
+  # Page inventory batching: how many page images to send in one vision call during inventory_pages.
+  #   1  — one call per page (safe for Ollama and small models)
+  #   0  — all pages in a single call (fewest requests, but risks TPM rate limits on large docs)
+  #   N  — at most N pages per call — good middle ground for OpenAI/Gemini (recommended: 5)
+  # Ollama should stay at 1 (local models have limited context and can't handle many images at once).
+  inventory_batch_size: 5
+
+  # Batch auto-expansion: when true the agent silently adds un-attempted fields to every
+  # extract_fields_vision call so they get a free ride in the same vision request.
+  # Cuts total turns by 60-70%. Set to false to extract exactly the fields the agent
+  # requests and nothing more (useful for debugging or very large schemas).
+  batch_auto_expand: true
+
+  # Hybrid: medium-res first, then full-res when needed (saves some vision cost). Off = always full-res only.
+  hybrid_extraction: false
+
+  # Default DPI for convert_pdf_to_images when the agent omits dpi (higher = sharper, larger images, more vision tokens).
+  page_dpi: 200
+  planning_timeout_s: 180
+  reflection_timeout_s: 120
+  max_consecutive_failures: 3 # hard-stop a tool after this many back-to-back failures
+  max_same_action_warn: 2 # warn after this many identical consecutive tool calls
+  max_same_action_stop: 5 # hard-stop the loop after this many identical calls
+
+# Project and funder values referenced by compliance rules as {project.<key>} / {compliance.<key>}
+# placeholders in config/csv/compliance_rules.csv (check_value). A rule whose placeholder is unset
+# is reported as "Not configured" and skipped; it does not fail the invoice or block finish.
+project:
+  # AEXCID project file number (expediente) printed on the funding stamp. Empty: any number accepted.
+  file_number: ""
+  # Implementation period, YYYY-MM-DD (grant award decision / actual start date notified to AEXCID;
+  # also in Section C of the financial report). The project_execution_within_period rules are
+  # disabled in compliance_rules.csv until these are known: set both dates and enable those rules.
+  start_date: ""
+  end_date: ""
+  # Full legal names accepted as the invoice client/payer: beneficiary organisation, consortium
+  # partners, local partner. Empty: the client rule only requires a full legal name, not a match.
+  payer_legal_names: []
+
+compliance:
+  # Units of each currency per 1 EUR. Used to convert amounts for EUR limits (cash limit, per-diem caps)
+  # and shown to the vision model next to EUR thresholds. XAF/XOF are pegged at 655.957 per EUR.
+  currency_per_eur:
+    EUR: 1
+    XAF: 655.957
+    XOF: 655.957
+    CFA: 655.957
+    FCFA: 655.957
+  # AEXCID Decree 5/2019 limits (Normas de seguimiento y justificación).
+  cash_limit_eur: 2500                       # cash payments must be below this (4.2.3, PDF p.16)
+  three_quotes_supplies_eur: 15000           # supplies, equipment, services: three quotes above this (PDF p.23, p.29)
+  three_quotes_works_eur: 40000              # construction works: three quotes above this (PDF p.21)
+  accommodation_abroad_max_eur_per_day: 143  # A.6, VAT included
+  subsistence_abroad_max_eur_per_day: 95     # A.6, VAT included
+  fuel_max_eur_per_km: 0.21                  # A.6, when fuel is claimed per km
+
+traceability:
+  # Flagged PDF + trace.json per invoice: every extracted value and compliance finding
+  # boxed where it was found. Turns on OCR line IDs in vision prompts (the model cites the
+  # lines it read) and caches one surya OCR per page under <output>/tmp/ocr/.
+  enabled: true
+  # OCR characters per page added to the visual compliance prompt so the model can cite lines.
+  visual_ocr_max_chars_per_page: 3000
+  # After the run, OCR pages that have no cached OCR yet so values recorded on the wrong page
+  # can still be located (about 10-15 s per page on CPU). 0 disables.
+  export_ocr_max_pages: 12
+  # Turn pages scanned sideways upright before extraction (OCR line shapes + confidence).
+  # OCRs every page once when images are rendered; that OCR is reused by later steps.
+  auto_rotate: false  # demo invoice is upright; skips one OCR pass per page
+  # Overview pages (status, field table, findings with links) at the front of the flagged PDF.
+  # The browser UI hides them either way and shows clickable lists instead.
+  summary_pages: true
+
+ui:
+  # Zoom used to render flagged PDF pages for the browser UI (2.0 = about 1190 px wide for A4).
+  page_render_scale: 2.0
+
+ocr:
+  # Languages passed to surya OCR pre-pass (runs before every vision extraction call).
+  # Uses BCP-47 codes. Add languages that appear in your invoices.
+  # Install surya: pip install surya-ocr  (models ~300MB, downloaded on first run)
+  langs: ["es", "en", "fr"]
+
+output:
+  base_dir: "output"
+  include_page_crops: true # save region crops for debugging
+  google_sheets:
+    enabled: false
+    spreadsheet_id: "1AG4cw6vQz8exhn1NNiqdUz3aeAFVRqGjQy8joInaWuw"
+    create_title: ""
+    mode: "append"
+    value_input_option: "RAW"
+    include_generated_views: true
+
+sources:
+  google_drive:
+    auth_mode: oauth
+    # Env var that overrides auth_mode at runtime (headless Docker/CI/AWS deploys set it to
+    # service_account without editing this committed oauth default).
+    auth_mode_env: GOOGLE_DRIVE_AUTH_MODE
+    # Set one of these to make Drive ingestion the default source when --pdf is omitted.
+    folder_url: "https://drive.google.com/drive/folders/1dd3Rlq_zMF9NG0j9zQTTfiiocQhQ5QVO?usp=drive_link"
+    # folder_id: ""
+    scopes:
+      # Use drive now so the same consent can support future result uploads/moves.
+      - https://www.googleapis.com/auth/drive
+    oauth_client_secret_path: ".secrets/google-drive-oauth-client.json"
+    oauth_client_secret_path_env: GOOGLE_DRIVE_OAUTH_CLIENT_SECRET
+    token_path: ".secrets/google-drive-token.json"
+    service_account_file: ".secrets/google-drive-service-account.json"
+    service_account_file_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_FILE
+    service_account_json_env: GOOGLE_DRIVE_SERVICE_ACCOUNT_JSON
+    materialized_root: "output/materialized"
+    cleanup_downloads: true
+    include_shared_drives: true
+    page_size: 100
+    config_folder:
+      enabled: false  # demo uses the local config/csv_demo
+      folder_url: "https://drive.google.com/drive/folders/1xAQA6AAS3kjcY_YcDmckA21bPbEM2deK?usp=drive_link"
+      materialized_root: "output/materialized/google_drive_config"
+
+# Google Drive input/output folders are configured under `sources.google_drive` (provided
+# by the google-drive-source branch), not here — the worker resolves them via that layer.
+
+# Scheduled-poll worker behavior (src/orchestration/worker.py).
+orchestration:
+  max_files_per_poll: 50                 # bound token spend / runtime per scheduled run
+  max_attempts: 3                        # retryable failures before a doc is parked (needs_attention)
+  stale_claim_seconds: 1800              # reclaim a "processing" doc whose task died mid-run
+  dedup_backend: "dynamodb"              # "dynamodb" (prod) or "memory" (local/test)
+  dynamodb_table: "invoice-agent-dedup"
+  aws_region: null                       # null -> boto3 default (task role / env region)
+  output_root: "output"                  # local scratch for result files before upload
+
+logging:
+  level: "INFO"                          # DEBUG for verbose tool traces
+  presentation: true                    # Rich live demo output (or use --presentation)
