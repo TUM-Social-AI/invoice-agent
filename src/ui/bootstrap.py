@@ -25,7 +25,8 @@ def build_manager(config_path: str, output_root: str = "output/ui") -> RunManage
         app_config,
         ocr_enabled=getattr(agent, "surya_models", None) is not None,
     )
-    return RunManager(agent, presenter, output_root)
+    scale = float((app_config.get("ui") or {}).get("page_render_scale", 2.0))
+    return RunManager(agent, presenter, output_root, page_render_scale=scale)
 
 
 def default_config_path() -> str:

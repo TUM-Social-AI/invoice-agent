@@ -44,12 +44,14 @@ class RunManager:
         *,
         materialize: Callable[[str], Any] | None = None,
         write_results: Callable[[Any, str], dict[str, str]] | None = None,
+        page_render_scale: float = 2.0,
     ) -> None:
         self.agent = agent
         self.presenter = presenter
         self.output_root = Path(output_root)
         self._materialize = materialize
         self._write_results = write_results
+        self.page_render_scale = page_render_scale
         self._runs: dict[str, RunHub] = {}
         self._queue: queue.Queue[str] = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="ui-run-worker", daemon=True)
@@ -127,5 +129,20 @@ class RunManager:
             run_identity=doc.run_identity,
         )
         paths = write_results(state, out_dir)
+        # Before run_complete, so the browser can fetch the results view as soon as it hears of it.
+        self._attach_result(hub, paths)
         self.presenter.run_complete(state, paths=paths)
         hub.set_state(DONE)
+
+    def _attach_result(self, hub: RunHub, paths: dict[str, str]) -> None:
+        from src.ui.result_view import load_result
+
+        try:
+            loaded = load_result(paths, hub.run_id, self.output_root / hub.run_id / "pages", self.page_render_scale)
+        except Exception as exc:  # no results view is not a failed run
+            logger.error("Results view for run %s failed: %s", hub.run_id, exc, exc_info=True)
+            return
+        if loaded is None:
+            return
+        hub.result, hub.page_images = loaded
+        hub.flagged_pdf = paths["flagged_pdf"]

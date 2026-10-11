@@ -92,4 +92,27 @@ def create_app(manager: RunManager) -> FastAPI:
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    def _finished_hub(run_id: str) -> RunHub:
+        hub = manager.get(run_id)
+        if hub is None or hub.result is None:
+            raise HTTPException(status_code=404, detail="No results for this run")
+        return hub
+
+    @app.get("/api/runs/{run_id}/result")
+    def run_result(run_id: str) -> dict:
+        return _finished_hub(run_id).result
+
+    @app.get("/api/runs/{run_id}/pages/{page}.jpg")
+    def run_page(run_id: str, page: int) -> FileResponse:
+        # Only images the runner rendered for this run; the page number is the only client input.
+        path = _finished_hub(run_id).page_images.get(page)
+        if path is None:
+            raise HTTPException(status_code=404, detail="Unknown page")
+        return FileResponse(path, media_type="image/jpeg")
+
+    @app.get("/api/runs/{run_id}/flagged.pdf")
+    def run_flagged_pdf(run_id: str) -> FileResponse:
+        path = Path(_finished_hub(run_id).flagged_pdf)
+        return FileResponse(path, media_type="application/pdf", filename=path.name, content_disposition_type="inline")
+
     return app

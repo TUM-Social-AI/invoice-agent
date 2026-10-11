@@ -89,6 +89,8 @@ function resetView() {
   Object.assign(view, { runId: null, source: null, phase: null, runStarted: null, timer: null });
   view.steps.clear();
   $("timeline").replaceChildren();
+  $("steps").open = true;
+  resetResult();
   $("banner").hidden = true;
   $("queue-note").hidden = true;
   $("new-run").hidden = true;
@@ -246,6 +248,7 @@ function onComplete(ev) {
   $("banner-body").textContent = lines.join("\n");
   banner.hidden = false;
   finishStream(ev);
+  if (ev.has_result) loadResult(view.runId);
 }
 
 function onError(ev) {
@@ -262,10 +265,201 @@ function onError(ev) {
   finishStream(ev);
 }
 
+/* ---------- results: flagged PDF + clickable fields and issues ---------- */
+
+const STATUS_LABEL = { failed: "Failed", warning: "Warning" };
+const QUALITY_KIND = { confirmed: "found", matched: "found", cited_unverified: "unsure", ambiguous: "unsure", anchor: "unsure" };
+
+const result = { pages: new Map(), highlight: null, popover: null, popoverPin: null, activeRow: null };
+
+function resetResult() {
+  closePopover();
+  result.pages.clear();
+  result.highlight = null;
+  result.activeRow = null;
+  $("viewer").replaceChildren();
+  $("issue-list").replaceChildren();
+  $("field-list").replaceChildren();
+  $("result-card").hidden = true;
+  document.querySelector("main").classList.remove("wide");
+}
+
+async function loadResult(runId) {
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/result`).catch(() => null);
+  if (!res || !res.ok || view.runId !== runId) return;
+  renderResult(await res.json());
+}
+
+// Boxes arrive as fractions of the page image (top-left origin), so CSS percentages place them.
+function placeAt(node, box) {
+  node.style.left = `${box[0] * 100}%`;
+  node.style.top = `${box[1] * 100}%`;
+  node.style.width = `${(box[2] - box[0]) * 100}%`;
+  node.style.height = `${(box[3] - box[1]) * 100}%`;
+}
+
+function renderResult(data) {
+  resetResult();
+  document.querySelector("main").classList.add("wide");
+  $("open-pdf").href = data.pdf_url;
+
+  const viewer = $("viewer");
+  data.pages.forEach((p) => {
+    const wrap = el("div", "pdf-page");
+    wrap.style.aspectRatio = `1 / ${p.aspect}`;
+    const img = el("img");
+    img.src = p.image_url;
+    img.alt = `Page ${p.page}`;
+    wrap.append(img, el("span", "page-no", `Page ${p.page}`));
+    p.comments.forEach((c) => {
+      const pin = el("button", `pin ${c.status}`, c.ref);
+      pin.type = "button";
+      pin.title = `${c.ref} ${c.rule_id}`;
+      placeAt(pin, c.box);
+      pin.addEventListener("click", (e) => { e.stopPropagation(); openPopover(wrap, c, pin); });
+      wrap.append(pin);
+    });
+    viewer.append(wrap);
+    result.pages.set(p.page, wrap);
+  });
+
+  const issues = $("issue-list");
+  data.findings.forEach((f) => issues.append(issueRow(f)));
+  if (!data.findings.length) issues.append(el("li", "empty", "No failed rules or warnings."));
+  const fields = $("field-list");
+  data.fields.forEach((f) => fields.append(fieldRow(f)));
+
+  $("tab-issues").textContent = `Issues (${data.findings.length})`;
+  $("tab-fields").textContent = `Fields (${data.fields.filter((f) => f.target).length}/${data.fields.length})`;
+  showTab(data.findings.length ? "issues" : "fields");
+  $("steps").open = false;
+  $("result-card").hidden = false;
+  // Instant: Chrome cancels a running smooth scroll when another one starts (e.g. the first click).
+  $("result-card").scrollIntoView({ block: "start" });
+}
+
+function issueRow(f) {
+  const li = el("li", `item issue ${f.status}`);
+  li.dataset.ref = f.ref;
+  const head = el("div", "item-head");
+  head.append(el("span", `badge ${f.status}`, STATUS_LABEL[f.status] || f.status), el("span", "item-ref", `${f.ref} ${f.rule_id}`));
+  if (f.target) head.append(el("span", "page-chip", `p${f.target.page}`));
+  li.append(head, el("div", "item-title", f.title), el("div", "item-comment", f.comment));
+  makeClickable(li, f.target, f.status);
+  return li;
+}
+
+function fieldRow(f) {
+  const found = f.value !== null && f.value !== "";
+  const kind = !found ? "missing" : f.needs_review ? "review" : QUALITY_KIND[f.quality] || "unlocated";
+  const li = el("li", `item field ${kind}`);
+  const head = el("div", "item-head");
+  head.append(el("span", "dot"), el("span", "item-label", f.label));
+  if (f.target) head.append(el("span", "page-chip", `p${f.target.page}`));
+  li.append(head, el("div", "item-value", f.display));
+  const meta = [];
+  if (found && typeof f.confidence === "number") meta.push(`confidence ${f.confidence.toFixed(2)}`);
+  if (found && !f.target) meta.push("location not found on the page");
+  else if (found && !f.target.box) meta.push("page only");
+  if (f.review_reason) meta.push(f.review_reason);
+  if (meta.length) li.append(el("div", "item-meta", meta.join(" · ")));
+  makeClickable(li, f.target, kind);
+  return li;
+}
+
+function makeClickable(li, target, kind) {
+  if (!target) { li.classList.add("disabled"); return; }
+  li.tabIndex = 0;
+  li.setAttribute("role", "button");
+  const go = () => { setActiveRow(li); jumpTo(target, kind); };
+  li.addEventListener("click", go);
+  li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+}
+
+function setActiveRow(li) {
+  if (result.activeRow) result.activeRow.classList.remove("active");
+  result.activeRow = li;
+  li.classList.add("active");
+}
+
+function jumpTo(target, kind) {
+  const wrap = result.pages.get(target.page);
+  if (!wrap) return;
+  closePopover();
+  const viewer = $("viewer");
+  if (!result.highlight) result.highlight = el("div", "hl");
+  const hl = result.highlight;
+  hl.className = `hl ${kind}`;
+  let top = wrap.offsetTop;
+  let left = 0;
+  if (target.box) {
+    const pad = 0.006;
+    placeAt(hl, [target.box[0] - pad, target.box[1] - pad, target.box[2] + pad, target.box[3] + pad]);
+    wrap.append(hl);
+    top += target.box[1] * wrap.clientHeight - viewer.clientHeight * 0.25;
+    const boxRight = target.box[2] * wrap.clientWidth;
+    if (boxRight > viewer.clientWidth) left = boxRight - viewer.clientWidth + 24;
+    void hl.offsetWidth; // restart the pulse animation
+    hl.classList.add("pulse");
+  } else {
+    hl.remove();
+    top -= 8;
+  }
+  viewer.scrollTo({ top: Math.max(0, top), left, behavior: "smooth" });
+}
+
+function openPopover(wrap, comment, pin) {
+  closePopover();
+  const pop = el("div", `popover ${comment.status}`);
+  pop.setAttribute("role", "dialog");
+  pop.append(el("div", "popover-title", `${comment.ref} ${comment.rule_id}`), el("div", "popover-body", comment.text));
+  // Pins sit in the right margin, so the popover opens to their left, below the pin.
+  pop.style.right = `${(1 - comment.box[0]) * 100}%`;
+  pop.style.top = `${comment.box[3] * 100}%`;
+  pop.addEventListener("click", (e) => e.stopPropagation());
+  wrap.append(pop);
+  result.popover = pop;
+  pin.classList.add("open");
+  result.popoverPin = pin;
+  const row = [...document.querySelectorAll("#issue-list .issue")]
+    .find((li) => li.dataset.ref === comment.ref);
+  if (row) {
+    showTab("issues");
+    setActiveRow(row);
+    // Scroll the list only; scrollIntoView would also move the page and the viewer.
+    const list = $("issue-list");
+    list.scrollTo({ top: row.offsetTop - 8, behavior: "smooth" });
+  }
+}
+
+function closePopover() {
+  if (result.popover) result.popover.remove();
+  if (result.popoverPin) result.popoverPin.classList.remove("open");
+  result.popover = null;
+  result.popoverPin = null;
+}
+
+function showTab(name) {
+  document.querySelectorAll(".tab").forEach((t) => {
+    const on = t.dataset.tab === name;
+    t.classList.toggle("on", on);
+    t.setAttribute("aria-selected", String(on));
+  });
+  $("issue-list").hidden = name !== "issues";
+  $("field-list").hidden = name !== "fields";
+}
+
+function initResult() {
+  document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+  document.addEventListener("click", closePopover);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePopover(); });
+}
+
 /* ---------- boot ---------- */
 
 async function boot() {
   initDropzone();
+  initResult();
   const runId = location.hash.slice(1);
   if (!runId) return;
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);

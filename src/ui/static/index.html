@@ -49,11 +49,45 @@
       </div>
 
       <p id="queue-note" class="note" hidden></p>
-      <div id="timeline" class="timeline" aria-live="polite"></div>
+      <details id="steps" class="steps" open>
+        <summary>Agent steps</summary>
+        <div id="timeline" class="timeline" aria-live="polite"></div>
+      </details>
 
       <div id="banner" class="banner" hidden>
         <p id="banner-title" class="banner-title"></p>
         <p id="banner-body" class="banner-body"></p>
+      </div>
+    </section>
+
+    <section id="result-card" class="card result-card" hidden>
+      <div class="result-head">
+        <div>
+          <p class="eyebrow">Result</p>
+          <h2 class="result-title">Flagged document</h2>
+        </div>
+        <a id="open-pdf" class="btn" target="_blank" rel="noopener">Open PDF</a>
+      </div>
+      <div class="result-grid">
+        <aside class="result-panel">
+          <div class="tabs" role="tablist">
+            <button id="tab-issues" class="tab" type="button" role="tab" data-tab="issues">Issues</button>
+            <button id="tab-fields" class="tab" type="button" role="tab" data-tab="fields">Fields</button>
+          </div>
+          <ul id="issue-list" class="item-list" role="tabpanel" aria-labelledby="tab-issues"></ul>
+          <ul id="field-list" class="item-list" role="tabpanel" aria-labelledby="tab-fields" hidden></ul>
+        </aside>
+        <div class="viewer-col">
+          <div class="legend" aria-label="Box legend">
+            <span><i class="swatch blue"></i>Value found</span>
+            <span><i class="swatch orange dashed"></i>Value needs review</span>
+            <span><i class="swatch grey dashed"></i>Unsure location</span>
+            <span><i class="swatch red thick"></i>Failed rule</span>
+            <span><i class="swatch orange thick"></i>Warning</span>
+            <span><i class="swatch red dashed thick"></i>Expected here, missing</span>
+          </div>
+          <div id="viewer" class="viewer"></div>
+        </div>
       </div>
     </section>
   </main>

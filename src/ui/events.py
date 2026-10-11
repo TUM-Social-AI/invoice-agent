@@ -27,6 +27,10 @@ class RunHub:
         self.pdf_path = pdf_path
         self.state = QUEUED
         self.created_at = time.time()
+        # Set by the runner when the run produced a flagged PDF (results view in the browser).
+        self.result: dict[str, Any] | None = None
+        self.flagged_pdf: str = ""
+        self.page_images: dict[int, str] = {}
         self._events: list[dict[str, Any]] = []
         self._lock = threading.Lock()
 

@@ -204,4 +204,5 @@ class WebPresenter:
             warnings=list(rv["warning_failed_rule_ids"]),
             flagged_fields=[k for k, v in state.extracted_fields.items() if v.flagged_for_review],
             outputs=dict(paths),
+            has_result=bool(self._hub is not None and self._hub.result),
         )
