@@ -52,6 +52,14 @@ def create_app(manager: RunManager) -> FastAPI:
     app = FastAPI(title="Invoice Agent UI")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+    @app.middleware("http")
+    async def revalidate_ui_files(request: Request, call_next):
+        # Without this, Chrome may reuse a cached app.js after the UI was updated.
+        response = await call_next(request)
+        if request.url.path == "/" or request.url.path.startswith("/static/"):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
     @app.get("/")
     def index() -> FileResponse:
         return FileResponse(STATIC_DIR / "index.html")

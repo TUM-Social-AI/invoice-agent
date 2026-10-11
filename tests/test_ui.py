@@ -237,6 +237,9 @@ def test_index_page_is_served(tmp_path):
     res = client.get("/")
     assert res.status_code == 200
     assert "Invoice Compliance Agent" in res.text
+    # The browser must revalidate the UI files so an updated app.js is picked up.
+    assert res.headers["cache-control"] == "no-cache"
+    assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
 
 
 # --- Results view (flagged PDF) ----------------------------------------------------
