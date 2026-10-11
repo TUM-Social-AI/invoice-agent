@@ -316,7 +316,11 @@ function renderResult(data) {
       pin.type = "button";
       pin.title = `${c.ref} ${c.rule_id}`;
       placeAt(pin, c.box);
-      pin.addEventListener("click", (e) => { e.stopPropagation(); openPopover(wrap, c, pin); });
+      pin.addEventListener("click", (e) => {
+        e.stopPropagation();
+        if (result.popoverPin === pin) clearSelection();
+        else openPopover(wrap, c, pin);
+      });
       wrap.append(pin);
     });
     viewer.append(wrap);
@@ -371,9 +375,21 @@ function makeClickable(li, target, kind) {
   if (!target) { li.classList.add("disabled"); return; }
   li.tabIndex = 0;
   li.setAttribute("role", "button");
-  const go = () => { setActiveRow(li); jumpTo(target, kind); };
+  // A second click on the active row closes it again (comment collapsed, highlight removed).
+  const go = () => {
+    if (result.activeRow === li) { clearSelection(); return; }
+    setActiveRow(li);
+    jumpTo(target, kind);
+  };
   li.addEventListener("click", go);
   li.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+}
+
+function clearSelection() {
+  closePopover();
+  if (result.activeRow) result.activeRow.classList.remove("active");
+  result.activeRow = null;
+  if (result.highlight) result.highlight.remove();
 }
 
 function setActiveRow(li) {
