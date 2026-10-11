@@ -18,6 +18,7 @@ from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
 from src.llm.config_resolve import active_rule_groups_from_config
 from src.agent.phases import current_phase as _current_phase, next_required_step as _next_required_step
+from src.prompts.llm_prompts import OUTPUT_LANGUAGE_RULE
 from src.agent.tool_policy import (
     parse_tool_description_blocks,
     load_tool_description_overrides,
@@ -256,6 +257,7 @@ Hard rules:
 - When all error-level rules pass AND visual_checks_pending is empty, finish with all_errors_resolved=true
   (warning-level rule failures alone do not block PASSED — read error_failures vs warning_failures on finish)
 - Always use page_num=N (an integer like 1, 2, 3) — NEVER construct or guess image file paths
+- {OUTPUT_LANGUAGE_RULE}
 - When retrying extract_fields_vision or check_compliance_visual, change parameters (page_num, region, hints, or field_subset) — do not repeat identical params
 - Respond ONLY with valid JSON."""
 

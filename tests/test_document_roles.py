@@ -234,3 +234,10 @@ def test_uncovered_role_pages_disabled_by_empty_config():
     assert _extract_uncovered_role_pages(
         state, lambda *a, **k: {"success": True}, {"auto_extract_page_roles": []}, load_config("config/csv")
     ) == []
+
+
+def test_free_text_prompts_ask_for_english():
+    from src.prompts.llm_prompts import OUTPUT_LANGUAGE_RULE, build_compliance_visual_prompt
+
+    assert OUTPUT_LANGUAGE_RULE in build_compliance_visual_prompt("image 0 -> page_num=1", "R1: stamp present")
+    assert OUTPUT_LANGUAGE_RULE in build_compliance_visual_prompt("image 0 -> page_num=1", "R1", "[p1_L0] x", True)
