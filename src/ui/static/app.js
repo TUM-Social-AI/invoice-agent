@@ -77,6 +77,7 @@ function initDropzone() {
     location.hash = "";
     resetView();
     $("run-card").hidden = true;
+    $("view-tabs").hidden = true;
     $("upload-card").hidden = false;
   });
 }
@@ -89,7 +90,6 @@ function resetView() {
   Object.assign(view, { runId: null, source: null, phase: null, runStarted: null, timer: null });
   view.steps.clear();
   $("timeline").replaceChildren();
-  $("steps").open = true;
   resetResult();
   $("banner").hidden = true;
   $("queue-note").hidden = true;
@@ -126,7 +126,8 @@ function openRun(runId, filename) {
   resetView();
   view.runId = runId;
   $("upload-card").hidden = true;
-  $("run-card").hidden = false;
+  $("view-tabs").hidden = false;
+  showView("run");
   $("run-file").textContent = filename || "…";
 
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
@@ -280,8 +281,21 @@ function resetResult() {
   $("viewer").replaceChildren();
   $("issue-list").replaceChildren();
   $("field-list").replaceChildren();
-  $("result-card").hidden = true;
-  document.querySelector("main").classList.remove("wide");
+  $("vtab-result").disabled = true;
+  if (!$("view-tabs").hidden) showView("run");
+}
+
+// Run (progress) and Result (flagged PDF) are separate tabs; Result unlocks when the run has results.
+function showView(name) {
+  if (name === "result" && $("vtab-result").disabled) return;
+  document.querySelectorAll(".view-tab").forEach((t) => {
+    const on = t.dataset.view === name;
+    t.classList.toggle("on", on);
+    t.setAttribute("aria-selected", String(on));
+  });
+  $("run-card").hidden = name !== "run";
+  $("result-card").hidden = name !== "result";
+  document.querySelector("main").classList.toggle("wide", name === "result");
 }
 
 async function loadResult(runId) {
@@ -300,8 +314,11 @@ function placeAt(node, box) {
 
 function renderResult(data) {
   resetResult();
-  document.querySelector("main").classList.add("wide");
   $("open-pdf").href = data.pdf_url;
+  $("result-file").textContent = data.file;
+  const status = data.status || "";
+  $("result-status").className = `pill ${{ passed: "done", failed: "error", error: "error" }[status] || "warn"}`;
+  $("result-status").textContent = status.replace("_", " ");
 
   const viewer = $("viewer");
   data.pages.forEach((p) => {
@@ -336,10 +353,9 @@ function renderResult(data) {
   $("tab-issues").textContent = `Issues (${data.findings.length})`;
   $("tab-fields").textContent = `Fields (${data.fields.filter((f) => f.target).length}/${data.fields.length})`;
   showTab(data.findings.length ? "issues" : "fields");
-  $("steps").open = false;
-  $("result-card").hidden = false;
-  // Instant: Chrome cancels a running smooth scroll when another one starts (e.g. the first click).
-  $("result-card").scrollIntoView({ block: "start" });
+  $("vtab-result").disabled = false;
+  showView("result");
+  window.scrollTo(0, 0);
 }
 
 function issueRow(f) {
@@ -467,6 +483,10 @@ function showTab(name) {
 
 function initResult() {
   document.querySelectorAll(".tab").forEach((t) => t.addEventListener("click", () => showTab(t.dataset.tab)));
+  document.querySelectorAll(".view-tab").forEach((t) => t.addEventListener("click", () => {
+    showView(t.dataset.view);
+    window.scrollTo(0, 0);
+  }));
   document.addEventListener("click", closePopover);
   document.addEventListener("keydown", (e) => { if (e.key === "Escape") closePopover(); });
 }

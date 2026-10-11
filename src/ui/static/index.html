@@ -27,6 +27,12 @@
       <p id="upload-error" class="error-text" role="alert" hidden></p>
     </section>
 
+    <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views" hidden>
+      <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
+      <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"
+              title="Available when the run has finished" disabled>Result</button>
+    </nav>
+
     <section id="run-card" class="card" hidden>
       <div class="run-top">
       <div class="run-head">
@@ -49,10 +55,7 @@
       </div>
 
       <p id="queue-note" class="note" hidden></p>
-      <details id="steps" class="steps" open>
-        <summary>Agent steps</summary>
-        <div id="timeline" class="timeline" aria-live="polite"></div>
-      </details>
+      <div id="timeline" class="timeline" aria-live="polite"></div>
 
       <div id="banner" class="banner" hidden>
         <p id="banner-title" class="banner-title"></p>
@@ -63,10 +66,13 @@
     <section id="result-card" class="card result-card" hidden>
       <div class="result-head">
         <div>
-          <p class="eyebrow">Result</p>
-          <h2 class="result-title">Flagged document</h2>
+          <p class="eyebrow">Flagged document</p>
+          <h2 id="result-file" class="result-title"></h2>
         </div>
-        <a id="open-pdf" class="btn" target="_blank" rel="noopener">Open PDF</a>
+        <div class="run-meta">
+          <span id="result-status" class="pill"></span>
+          <a id="open-pdf" class="btn" target="_blank" rel="noopener">Open PDF</a>
+        </div>
       </div>
       <div class="result-grid">
         <aside class="result-panel">

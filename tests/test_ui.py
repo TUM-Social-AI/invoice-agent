@@ -269,8 +269,11 @@ def test_result_view_scales_boxes_to_the_page_image():
          "comments": [{"ref": "F1", "rule_id": "R_F1", "status": "failed", "text": "t", "rect": [601, 100, 617, 116]}]},
         {"page": 2, "pdf_index": 2, "scan_w": 595.0, "scan_h": 842.0, "margin": 0.0, "comments": []},
     ]}
+    # An entry the visual check wrote under its own name is not a field of the type: hidden.
+    trace["fields"].append({**trace["fields"][-1], "field_name": "AEXCID_stamp", "in_schema": False})
     view = build_result_view(trace, "r1")
     frac = 595.0 / (595.0 + MARGIN)
+    assert [f["field_name"] for f in view["fields"]] == ["vendor_name", "total_amount", "vat_amount"]
 
     p1, p2 = view["pages"]
     assert p1["image_url"] == "/api/runs/r1/pages/1.jpg"

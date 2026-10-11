@@ -62,6 +62,12 @@ def build_result_view(trace: dict, run_id: str) -> dict:
 
     fields = []
     for f in trace["fields"]:
+        # Hidden for now: the visual compliance check stores entries such as AEXCID_stamp and
+        # tax_treatment as extracted fields although they are not fields of the invoice type, so
+        # they show up with raw names and no value. They stay in the trace, CSV and PDF summary;
+        # drop this filter once the visual check stops writing them into extracted_fields.
+        if not f.get("in_schema", True):
+            continue
         ev = f.get("evidence") or {}
         has_value = f.get("value") not in (None, "")
         target = None

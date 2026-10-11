@@ -201,14 +201,18 @@ body {
   .stepper li.active .dot, .step.running .step-icon { animation: none; }
 }
 
-/* Agent steps (collapsed once the results view is shown) */
-.steps { margin-top: 16px; }
-.steps > summary {
-  cursor: pointer; font-size: 13px; font-weight: 650; color: var(--muted);
-  padding: 6px 0; list-style-position: inside;
+/* Run / Result tabs */
+.view-tabs {
+  display: flex; gap: 4px; padding: 4px; justify-self: start;
+  border-radius: 12px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
 }
-.steps > summary:hover { color: var(--text); }
-.steps .timeline { margin-top: 4px; }
+.view-tab {
+  font: inherit; font-size: 14px; font-weight: 600; cursor: pointer;
+  padding: 7px 22px; border: 0; border-radius: 9px; background: transparent; color: var(--muted);
+}
+.view-tab:hover:not(:disabled) { color: var(--text); }
+.view-tab.on { background: var(--accent-soft); color: var(--accent); }
+.view-tab:disabled { cursor: not-allowed; opacity: .4; }
 
 /* Results view: wider layout so the document is readable next to the lists */
 .layout.wide { max-width: 1440px; }
