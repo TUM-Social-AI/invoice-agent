@@ -66,6 +66,15 @@ Rules:
 - Lower confidence when the pages describe nothing that clearly fits a listed type."""
 
 
+# Free text the models write (observations, reasons, explanations) is shown to reviewers in the UI,
+# the flagged PDF and the CSVs; documents and rule texts are often French or Spanish.
+OUTPUT_LANGUAGE_RULE = (
+    "Write all free text (observations, reasons, explanations, review notes) in English, even when the "
+    "document or the rule text is in French or Spanish. Copy document values (names, numbers, dates, "
+    "quoted text) exactly as printed; do not translate them."
+)
+
+
 # --- Field extraction (per page / crop) ---
 
 _EXTRACTION_LANG_NOTE = (
@@ -281,6 +290,8 @@ Judge only what is visible. Do not assume or infer that a required document or m
 
 Requirements:
 {rule_lines}
+
+{OUTPUT_LANGUAGE_RULE}
 
 Respond with ONLY valid JSON — one top-level key per rule_id, no markdown fences. Shape per rule:
 {{

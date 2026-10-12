@@ -271,6 +271,13 @@ traceability:
   # Turn pages scanned sideways upright before extraction (OCR line shapes + confidence).
   # OCRs every page once when images are rendered; that OCR is reused by later steps.
   auto_rotate: true
+  # Overview pages (status, field table, findings with links) at the front of the flagged PDF.
+  # The browser UI hides them either way and shows clickable lists instead.
+  summary_pages: true
+
+ui:
+  # Zoom used to render flagged PDF pages for the browser UI (2.0 = about 1190 px wide for A4).
+  page_render_scale: 2.0
 
 ocr:
   # Languages passed to surya OCR pre-pass (runs before every vision extraction call).

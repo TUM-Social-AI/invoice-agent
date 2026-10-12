@@ -166,6 +166,9 @@ def build_trace(
             "label": meta.get("label", name),
             "region": meta.get("region", ""),
             "required": bool(meta.get("required")),
+            # False for entries the visual compliance check writes under its own names
+            # (e.g. AEXCID_stamp, tax_treatment); they are not fields of the invoice type.
+            "in_schema": name in schema,
             "value": _json_safe(fr.extracted_value),
             "confidence": round(float(_json_safe(fr.confidence) or 0.0), 3),
             "source_page": fr.source_page,
@@ -181,7 +184,7 @@ def build_trace(
         if name not in state.extracted_fields:
             fields_out.append({
                 "field_id": meta.get("field_id", name), "field_name": name, "label": meta.get("label", name),
-                "region": meta.get("region", ""), "required": bool(meta.get("required")), "value": None,
+                "region": meta.get("region", ""), "required": bool(meta.get("required")), "in_schema": True, "value": None,
                 "confidence": 0.0, "source_page": None, "source_region": None, "flagged_for_review": False,
                 "review_reason": None, "needs_review": bool(meta.get("required")), "low_confidence": False,
                 "evidence": Grounded(page=None, quality="none", note="not extracted").to_dict(),

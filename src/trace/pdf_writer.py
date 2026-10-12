@@ -1,6 +1,6 @@
 """
-Render the flagged PDF from a trace: summary pages first, then the original pages with
-an extraction layer (labeled boxes) and a compliance layer (boxes + PDF comments).
+Render the flagged PDF from a trace: summary pages first (optional), then the original pages
+with an extraction layer (labeled boxes) and a compliance layer (boxes + PDF comments).
 
 Boxes in the trace are fractions of the upright (displayed) page. They are mapped to PDF
 user space through the page's CropBox and total rotation, because pdfium renders the
@@ -33,6 +33,12 @@ GREY = (0.45, 0.45, 0.45)
 GREEN = (0.10, 0.55, 0.25)
 INK = (0.10, 0.10, 0.12)
 QUIET = (0.40, 0.40, 0.45)
+
+# Box stroke widths (points). Thick enough that colour and dashing read without the legend.
+FIELD_WIDTH = 1.8           # extracted value located on the page
+FIELD_UNSURE_WIDTH = 1.4    # candidate location or label area only (dashed)
+FINDING_WIDTH = 2.6         # evidence of a failed rule / warning
+FINDING_EXPECTED_WIDTH = 2.2  # where a missing item was expected (dashed)
 
 STATUS_COLOR = {"failed": RED, "warning": ORANGE, "not_evaluated": GREY, "passed": GREEN}
 STATUS_LABEL = {"failed": "FAILED", "warning": "WARNING", "not_evaluated": "NOT EVALUATED", "passed": "PASSED"}
@@ -125,7 +131,7 @@ class Mark:
     color: tuple
     label: str
     dashed: bool = False
-    width: float = 0.9
+    width: float = FIELD_WIDTH
     short: str = ""  # fallback label (field name / finding ref) when the full one does not fit
     tag: str = ""    # last resort: tiny tag on the box, full label listed in the margin
 
@@ -196,7 +202,8 @@ class Overlay:
         c.saveState()
         c.setStrokeColorRGB(*m.color)
         c.setLineWidth(m.width)
-        c.setDash(2.2, 1.6) if m.dashed else c.setDash()
+        # Dash length scales with the stroke so dashed boxes stay distinct from solid ones.
+        c.setDash(3 * m.width, 2 * m.width) if m.dashed else c.setDash()
         c.rect(x1, y1, x2 - x1, y2 - y1, stroke=1, fill=0)
         c.restoreState()
 
@@ -296,7 +303,7 @@ class Overlay:
         for m in self.marks:
             self._draw_box(m)
         # Compliance labels first (they are added after the field marks but matter most).
-        for m in sorted(self.marks, key=lambda m: m.width < 1.0):
+        for m in sorted(self.marks, key=lambda m: m.width < FINDING_EXPECTED_WIDTH):
             self._label(m)
         for args in self.connectors:
             self._draw_connector(*args)
@@ -608,13 +615,28 @@ def _finding_comment_text(f: dict) -> str:
     return "\n".join(lines)
 
 
-def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotation: Optional[dict] = None) -> str:
-    summary = build_summary(trace)
-    summary_reader = summary.finish()
-    n_summary = len(summary_reader.pages)
-
+def render_flagged_pdf(
+    trace: dict,
+    source_pdf: str,
+    out_path: str,
+    page_rotation: Optional[dict] = None,
+    *,
+    include_summary: bool = True,
+) -> dict:
+    """
+    Write the flagged PDF and return its layout: for each source page, its index in the
+    output, the displayed scan size and right margin (points), and the comment icons
+    (displayed points, top-left origin) with their text. Viewers use it to place
+    highlights and comments without repeating this module's geometry.
+    """
     writer = PdfWriter()
-    writer.append(summary_reader)
+    summary = None
+    n_summary = 0
+    if include_summary:
+        summary = build_summary(trace)
+        summary_reader = summary.finish()
+        n_summary = len(summary_reader.pages)
+        writer.append(summary_reader)
     writer.append(source_pdf)  # PdfWriter(clone_from=...) crashed on real scans; append works
     for p, angle in (page_rotation or {}).items():
         idx = n_summary + int(p) - 1
@@ -626,12 +648,14 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
     findings = [f for f in trace["findings"] if f["status"] != "passed"]
 
     geoms: dict[int, PageGeom] = {}
+    layout_pages: list[dict] = []
     for p in range(1, n_doc + 1):
         page = writer.pages[n_summary + p - 1]
         page_info = next((x for x in trace.get("pages", []) if x.get("page") == p), {})
         ov = Overlay(page, page_info.get("text_boxes"))
         g = ov.g
         geoms[p] = g
+        comments: list[dict] = []
         # Extraction layer: E-tags are the fallback when a label does not fit next to its box.
         n_tag = 0
         for f in fields:
@@ -656,12 +680,12 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
                 color = ORANGE if f["needs_review"] else BLUE
                 lab = f"{name} = {value} ({f['confidence']:.2f}) ?"
                 for k, b in enumerate(ev["boxes"]):
-                    ov.add(Mark(b, color, lab if k == 0 else "", dashed=True, width=0.7, short=f"{name} ?", tag=f"{tag}?"))
+                    ov.add(Mark(b, color, lab if k == 0 else "", dashed=True, width=FIELD_UNSURE_WIDTH, short=f"{name} ?", tag=f"{tag}?"))
             elif q == "ambiguous":
                 for k, b in enumerate(ev["boxes"]):
-                    ov.add(Mark(b, GREY, f"{name}? = {value}" if k == 0 else "", dashed=True, width=0.7, short=f"{name}?", tag=f"{tag}?"))
+                    ov.add(Mark(b, GREY, f"{name}? = {value}" if k == 0 else "", dashed=True, width=FIELD_UNSURE_WIDTH, short=f"{name}?", tag=f"{tag}?"))
             elif q == "anchor":
-                ov.add(Mark(ev["boxes"][0], GREY, f"{name} (label area)", dashed=True, width=0.7, short=name, tag=tag))
+                ov.add(Mark(ev["boxes"][0], GREY, f"{name} (label area)", dashed=True, width=FIELD_UNSURE_WIDTH, short=name, tag=tag))
         # Compliance layer: boxes on the scan, comment icons in the margin strip.
         for f in findings:
             color = STATUS_COLOR[f["status"]]
@@ -674,22 +698,33 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
                 continue
             for b in boxes:
                 grown = [max(0.0, b[0] - 0.004), max(0.0, b[1] - 0.004), min(1.0, b[2] + 0.004), min(1.0, b[3] + 0.004)]
-                ov.add(Mark(grown, color, tag, width=1.2, short=f["ref"], tag=f["ref"]))
+                ov.add(Mark(grown, color, tag, width=FINDING_WIDTH, short=f["ref"], tag=f["ref"]))
             for b in exp_boxes:
-                ov.add(Mark(b, color, f"{tag} expected", dashed=True, width=1.0, short=f"{f['ref']} expected", tag=f["ref"]))
+                ov.add(Mark(b, color, f"{tag} expected", dashed=True, width=FINDING_EXPECTED_WIDTH, short=f"{f['ref']} expected", tag=f["ref"]))
             anchor = (boxes or exp_boxes or [None])[0]
             dy = ov.icon_slot((anchor[1] * g.disp_h) if anchor else 24.0)
             dx = g.disp_w + 6
             if anchor:
                 ov.connector(anchor, dx, dy + 8, color)
             rect = g.user_rect_pts(dx, dy, dx + 16, dy + 16)
-            _comment(writer, n_summary + p - 1, rect, _finding_comment_text(f), color, tag)
-        if ov.marks or ov.icon_slots:
-            extend_right_margin(page, g)  # geometry `g` still describes the scan area
+            text = _finding_comment_text(f)
+            _comment(writer, n_summary + p - 1, rect, text, color, tag)
+            comments.append({
+                "ref": f["ref"], "rule_id": f["rule_id"], "status": f["status"],
+                "rect": [dx, dy, dx + 16, dy + 16], "text": text,
+            })
+        margin = MARGIN if (ov.marks or ov.icon_slots) else 0.0
+        if margin:
+            extend_right_margin(page, g, margin)  # geometry `g` still describes the scan area
         page.merge_page(ov.page_object(page.mediabox))
+        layout_pages.append({
+            "page": p, "pdf_index": n_summary + p - 1,
+            "scan_w": round(g.disp_w, 2), "scan_h": round(g.disp_h, 2), "margin": margin,
+            "comments": comments,
+        })
 
     # Summary links jump to the value's position (/XYZ at the box's displayed top-left).
-    for lk in summary.links:
+    for lk in (summary.links if summary else []):
         if not (1 <= lk.page <= n_doc):
             continue
         g = geoms[lk.page]  # geometry of the scan area, before the margin was added
@@ -704,4 +739,4 @@ def render_flagged_pdf(trace: dict, source_pdf: str, out_path: str, page_rotatio
     writer.add_metadata({"/Title": _txt(f"Flagged: {trace['document']['file']}"), "/Producer": "invoice-agent trace"})
     with open(out_path, "wb") as fh:
         writer.write(fh)
-    return out_path
+    return {"file": out_path, "summary_pages": n_summary, "pages": layout_pages}

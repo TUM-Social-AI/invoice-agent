@@ -43,12 +43,16 @@ def write_trace_outputs(
             if 1 <= p <= len(state.page_image_paths or []):
                 page_ocr(state, p, state.page_image_paths[p - 1], surya_models, silent=silent)
 
-    try:
-        trace = build_trace(state, store, config, ocr_missing_pages=ocr_missing)
-        trace_path = out_dir / f"trace_{stem}.json"
+    trace_path = out_dir / f"trace_{stem}.json"
+
+    def write_trace(trace: dict) -> None:
         trace_path.write_text(
             json.dumps(trace, ensure_ascii=False, indent=1, default=str, allow_nan=False), encoding="utf-8"
         )
+
+    try:
+        trace = build_trace(state, store, config, ocr_missing_pages=ocr_missing)
+        write_trace(trace)
         paths["trace_json"] = str(trace_path)
     except Exception as e:
         logger.error("Trace export failed (run results unaffected): %s", e, exc_info=True)
@@ -60,8 +64,14 @@ def write_trace_outputs(
         from src.trace.pdf_writer import render_flagged_pdf
 
         pdf_path = out_dir / f"flagged_{stem}.pdf"
-        render_flagged_pdf(trace, state.pdf_path, str(pdf_path), getattr(state, "page_rotation", None))
+        layout = render_flagged_pdf(
+            trace, state.pdf_path, str(pdf_path), getattr(state, "page_rotation", None),
+            include_summary=bool(cfg.get("summary_pages", True)),
+        )
         paths["flagged_pdf"] = str(pdf_path)
+        # Where each page landed in the flagged PDF, for viewers that link into it (the UI).
+        trace["flagged_pdf"] = {**layout, "file": pdf_path.name}
+        write_trace(trace)
         s = trace["summary"]
         logger.info(
             "Flagged PDF: %s (%d/%d fields located)", pdf_path, s["fields_located"], s["fields_with_value"]

@@ -1,0 +1,5 @@
+# One phrase per line (case-insensitive). Reject as employee_name if the whole string equals
+# the phrase, OR the phrase is contained and the candidate is shorter than the substring threshold.
+relais communautaire
+community liaison
+community liaisons

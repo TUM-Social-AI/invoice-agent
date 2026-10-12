@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Invoice Compliance Agent</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">§</span>
+      <h1>Invoice Compliance Agent</h1>
+    </div>
+    <div id="models" class="chips" aria-label="Models in use"></div>
+  </header>
+
+  <main class="layout">
+    <section id="upload-card" class="card">
+      <div id="dropzone" class="dropzone" tabindex="0" role="button"
+           aria-label="Choose or drop an invoice PDF">
+        <div class="drop-icon" aria-hidden="true">⇪</div>
+        <p class="drop-title">Drop an invoice PDF here</p>
+        <p class="drop-sub">or <span class="link">browse</span> your files</p>
+        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+      </div>
+      <p id="upload-error" class="error-text" role="alert" hidden></p>
+    </section>
+
+    <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views" hidden>
+      <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
+      <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"
+              title="Available when the run has finished" disabled>Result</button>
+    </nav>
+
+    <section id="run-card" class="card" hidden>
+      <div class="run-top">
+      <div class="run-head">
+        <div>
+          <p class="eyebrow">Document</p>
+          <h2 id="run-file" class="run-file"></h2>
+        </div>
+        <div class="run-meta">
+          <span id="run-state" class="pill">Queued</span>
+          <span id="run-elapsed" class="elapsed" aria-label="Elapsed time">0.0s</span>
+          <button id="new-run" class="btn" type="button" hidden>New invoice</button>
+        </div>
+      </div>
+
+      <ol id="stepper" class="stepper" aria-label="Agent phases">
+        <li data-phase="SCAN"><span class="dot"></span><span class="step-name">Scan</span><span class="step-sub">Understanding the document</span></li>
+        <li data-phase="EXTRACT"><span class="dot"></span><span class="step-name">Extract</span><span class="step-sub">Pulling structured data</span></li>
+        <li data-phase="VALIDATE"><span class="dot"></span><span class="step-name">Validate</span><span class="step-sub">Visual checks &amp; finish</span></li>
+      </ol>
+      </div>
+
+      <p id="queue-note" class="note" hidden></p>
+      <div id="timeline" class="timeline" aria-live="polite"></div>
+
+      <div id="banner" class="banner" hidden>
+        <p id="banner-title" class="banner-title"></p>
+        <p id="banner-body" class="banner-body"></p>
+      </div>
+    </section>
+
+    <section id="result-card" class="card result-card" hidden>
+      <div class="result-head">
+        <div>
+          <p class="eyebrow">Flagged document</p>
+          <h2 id="result-file" class="result-title"></h2>
+        </div>
+        <div class="run-meta">
+          <span id="result-status" class="pill"></span>
+          <a id="open-pdf" class="btn" target="_blank" rel="noopener">Open PDF</a>
+        </div>
+      </div>
+      <div class="result-grid">
+        <aside class="result-panel">
+          <div class="tabs" role="tablist">
+            <button id="tab-issues" class="tab" type="button" role="tab" data-tab="issues">Issues</button>
+            <button id="tab-fields" class="tab" type="button" role="tab" data-tab="fields">Fields</button>
+          </div>
+          <ul id="issue-list" class="item-list" role="tabpanel" aria-labelledby="tab-issues"></ul>
+          <ul id="field-list" class="item-list" role="tabpanel" aria-labelledby="tab-fields" hidden></ul>
+        </aside>
+        <div class="viewer-col">
+          <div class="legend" aria-label="Box legend">
+            <span><i class="swatch blue"></i>Value found</span>
+            <span><i class="swatch orange dashed"></i>Value needs review</span>
+            <span><i class="swatch grey dashed"></i>Unsure location</span>
+            <span><i class="swatch red thick"></i>Failed rule</span>
+            <span><i class="swatch orange thick"></i>Warning</span>
+            <span><i class="swatch red dashed thick"></i>Expected here, missing</span>
+          </div>
+          <div id="viewer" class="viewer"></div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

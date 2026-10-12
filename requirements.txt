@@ -16,9 +16,15 @@ surya-ocr
 rich>=13.0.0
 transformers>=4.56.1,<5
 
+# Browser UI (python -m src.ui)
+fastapi>=0.110
+uvicorn>=0.29
+python-multipart>=0.0.9
+
 # AWS deployment (orchestration worker: DynamoDB dedup store)
 boto3>=1.34
 
 # Dev / test
 pytest>=7.0
+httpx>=0.27         # FastAPI TestClient (UI tests)
 moto[dynamodb]>=5   # mock AWS for DynamoDbDedupStore tests
