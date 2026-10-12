@@ -11,8 +11,9 @@ from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from src.ui import statuses
 from src.ui.events import RunHub
-from src.ui.runner import MAX_UPLOAD_BYTES, RunManager, UploadError
+from src.ui.runner import MAX_UPLOAD_BYTES, ActionError, RunManager, UploadError
 
 STATIC_DIR = Path(__file__).parent / "static"
 POLL_INTERVAL_S = 0.15
@@ -73,9 +74,31 @@ def create_app(manager: RunManager) -> FastAPI:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return hub.snapshot()
 
+    @app.get("/api/statuses")
+    def list_statuses() -> dict:
+        return statuses.catalog()
+
     @app.get("/api/runs")
     def list_runs() -> list[dict]:
         return manager.list_runs()
+
+    @app.get("/api/invoices")
+    def list_invoices() -> list[dict]:
+        return manager.list_invoices()
+
+    @app.post("/api/runs/{run_id}/actions/{action}")
+    def run_action(run_id: str, action: str) -> dict:
+        if manager.get(run_id) is None:
+            raise HTTPException(status_code=404, detail="Unknown run")
+        if action not in statuses.ACTIONS:
+            raise HTTPException(status_code=404, detail="Unknown action")
+        try:
+            hub = manager.apply_action(run_id, action)
+        except ActionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except OSError as exc:  # re-evaluate could not read the stored PDF
+            raise HTTPException(status_code=409, detail=f"The uploaded PDF could not be read: {exc}") from exc
+        return hub.snapshot()
 
     @app.get("/api/runs/{run_id}")
     def get_run(run_id: str) -> dict:
@@ -101,7 +124,7 @@ def create_app(manager: RunManager) -> FastAPI:
         )
 
     def _finished_hub(run_id: str) -> RunHub:
-        hub = manager.get(run_id)
+        hub = manager.result_hub(run_id)
         if hub is None or hub.result is None:
             raise HTTPException(status_code=404, detail="No results for this run")
         return hub

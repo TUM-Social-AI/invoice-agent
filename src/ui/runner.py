@@ -2,15 +2,21 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import queue
 import re
 import threading
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Callable
 
+from src.ui import statuses
 from src.ui.events import DONE, ERROR, RUNNING, RunHub
+from src.ui.run_store import load_all, relative_paths, resolve_path
+from src.ui.rule_summary import RuleCatalog, summarize_run
 from src.ui.web_presenter import WebPresenter
 
 logger = logging.getLogger("ui.runner")
@@ -22,16 +28,30 @@ class UploadError(ValueError):
     """Raised for uploads the UI refuses (not a PDF, empty, too large)."""
 
 
+class ActionError(ValueError):
+    """Raised when a reviewer action is not possible in the run's current status."""
+
+
 def _safe_filename(name: str) -> str:
     stem = Path(name or "invoice.pdf").stem
     stem = re.sub(r"[^A-Za-z0-9._-]+", "_", stem).strip("._") or "invoice"
     return f"{stem[:80]}.pdf"
 
 
+def _invoice_type(paths: dict[str, str]) -> str:
+    try:
+        doc = json.loads(Path(paths["trace_json"]).read_text(encoding="utf-8")).get("document") or {}
+    except (KeyError, OSError, ValueError):
+        return ""
+    return doc.get("invoice_type_name") or doc.get("invoice_type_id") or ""
+
+
 class RunManager:
     """
     The agent is expensive to build (OCR models) and its presenter is bound at construction,
     so one agent serves every run through a single worker thread; extra uploads wait in line.
+
+    Runs are saved in their folders under `output_root` and loaded back at start-up.
 
     `agent` needs `.run(pdf_path, output_dir, source_provenance=..., run_identity=...)`.
     """
@@ -52,14 +72,16 @@ class RunManager:
         self._materialize = materialize
         self._write_results = write_results
         self.page_render_scale = page_render_scale
-        self._runs: dict[str, RunHub] = {}
+        self._runs: dict[str, RunHub] = {h.run_id: h for h in load_all(self.output_root)}
+        self._no_result: set[str] = set()
+        self._result_lock = threading.Lock()
         self._queue: queue.Queue[str] = queue.Queue()
         self._worker = threading.Thread(target=self._work, name="ui-run-worker", daemon=True)
         self._worker.start()
 
     # --- public API ------------------------------------------------------------------
 
-    def submit(self, filename: str, data: bytes) -> RunHub:
+    def submit(self, filename: str, data: bytes, *, reevaluated_from: str = "") -> RunHub:
         if not data:
             raise UploadError("The uploaded file is empty.")
         if len(data) > MAX_UPLOAD_BYTES:
@@ -73,7 +95,11 @@ class RunManager:
         pdf_path = run_dir / _safe_filename(filename)
         pdf_path.write_bytes(data)
 
-        hub = RunHub(run_id, pdf_path.name, pdf_path=str(pdf_path))
+        hub = RunHub(run_id, pdf_path.name, pdf_path=str(pdf_path), run_dir=run_dir)
+        hub.content_sha256 = hashlib.sha256(data).hexdigest()
+        hub.reevaluated_from = reevaluated_from
+        note = f"Re-evaluation of run {reevaluated_from}" if reevaluated_from else "Uploaded"
+        hub.set_status(statuses.NEW, by="system", note=note)
         self._runs[run_id] = hub
         hub.publish("run_queued", filename=hub.filename, ahead=self._queue.qsize() + self._busy())
         self._queue.put(run_id)
@@ -85,6 +111,50 @@ class RunManager:
     def list_runs(self) -> list[dict[str, Any]]:
         runs = sorted(self._runs.values(), key=lambda h: h.created_at, reverse=True)
         return [h.snapshot() for h in runs]
+
+    def list_invoices(self) -> list[dict[str, Any]]:
+        """
+        One entry per invoice (same PDF content = same invoice), shown by its latest run,
+        newest first. `run_count` says how many times it was checked.
+        """
+        latest: dict[str, RunHub] = {}
+        counts: dict[str, int] = {}
+        for h in sorted(self._runs.values(), key=lambda h: h.created_at):
+            key = h.content_sha256 or h.run_id
+            latest[key] = h
+            counts[key] = counts.get(key, 0) + 1
+        out = [{**h.snapshot(), "run_count": counts[key]} for key, h in latest.items()]
+        return sorted(out, key=lambda r: r["created_at"], reverse=True)
+
+    def result_hub(self, run_id: str) -> RunHub | None:
+        """The run with its results view loaded; a run reloaded from disk builds it on first use."""
+        hub = self._runs.get(run_id)
+        if hub is None or hub.result is not None or not hub.finished or not hub.paths or run_id in self._no_result:
+            return hub
+        with self._result_lock:
+            if hub.result is None and run_id not in self._no_result:
+                paths = {k: str(resolve_path(hub.run_dir, v)) for k, v in hub.paths.items()}
+                if not self._attach_result(hub, paths):
+                    self._no_result.add(run_id)
+        return hub
+
+    def apply_action(self, run_id: str, name: str) -> RunHub:
+        """
+        Run a reviewer action from `statuses.ACTIONS`. Returns the run the browser should show:
+        the same run for a status change, the new run for a re-evaluation.
+        Raises KeyError for an unknown run or action, ActionError when it is not allowed now.
+        """
+        hub = self._runs[run_id]
+        action = statuses.ACTIONS[name]
+        if name == "reevaluate":
+            if hub.status not in action["from"]:
+                raise ActionError(f"{action['label']} is not possible while the run is {statuses.label(hub.status)}.")
+            new = self.submit(hub.filename, Path(hub.pdf_path).read_bytes(), reevaluated_from=hub.run_id)
+            hub.update(reevaluated_to=new.run_id)
+            return new
+        if not hub.transition(action["from"], action["to"], by="reviewer", note=action["note"]):
+            raise ActionError(f"{action['label']} is not possible while the run is {statuses.label(hub.status)}.")
+        return hub
 
     # --- worker ----------------------------------------------------------------------
 
@@ -99,7 +169,9 @@ class RunManager:
                 self._process(hub)
             except Exception as exc:  # the worker must outlive any single bad run
                 logger.error("Run %s failed: %s", run_id, exc, exc_info=True)
-                hub.publish("run_error", message=str(exc) or exc.__class__.__name__)
+                message = str(exc) or exc.__class__.__name__
+                hub.publish("run_error", message=message)
+                hub.set_status(statuses.ERROR, by="system", note=message[:300])
                 hub.set_state(ERROR)
             finally:
                 self.presenter.detach()
@@ -118,6 +190,8 @@ class RunManager:
             write_results = default_write
 
         hub.set_state(RUNNING)
+        hub.set_status(statuses.PROCESSING, by="system")
+        started = time.time()
         self.presenter.attach(hub)
 
         doc = materialize(hub.pdf_path)[0]
@@ -129,20 +203,42 @@ class RunManager:
             run_identity=doc.run_identity,
         )
         paths = write_results(state, out_dir)
-        # Before run_complete, so the browser can fetch the results view as soon as it hears of it.
+        # Before run_complete, so the browser can fetch the results view and the new status
+        # as soon as it hears of it.
         self._attach_result(hub, paths)
+        verdict = state.status.value
+        rules = summarize_run(state.rule_results, RuleCatalog())
+        hub.update(
+            verdict=verdict,
+            invoice_type=(hub.result or {}).get("invoice_type") or _invoice_type(paths),
+            paths=relative_paths(hub.run_dir, paths),
+            summary={
+                "rules_passed": rules["passed"],
+                "blocking": len(rules["blocking"]),
+                "warnings": len(rules["warnings"]),
+                "not_checked": len(rules["not_checked"]),
+                "fields_extracted": len(state.extracted_fields),
+                "turns": state.turn,
+                "duration_s": round(time.time() - started, 1),
+            },
+        )
+        hub.set_status(
+            statuses.status_from_verdict(verdict), by="agent",
+            note=f"Agent decision: {statuses.verdict_label(verdict)}",
+        )
         self.presenter.run_complete(state, paths=paths)
         hub.set_state(DONE)
 
-    def _attach_result(self, hub: RunHub, paths: dict[str, str]) -> None:
+    def _attach_result(self, hub: RunHub, paths: dict[str, str]) -> bool:
         from src.ui.result_view import load_result
 
         try:
             loaded = load_result(paths, hub.run_id, self.output_root / hub.run_id / "pages", self.page_render_scale)
         except Exception as exc:  # no results view is not a failed run
             logger.error("Results view for run %s failed: %s", hub.run_id, exc, exc_info=True)
-            return
+            return False
         if loaded is None:
-            return
+            return False
         hub.result, hub.page_images = loaded
         hub.flagged_pdf = paths["flagged_pdf"]
+        return True

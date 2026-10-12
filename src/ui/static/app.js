@@ -5,6 +5,7 @@ const PHASES = ["SCAN", "EXTRACT", "VALIDATE"];
 
 const view = {
   runId: null,
+  run: null, // snapshot from /api/runs/<id>: workflow status, history, links
   source: null,
   steps: new Map(), // tool id -> { el, started }
   phase: null,
@@ -22,6 +23,55 @@ function el(tag, className, text) {
 
 function fmtMs(ms) {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
+/* ---------- statuses (labels, colours and actions come from the server) ---------- */
+
+const catalog = { statuses: [], byId: new Map(), actions: {}, verdicts: {} };
+
+async function loadCatalog() {
+  const res = await fetch("/api/statuses").catch(() => null);
+  if (!res || !res.ok) return;
+  const data = await res.json();
+  catalog.statuses = data.statuses;
+  catalog.byId = new Map(data.statuses.map((s) => [s.id, s]));
+  catalog.actions = data.actions;
+  catalog.verdicts = data.verdicts;
+}
+
+// Ids such as "needs_review" never reach the screen; unknown ones still read as words.
+function humanize(id) {
+  const text = String(id || "").replace(/_/g, " ").trim();
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+function statusInfo(id) {
+  return catalog.byId.get(id) || { id, label: humanize(id), tone: "neutral", description: "", active: false };
+}
+
+function verdictLabel(verdict) {
+  return catalog.verdicts[verdict] || humanize(verdict);
+}
+
+function statusPill(id, node = el("span")) {
+  const s = statusInfo(id);
+  node.className = `pill tone-${s.tone}`;
+  node.textContent = s.label;
+  node.title = s.description || "";
+  return node;
+}
+
+function fmtWhen(ts) {
+  return new Date(ts * 1000).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+function fmtAgo(ts) {
+  const s = Math.max(0, Date.now() / 1000 - ts);
+  if (s < 60) return "just now";
+  if (s < 3600) return `${Math.floor(s / 60)} min ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)} h ago`;
+  if (s < 2 * 86400) return "yesterday";
+  return new Date(ts * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
 }
 
 /* ---------- upload ---------- */
@@ -49,8 +99,7 @@ async function uploadFile(file) {
       return;
     }
     const run = await res.json();
-    location.hash = run.run_id;
-    openRun(run.run_id, run.filename);
+    location.hash = `#/runs/${encodeURIComponent(run.run_id)}`;
   } catch (e) {
     showUploadError(
       location.protocol === "file:"
@@ -73,13 +122,88 @@ function initDropzone() {
   ["dragleave", "drop"].forEach((t) =>
     zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.remove("drag"); }));
   zone.addEventListener("drop", (e) => uploadFile(e.dataTransfer.files[0]));
-  $("new-run").addEventListener("click", () => {
-    location.hash = "";
-    resetView();
-    $("run-card").hidden = true;
-    $("view-tabs").hidden = true;
-    $("upload-card").hidden = false;
-  });
+}
+
+/* ---------- dashboard: one row per invoice, shown by its latest run ---------- */
+
+const dash = { runs: [], filter: "all", timer: null };
+const DASH_REFRESH_MS = 2000;
+
+async function loadRuns() {
+  clearTimeout(dash.timer);
+  const res = await fetch("/api/invoices").catch(() => null);
+  if ($("dashboard").hidden) return;
+  if (res && res.ok) {
+    dash.runs = await res.json();
+    renderDashboard();
+  } else {
+    $("runs-empty").textContent = "Could not load the invoices. Is `python -m src.ui` still running?";
+    $("runs-empty").hidden = false;
+  }
+  // Refresh only while something is still moving on its own (new or processing).
+  if (dash.runs.some((r) => statusInfo(r.status).active)) dash.timer = setTimeout(loadRuns, DASH_REFRESH_MS);
+}
+
+function renderDashboard() {
+  const counts = new Map();
+  dash.runs.forEach((r) => counts.set(r.status, (counts.get(r.status) || 0) + 1));
+
+  const filters = $("status-filters");
+  filters.replaceChildren();
+  const chip = (id, label, n) => {
+    const b = el("button", `filter${dash.filter === id ? " on" : ""}${n ? "" : " zero"}`);
+    b.type = "button";
+    b.setAttribute("aria-pressed", String(dash.filter === id));
+    b.append(label, el("span", "filter-n", String(n)));
+    b.addEventListener("click", () => { dash.filter = id; renderDashboard(); });
+    filters.append(b);
+  };
+  chip("all", "All", dash.runs.length);
+  catalog.statuses.forEach((s) => chip(s.id, s.label, counts.get(s.id) || 0));
+  // Statuses the page does not know (e.g. added on the server after it loaded) still get a chip.
+  counts.forEach((n, id) => { if (!catalog.byId.has(id)) chip(id, humanize(id), n); });
+
+  const shown = dash.filter === "all" ? dash.runs : dash.runs.filter((r) => r.status === dash.filter);
+  $("runs-list").replaceChildren(...shown.map(runRow));
+  const empty = $("runs-empty");
+  empty.textContent = dash.runs.length ? `No invoices with the status ${statusInfo(dash.filter).label}.`
+    : "No invoices yet. Drop one above to check it.";
+  empty.hidden = shown.length > 0;
+}
+
+function runRow(r) {
+  const row = el("a", "runs-row run-link");
+  row.href = `#/runs/${encodeURIComponent(r.run_id)}`;
+  row.setAttribute("role", "row");
+
+  const name = el("span", "run-name");
+  name.setAttribute("role", "cell");
+  name.append(el("span", "run-filename", r.filename));
+  if (r.invoice_type) name.append(el("span", "run-sub", r.invoice_type));
+
+  const status = el("span", "run-status");
+  status.setAttribute("role", "cell");
+  status.append(statusPill(r.status));
+
+  const s = r.summary || {};
+  const issues = el("span", "run-issues");
+  issues.setAttribute("role", "cell");
+  if (typeof s.blocking === "number") {
+    const parts = [];
+    if (s.blocking) parts.push(el("span", "issue-n bad", `${s.blocking} blocking`));
+    if (s.warnings) parts.push(el("span", "issue-n warn", `${s.warnings} warning${s.warnings === 1 ? "" : "s"}`));
+    if (!parts.length) parts.push(el("span", "issue-n none", "None"));
+    issues.append(...parts);
+  } else {
+    issues.append(el("span", "muted", "—"));
+  }
+
+  const when = el("span", "run-when", fmtAgo(r.created_at));
+  when.setAttribute("role", "cell");
+  when.title = fmtWhen(r.created_at);
+
+  row.append(name, status, issues, when);
+  return row;
 }
 
 /* ---------- run view ---------- */
@@ -87,23 +211,83 @@ function initDropzone() {
 function resetView() {
   if (view.source) view.source.close();
   clearInterval(view.timer);
-  Object.assign(view, { runId: null, source: null, phase: null, runStarted: null, timer: null });
+  Object.assign(view, { runId: null, run: null, source: null, phase: null, runStarted: null, timer: null });
   view.steps.clear();
   $("timeline").replaceChildren();
   resetResult();
   $("banner").hidden = true;
   $("queue-note").hidden = true;
-  $("new-run").hidden = true;
   $("models").replaceChildren();
   $("run-elapsed").textContent = "0.0s";
+  $("run-actions").replaceChildren();
+  $("run-history").replaceChildren();
+  $("action-error").hidden = true;
   setPhaseStates(null);
-  setState("queued", "Queued");
+  setStatus("new");
 }
 
-function setState(kind, label) {
-  const pill = $("run-state");
-  pill.className = `pill ${kind}`;
-  pill.textContent = label;
+// The workflow status, on both the Run and the Result card.
+function setStatus(id) {
+  statusPill(id, $("run-state"));
+  statusPill(id, $("result-status"));
+}
+
+// Status, reviewer actions and history of the open run, from its server snapshot.
+function renderRunMeta(run) {
+  view.run = run;
+  setStatus(run.status);
+
+  const actions = $("run-actions");
+  actions.replaceChildren();
+  Object.entries(catalog.actions)
+    .filter(([, a]) => a.from.includes(run.status))
+    .forEach(([name, a]) => {
+      const b = el("button", `btn${name === "reevaluate" ? " secondary" : ""}`, a.label);
+      b.type = "button";
+      b.addEventListener("click", () => runAction(name, b));
+      actions.append(b);
+    });
+
+  const hist = $("run-history");
+  hist.replaceChildren();
+  (run.history || []).forEach((h, i) => {
+    if (i) hist.append(el("span", "hist-sep", "→"));
+    const item = el("span", "hist-item");
+    item.append(el("b", "", statusInfo(h.status).label), ` · ${fmtWhen(h.at)}`);
+    if (h.note) item.title = h.note;
+    hist.append(item);
+  });
+  const link = (text, id) => {
+    const a = el("a", "hist-link", text);
+    a.href = `#/runs/${encodeURIComponent(id)}`;
+    return a;
+  };
+  if (run.reevaluated_from) hist.append(link("Re-evaluation of an earlier run", run.reevaluated_from));
+  if (run.reevaluated_to) hist.append(link("Re-evaluated: open the new run →", run.reevaluated_to));
+}
+
+async function refreshRunMeta() {
+  const runId = view.runId;
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
+  if (res && res.ok && view.runId === runId) renderRunMeta(await res.json());
+}
+
+async function runAction(name, button) {
+  const runId = view.runId;
+  $("action-error").hidden = true;
+  button.disabled = true;
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}/actions/${name}`, { method: "POST" }).catch(() => null);
+  button.disabled = false;
+  if (view.runId !== runId) return;
+  if (!res || !res.ok) {
+    const err = res ? await res.json().catch(() => ({})) : {};
+    $("action-error").textContent = err.detail || "That did not work. Is the server still running?";
+    $("action-error").hidden = false;
+    return;
+  }
+  const run = await res.json();
+  if (run.run_id !== runId) location.hash = `#/runs/${encodeURIComponent(run.run_id)}`; // re-evaluated
+  else renderRunMeta(run);
 }
 
 function setPhaseStates(current, failed = false) {
@@ -122,13 +306,31 @@ function tickClock() {
   });
 }
 
-function openRun(runId, filename) {
+function openRun(run) {
   resetView();
+  const runId = run.run_id;
   view.runId = runId;
-  $("upload-card").hidden = true;
-  $("view-tabs").hidden = false;
   showView("run");
-  $("run-file").textContent = filename || "…";
+  $("run-file").textContent = run.filename || "…";
+  renderRunMeta(run);
+
+  // Runs saved before timelines were recorded have no events: show their outcome directly.
+  if (run.event_count === 0 && (run.state === "done" || run.state === "error")) {
+    $("queue-note").textContent = "The timeline was not recorded for this run.";
+    $("queue-note").hidden = false;
+    document.querySelectorAll("#stepper li").forEach((li) => (li.className = run.state === "done" ? "done" : ""));
+    $("run-elapsed").textContent = typeof run.summary?.duration_s === "number" ? fmtMs(run.summary.duration_s * 1000) : "";
+    if (run.verdict) {
+      const banner = $("banner");
+      banner.className = `banner ${run.verdict}`;
+      $("banner-title").textContent = `Agent decision: ${verdictLabel(run.verdict)}`;
+      const last = (run.history || []).slice(-1)[0];
+      $("banner-body").textContent = last && last.note && !last.note.startsWith("Agent decision") ? last.note : "";
+      banner.hidden = false;
+    }
+    if (run.has_result) loadResult(runId);
+    return;
+  }
 
   const source = new EventSource(`/api/runs/${encodeURIComponent(runId)}/events`);
   view.source = source;
@@ -172,7 +374,7 @@ function finishStream(ev) {
   view.timer = null;
   // Final duration comes from the event timestamps, so a replayed run shows its real length.
   if (view.runStarted !== null) $("run-elapsed").textContent = fmtMs(ev.ts * 1000 - view.runStarted);
-  $("new-run").hidden = false;
+  refreshRunMeta(); // the run now has its final status, and actions to match
 }
 
 function onQueued(ev) {
@@ -187,7 +389,7 @@ function onQueued(ev) {
 function onStarted(ev) {
   $("queue-note").hidden = true;
   $("run-file").textContent = ev.filename;
-  setState("running", "Running");
+  if (view.run && statusInfo(view.run.status).active) setStatus("processing");
   view.runStarted = ev.ts * 1000;
   view.timer = setInterval(tickClock, 250);
   const m = ev.models || {};
@@ -262,14 +464,12 @@ function ruleList(rules) {
 
 function onComplete(ev) {
   const status = ev.status;
-  const pillKind = { passed: "done", failed: "error", error: "error" }[status] || "warn";
-  setState(pillKind, status.replace("_", " "));
   setPhaseStates(null);
   document.querySelectorAll("#stepper li").forEach((li) => (li.className = "done"));
 
   const banner = $("banner");
   banner.className = `banner ${status}`;
-  $("banner-title").textContent = `Decision: ${status.replace("_", " ").toUpperCase()}`;
+  $("banner-title").textContent = `Agent decision: ${verdictLabel(status)}`;
   // Same buckets as every step headline: passed / blocking errors / warnings / couldn't be checked.
   const r = ev.rules;
   const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
@@ -301,7 +501,7 @@ function onComplete(ev) {
 }
 
 function onError(ev) {
-  setState("error", "Error");
+  setStatus("error");
   setPhaseStates(view.phase, true);
   view.steps.forEach((s) => {
     if (s.started !== null) { s.el.className = "step fail"; s.started = null; }
@@ -331,7 +531,7 @@ function resetResult() {
   $("issue-list").replaceChildren();
   $("field-list").replaceChildren();
   $("vtab-result").disabled = true;
-  if (!$("view-tabs").hidden) showView("run");
+  if (!$("run-bar").hidden) showView("run");
 }
 
 // Run (progress) and Result (flagged PDF) are separate tabs; Result unlocks when the run has results.
@@ -342,9 +542,13 @@ function showView(name) {
     t.classList.toggle("on", on);
     t.setAttribute("aria-selected", String(on));
   });
+  $("dashboard").hidden = true;
+  $("run-bar").hidden = false;
   $("run-card").hidden = name !== "run";
   $("result-card").hidden = name !== "result";
-  document.querySelector("main").classList.toggle("wide", name === "result");
+  const main = document.querySelector("main");
+  main.classList.remove("dash");
+  main.classList.toggle("wide", name === "result");
 }
 
 async function loadResult(runId) {
@@ -365,9 +569,7 @@ function renderResult(data) {
   resetResult();
   $("open-pdf").href = data.pdf_url;
   $("result-file").textContent = data.file;
-  const status = data.status || "";
-  $("result-status").className = `pill ${{ passed: "done", failed: "error", error: "error" }[status] || "warn"}`;
-  $("result-status").textContent = status.replace("_", " ");
+  if (view.run) setStatus(view.run.status);
 
   const viewer = $("viewer");
   data.pages.forEach((p) => {
@@ -542,18 +744,53 @@ function initResult() {
 
 /* ---------- boot ---------- */
 
+/* ---------- pages: #/ is the dashboard, #/runs/<id> one run ---------- */
+
+function showDashboard() {
+  resetView();
+  $("run-bar").hidden = true;
+  $("run-card").hidden = true;
+  $("result-card").hidden = true;
+  $("dashboard").hidden = false;
+  const main = document.querySelector("main");
+  main.classList.remove("wide");
+  main.classList.add("dash");
+  document.title = "Invoice Compliance Agent";
+  loadRuns();
+}
+
+async function showRunPage(runId) {
+  clearTimeout(dash.timer);
+  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
+  if (currentRunId() !== runId) return; // the user navigated on meanwhile
+  if (!res || !res.ok) {
+    location.hash = "#/";
+    return;
+  }
+  const run = await res.json();
+  document.title = `${run.filename} · Invoice Compliance Agent`;
+  openRun(run);
+  window.scrollTo(0, 0);
+}
+
+function currentRunId() {
+  // "#<id>" is the address older versions of this page used.
+  const m = location.hash.match(/^#\/runs\/([^/?#]+)$/) || location.hash.match(/^#([0-9a-f]{12})$/);
+  return m ? decodeURIComponent(m[1]) : null;
+}
+
+function route() {
+  const runId = currentRunId();
+  if (runId) showRunPage(runId);
+  else showDashboard();
+}
+
 async function boot() {
   initDropzone();
   initResult();
-  const runId = location.hash.slice(1);
-  if (!runId) return;
-  const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
-  if (res && res.ok) {
-    const run = await res.json();
-    openRun(run.run_id, run.filename);
-  } else {
-    location.hash = "";
-  }
+  await loadCatalog();
+  window.addEventListener("hashchange", route);
+  route();
 }
 
 boot();

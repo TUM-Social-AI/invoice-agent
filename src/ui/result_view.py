@@ -119,12 +119,17 @@ def render_page_images(flagged_pdf: str, layout: dict, out_dir: str | Path, scal
     """
     Render each source page of the flagged PDF to JPEG, skipping the summary pages.
     Annotations are not drawn: the UI shows the comment icons itself, so they stay clickable.
+    Images already in `out_dir` are kept: each run has its own folder, so they come from this
+    same flagged PDF (a saved run reopened after a restart).
     """
+    out = Path(out_dir)
+    images = {lp["page"]: str(out / f"p{lp['page']}.jpg") for lp in layout["pages"]}
+    if all(Path(p).is_file() for p in images.values()):
+        return images
+
     import pypdfium2 as pdfium
 
-    out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    images: dict[int, str] = {}
     doc = pdfium.PdfDocument(flagged_pdf)
     try:
         for lp in layout["pages"]:
@@ -134,7 +139,6 @@ def render_page_images(flagged_pdf: str, layout: dict, out_dir: str | Path, scal
                 page.render(scale=scale, draw_annots=False).to_pil().convert("RGB").save(path, quality=JPEG_QUALITY)
             finally:
                 page.close()
-            images[lp["page"]] = str(path)
     finally:
         doc.close()
     return images

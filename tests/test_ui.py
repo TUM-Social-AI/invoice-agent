@@ -127,10 +127,14 @@ def test_presenter_run_complete_reports_verdict():
 class StubAgent:
     """Drives the presenter like the real agent would, without any models."""
 
-    def __init__(self, presenter: WebPresenter, *, fail: bool = False, delay: float = 0.0) -> None:
+    def __init__(
+        self, presenter: WebPresenter, *, fail: bool = False, delay: float = 0.0,
+        status: AgentStatus = AgentStatus.PASSED,
+    ) -> None:
         self.presenter = presenter
         self.fail = fail
         self.delay = delay
+        self.status = status
 
     def run(self, pdf_path, output_dir, source_provenance=None, run_identity=None):
         self.presenter.run_start(pdf_path)
@@ -141,7 +145,7 @@ class StubAgent:
         self.presenter.phase_change("SCAN")
         self.presenter.tool_start(1, "inspect_file", "", {})
         self.presenter.tool_result("inspect_file", {"success": True, "page_count": 1, "size_mb": 0.1, "format": "PDF"}, 5)
-        return AgentState(pdf_path=pdf_path, output_dir=output_dir, status=AgentStatus.PASSED, turn=1)
+        return AgentState(pdf_path=pdf_path, output_dir=output_dir, status=self.status, turn=1)
 
 
 def _manager(tmp_path, **stub_kwargs) -> RunManager:
@@ -353,3 +357,182 @@ def test_broken_results_view_does_not_fail_the_run(tmp_path):
     complete = _read_sse(client, run_id)[-1]
     assert complete["type"] == "run_complete" and complete["has_result"] is False
     assert client.get(f"/api/runs/{run_id}").json()["state"] == "done"
+
+
+# --- Dashboard: workflow statuses, saved runs, reviewer actions --------------------
+
+
+def _upload(client: TestClient, name: str = "a.pdf", data: bytes = PDF_BYTES) -> str:
+    run_id = client.post("/api/runs", files={"file": (name, data, "application/pdf")}).json()["run_id"]
+    _read_sse(client, run_id)  # returns once the run has finished
+    return run_id
+
+
+def test_status_catalog_is_human_readable(tmp_path):
+    from src.ui import statuses
+
+    catalog = TestClient(create_app(_manager(tmp_path))).get("/api/statuses").json()
+    ids = [s["id"] for s in catalog["statuses"]]
+    assert ids == ["new", "processing", "needs_review", "returned", "finalized", "error"]
+    labels = [s["label"] for s in catalog["statuses"]] + list(catalog["verdicts"].values())
+    labels += [a["label"] for a in catalog["actions"].values()]
+    assert all("_" not in label for label in labels)
+    assert statuses.label("needs_review") == "Needs review"
+    assert statuses.label("on_hold") == "On hold"  # an unknown id still reads as words
+
+
+@pytest.mark.parametrize(
+    ("verdict", "status"),
+    [
+        (AgentStatus.PASSED, "needs_review"),
+        (AgentStatus.NEEDS_REVIEW, "needs_review"),
+        (AgentStatus.FAILED, "returned"),
+        (AgentStatus.ERROR, "error"),
+        (AgentStatus.INTERRUPTED, "error"),
+    ],
+)
+def test_agent_verdict_sets_the_workflow_status(tmp_path, verdict, status):
+    client = TestClient(create_app(_manager(tmp_path, status=verdict)))
+    run = client.get(f"/api/runs/{_upload(client)}").json()
+    assert run["verdict"] == verdict.value
+    assert run["status"] == status
+    assert [h["status"] for h in run["history"]] == ["new", "processing", status]
+    assert run["history"][-1]["by"] == "agent"
+
+
+def test_agent_exception_sets_error_status(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path, fail=True)))
+    run = client.get(f"/api/runs/{_upload(client)}").json()
+    assert run["status"] == "error"
+    assert "model exploded" in run["history"][-1]["note"]
+
+
+def test_runs_survive_a_restart_with_their_timeline(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path)))
+    run_id = _upload(client)
+    events = _read_sse(client, run_id)
+
+    reloaded = TestClient(create_app(_manager(tmp_path)))
+    run = reloaded.get(f"/api/runs/{run_id}").json()
+    assert run["status"] == "needs_review" and run["state"] == "done"
+    assert run["summary"]["turns"] == 1
+    assert run["content_sha256"]
+    assert _read_sse(reloaded, run_id) == events
+
+
+def test_run_cut_off_by_a_restart_becomes_error(tmp_path):
+    from src.ui.run_store import STOPPED_NOTE, load_all
+
+    run_dir = tmp_path / "r1"
+    run_dir.mkdir()
+    (run_dir / "a.pdf").write_bytes(PDF_BYTES)
+    hub = RunHub("r1", "a.pdf", run_dir=run_dir)
+    hub.set_status("processing", by="system")
+    hub.publish("run_started", filename="a.pdf")
+
+    (loaded,) = load_all(tmp_path)
+    assert loaded.status == "error" and loaded.finished
+    assert loaded.history[-1]["note"] == STOPPED_NOTE
+    # The stream ends with an error event, so the browser stops waiting for it.
+    assert [e["type"] for e in loaded.events_after(0)] == ["run_started", "run_error"]
+
+
+def test_folder_from_before_the_dashboard_is_backfilled_from_its_trace(tmp_path):
+    from src.ui.run_store import load_all
+
+    old = tmp_path / "oldrun000001"
+    (old / "result").mkdir(parents=True)
+    (old / "inv.pdf").write_bytes(PDF_BYTES)
+    trace = {
+        "document": {"invoice_type_name": "Services"},
+        "run": {"status": "failed", "turns": 4},
+        "fields": [{"value": "ACME"}, {"value": None}],
+        "findings": [
+            {"status": "failed", "severity": "error"},
+            {"status": "warning", "severity": "warning"},
+            {"status": "passed", "severity": "error"},
+            {"status": "not_evaluated", "severity": "warning"},
+        ],
+    }
+    (old / "result" / "trace_inv.json").write_text(json.dumps(trace), encoding="utf-8")
+    no_results = tmp_path / "oldrun000002"
+    no_results.mkdir()
+    (no_results / "inv.pdf").write_bytes(PDF_BYTES)
+    (tmp_path / "not-a-run").mkdir()
+
+    hubs = {h.run_id: h for h in load_all(tmp_path)}
+    assert set(hubs) == {"oldrun000001", "oldrun000002"}
+    h = hubs["oldrun000001"]
+    assert (h.status, h.verdict, h.invoice_type) == ("returned", "failed", "Services")
+    assert h.summary["blocking"] == 1 and h.summary["warnings"] == 1 and h.summary["fields_extracted"] == 1
+    assert h.paths == {"trace_json": "result/trace_inv.json"}
+    assert (old / "run.json").is_file()  # saved, so the next start reads it directly
+    assert hubs["oldrun000002"].status == "error"
+    assert h.content_sha256 == hubs["oldrun000002"].content_sha256
+
+
+def test_invoice_list_has_one_entry_per_pdf_shown_by_its_latest_run(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path)))
+    _upload(client, "a.pdf")
+    other = _upload(client, "b.pdf", PDF_BYTES + b"other")
+    latest = _upload(client, "a copy.pdf")  # same content as a.pdf: same invoice
+    invoices = client.get("/api/invoices").json()
+    assert [(i["run_id"], i["run_count"]) for i in invoices] == [(latest, 2), (other, 1)]
+    assert invoices[0]["filename"] == "a_copy.pdf"
+    assert len(client.get("/api/runs").json()) == 3  # every run is still kept
+
+
+def test_confirm_finalizes_only_a_run_that_needs_review(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path)))
+    run_id = _upload(client)
+    res = client.post(f"/api/runs/{run_id}/actions/confirm")
+    assert res.status_code == 200
+    assert res.json()["status"] == "finalized"
+    assert res.json()["history"][-1]["by"] == "reviewer"
+
+    again = client.post(f"/api/runs/{run_id}/actions/confirm")
+    assert again.status_code == 409 and "Finalized" in again.json()["detail"]
+    assert client.post(f"/api/runs/{run_id}/actions/delete").status_code == 404
+    assert client.post("/api/runs/nope/actions/confirm").status_code == 404
+
+
+def test_reevaluate_starts_a_linked_run_of_the_same_pdf(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path, status=AgentStatus.ERROR)))
+    run_id = _upload(client, "My Invoice.pdf")
+    res = client.post(f"/api/runs/{run_id}/actions/reevaluate")
+    assert res.status_code == 200
+    new = res.json()
+    assert new["run_id"] != run_id and new["reevaluated_from"] == run_id
+    assert new["filename"] == "My_Invoice.pdf"
+    assert client.get(f"/api/runs/{run_id}").json()["reevaluated_to"] == new["run_id"]
+    assert _read_sse(client, new["run_id"])[-1]["type"] == "run_complete"
+    # The invoice stays one entry, now showing the new run.
+    assert [i["run_id"] for i in client.get("/api/invoices").json()] == [new["run_id"]]
+
+
+def test_reevaluate_is_refused_while_the_run_is_still_going(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path, delay=0.5)))
+    run_id = client.post("/api/runs", files={"file": ("a.pdf", PDF_BYTES, "application/pdf")}).json()["run_id"]
+    assert client.post(f"/api/runs/{run_id}/actions/reevaluate").status_code == 409
+    _read_sse(client, run_id)
+
+
+def test_reloaded_run_serves_its_results_view(tmp_path):
+    def manager() -> RunManager:
+        presenter = WebPresenter()
+        return RunManager(
+            StubAgent(presenter), presenter, tmp_path,
+            materialize=lambda path: [SimpleNamespace(local_pdf_path=path, provenance=None, run_identity=None)],
+            write_results=lambda state, out_dir: _flagged_outputs(out_dir),
+            page_render_scale=0.5,
+        )
+
+    client = TestClient(create_app(manager()))
+    run_id = _upload(client)
+    assert client.get(f"/api/runs/{run_id}").json()["has_result"] is True
+
+    reloaded = TestClient(create_app(manager()))
+    view = reloaded.get(f"/api/runs/{run_id}/result").json()
+    assert [p["page"] for p in view["pages"]] == [1, 2]
+    assert reloaded.get(view["pages"][0]["image_url"]).status_code == 200
+    assert reloaded.get(view["pdf_url"]).content.startswith(b"%PDF")

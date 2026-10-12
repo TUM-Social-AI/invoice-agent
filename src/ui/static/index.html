@@ -16,22 +16,47 @@
   </header>
 
   <main class="layout">
-    <section id="upload-card" class="card">
-      <div id="dropzone" class="dropzone" tabindex="0" role="button"
-           aria-label="Choose or drop an invoice PDF">
-        <div class="drop-icon" aria-hidden="true">⇪</div>
-        <p class="drop-title">Drop an invoice PDF here</p>
-        <p class="drop-sub">or <span class="link">browse</span> your files</p>
-        <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
-      </div>
-      <p id="upload-error" class="error-text" role="alert" hidden></p>
-    </section>
+    <div id="dashboard" class="dashboard" hidden>
+      <section id="upload-card" class="card upload-card">
+        <div id="dropzone" class="dropzone" tabindex="0" role="button"
+             aria-label="Choose or drop an invoice PDF">
+          <div class="drop-icon" aria-hidden="true">⇪</div>
+          <p class="drop-title">Drop an invoice PDF here</p>
+          <p class="drop-sub">or <span class="link">browse</span> your files</p>
+          <input id="file-input" type="file" accept="application/pdf,.pdf" hidden>
+        </div>
+        <p id="upload-error" class="error-text" role="alert" hidden></p>
+      </section>
 
-    <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views" hidden>
-      <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
-      <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"
-              title="Available when the run has finished" disabled>Result</button>
-    </nav>
+      <section class="card runs-card" aria-labelledby="runs-title">
+        <div class="runs-head">
+          <h2 id="runs-title" class="runs-title">Invoices</h2>
+          <div id="status-filters" class="filters" role="group" aria-label="Filter by status"></div>
+        </div>
+        <div class="runs-table" role="table" aria-label="Invoices">
+          <div class="runs-row runs-header" role="row">
+            <span role="columnheader">Invoice</span>
+            <span role="columnheader">Status</span>
+            <span role="columnheader">Issues</span>
+            <span role="columnheader">Uploaded</span>
+          </div>
+          <div id="runs-list" role="rowgroup"></div>
+        </div>
+        <p id="runs-empty" class="runs-empty" hidden></p>
+      </section>
+    </div>
+
+    <div id="run-bar" class="run-bar" hidden>
+      <a class="back-link" href="#/">← All runs</a>
+      <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views">
+        <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
+        <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"
+                title="Available when the run has finished" disabled>Result</button>
+      </nav>
+      <div id="run-actions" class="run-actions"></div>
+      <p id="action-error" class="error-text action-error" role="alert" hidden></p>
+      <p id="run-history" class="run-history"></p>
+    </div>
 
     <section id="run-card" class="card" hidden>
       <div class="run-top">
@@ -41,9 +66,8 @@
           <h2 id="run-file" class="run-file"></h2>
         </div>
         <div class="run-meta">
-          <span id="run-state" class="pill">Queued</span>
+          <span id="run-state" class="pill">New</span>
           <span id="run-elapsed" class="elapsed" aria-label="Elapsed time">0.0s</span>
-          <button id="new-run" class="btn" type="button" hidden>New invoice</button>
         </div>
       </div>
 
