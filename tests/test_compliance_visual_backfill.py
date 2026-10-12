@@ -1,4 +1,4 @@
-"""Offline tests for PERS_LOCAL backfill from visual observations."""
+"""Offline tests for person-field backfill from visual observations (payroll and volunteers)."""
 
 from src.agent.state import AgentState, FieldResult
 from src.config.loader import load_config
@@ -63,11 +63,17 @@ def test_merge_visual_field_updates_prefers_schema_keys():
     assert "unknown_field" not in state.extracted_fields
 
 
-def test_config_loads_visual_fallback_and_denylist():
+def test_volunteer_backfill_uses_employee_name_and_role_denylist():
     store = load_config("config/csv")
     assert store.employee_name_role_denylist
-    pl = store.observation_fallbacks_for("PERS_LOCAL")
-    assert any(f.source_rule_id == "R_PL_011" and f.parser_kind == "employee_name_quote" for f in pl)
+    state = AgentState(pdf_path="/tmp/x.pdf", invoice_type_id="VOLUNTARIOS", output_dir="/tmp/out")
+
+    rejected = _merge_visual_field_updates(state, store, "R_VOL_101", 1, {"employee_name": "Relais communautaire"})
+    merged = _merge_visual_field_updates(state, store, "R_VOL_101", 1, {"employee_name": "Vounsouma Gaya Malloum"})
+
+    assert rejected == []
+    assert merged == ["employee_name"]
+    assert state.extracted_fields["employee_name"].field_id == "VOL_001"
 
 
 def test_merge_visual_field_updates_skips_when_already_set():

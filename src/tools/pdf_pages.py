@@ -130,10 +130,12 @@ def convert_pdf_to_images(state: AgentState, dpi: int = 150) -> dict:
     pdf = pdfium.PdfDocument(state.pdf_path)
     paths = []
     scale = dpi / 72.0
+    rotation_fix = getattr(state, "page_rotation", None) or {}
 
     try:
         for i, page in enumerate(pdf):
-            bitmap = page.render(scale=scale, rotation=0)
+            # Orientation fix found for sideways scans (src/trace/orientation.py); 0 otherwise.
+            bitmap = page.render(scale=scale, rotation=int(rotation_fix.get(i + 1, 0)))
             pil_img = bitmap.to_pil()
             bitmap.close()
             page.close()
@@ -181,10 +183,11 @@ def render_medium_pages(
     pdf = pdfium.PdfDocument(state.pdf_path)
     paths: list[str] = []
     scale = dpi / 72.0
+    rotation_fix = getattr(state, "page_rotation", None) or {}
 
     try:
         for i, page in enumerate(pdf):
-            bitmap = page.render(scale=scale, rotation=0)
+            bitmap = page.render(scale=scale, rotation=int(rotation_fix.get(i + 1, 0)))
             pil_img = bitmap.to_pil()
             bitmap.close()
             page.close()

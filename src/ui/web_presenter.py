@@ -210,4 +210,5 @@ class WebPresenter:
             rules=summarize_run(state.rule_results, self._catalog),
             flagged_fields=[k for k, v in state.extracted_fields.items() if v.flagged_for_review],
             outputs=dict(paths),
+            has_result=bool(self._hub is not None and self._hub.result),
         )

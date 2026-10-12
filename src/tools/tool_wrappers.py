@@ -24,7 +24,8 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.state import AgentState, AgentStatus, rule_verdict_summary
-from src.config.loader import ConfigStore
+from src.config.loader import ConfigStore, unresolved_rule_params
+from src.tools.compliance_eval import is_non_blocking_skip
 from src.llm.base import LLMProvider
 from src.agent.param_resolver import resolve_param
 from src.tools.tools import (
@@ -50,6 +51,12 @@ from src.tools.tools import (
     _union_bboxes,
     _save_image_crop,
 )
+from src.tools.compliance_eval import visual_not_evaluated_ids
+from src.tools.page_inventory import page_document_role
+from src.prompts.llm_prompts import page_role_note
+from src.trace.evidence import restrict_citations
+from src.trace.ocr_cache import lines_in_box, lines_with_ids, page_ocr
+from src.trace.orientation import fix_orientation
 from src.models.action_models import (
     CheckVisualParams,
     CropRegionParams,
@@ -89,6 +96,10 @@ class ToolContext:
     surya_models: Any
     inventory_batch_size: int = 1
     ocr_silent: bool = False
+    # Traceability: cache OCR per page, number OCR lines in prompts, ask for line citations.
+    trace_enabled: bool = False
+    trace_visual_ocr_max_chars_per_page: int = 3000
+    trace_auto_rotate: bool = False
 
     # -- helpers ----------------------------------------------------------------
 
@@ -181,7 +192,8 @@ def _resolve_image_path(
         idx = max(0, min(page_num - 1, len(state.page_image_paths) - 1))
         image_path = state.page_image_paths[idx]
         logger.info(f"  {label or 'tool'}: page_num={page_num} → {image_path}")
-        return image_path, page_num, None
+        # Report the page actually used, so source_page and OCR cache refer to the same page.
+        return image_path, idx + 1, None
 
     # crop_region: accept an explicit path when it exists and looks valid.
     # Named aliases resolved via param_resolver; extension-based fallback
@@ -341,7 +353,15 @@ def make_convert_pdf(ctx: ToolContext):
     for the first-pass extraction attempt.
     """
     def _convert_pdf(state: AgentState, **kwargs):
-        res = convert_pdf_to_images(state, dpi=ctx.default_convert_dpi(state, kwargs))
+        dpi = ctx.default_convert_dpi(state, kwargs)
+        res = convert_pdf_to_images(state, dpi=dpi)
+        if res.get("success") and ctx.trace_enabled and ctx.trace_auto_rotate:
+            try:
+                turned = fix_orientation(state, ctx.surya_models, dpi=dpi, silent=ctx.ocr_silent)
+                if turned:
+                    res["pages_turned_upright"] = turned
+            except Exception as e:  # orientation is best effort; never block rendering
+                logger.warning("  orientation check failed (non-fatal): %s", e)
         if (
             res.get("success")
             and bool(ctx.agent_cfg.get("hybrid_extraction", True))
@@ -416,6 +436,11 @@ def make_extract(ctx: ToolContext):
                 ),
             }
         full_schema = ctx.store.build_extraction_schema(state.invoice_type_id)
+        page_role = page_document_role(state, page_num)
+        merge_opts = {
+            "role_priority": ctx.agent_cfg.get("document_role_priority") or {},
+            "date_order": str(ctx.agent_cfg.get("extraction_date_order", "DMY")),
+        }
 
         # ── Batch auto-expansion ──────────────────────────────────────────────
         if ctx.agent_cfg.get("batch_auto_expand", True):
@@ -437,20 +462,28 @@ def make_extract(ctx: ToolContext):
         def _run_extract_on_image(img_path: str) -> dict:
             # ── OCR-guided extraction ─────────────────────────────────────────
             OCR_DIRECT_THRESHOLD = 0.80
-            ocr = _ocr_with_layout(img_path, surya_models=ctx.surya_models, silent=ctx.ocr_silent)
+            if ctx.trace_enabled:
+                ocr = page_ocr(state, page_num, img_path, ctx.surya_models, silent=ctx.ocr_silent)
+            else:
+                ocr = _ocr_with_layout(img_path, surya_models=ctx.surya_models, silent=ctx.ocr_silent)
             if not ocr.is_empty():
                 logger.debug(f"  OCR layout: {len(ocr.lines)} lines, {len(ocr.full_text)} chars")
 
             ocr_direct: dict = {}   # field_name → (value_text, confidence)
+            ocr_direct_boxes: dict = {}  # field_name → value bbox (pixels), for trace evidence
             ocr_crop: dict = {}     # field_name → FieldLocalization
             fallback: dict = {}     # field_name → field_meta
 
+            # ocr_direct_extraction=false: OCR only goes into the prompt as context; the vision
+            # model reads every field from the full page (no label-matched values or crops).
+            ocr_routing = bool(ctx.agent_cfg.get("ocr_direct_extraction", True))
             for field_name, field_meta in schema.items():
-                loc = _localize_field_in_ocr(field_meta, ocr)
+                loc = _localize_field_in_ocr(field_meta, ocr) if ocr_routing else None
                 if loc is None:
                     fallback[field_name] = field_meta
                 elif loc.value_confidence >= OCR_DIRECT_THRESHOLD and loc.value_text:
                     ocr_direct[field_name] = (loc.value_text, loc.value_confidence)
+                    ocr_direct_boxes[field_name] = loc.value_bbox
                 else:
                     ocr_crop[field_name] = loc
 
@@ -459,8 +492,10 @@ def make_extract(ctx: ToolContext):
                 f"{len(ocr_crop)} OCR-crop, {len(fallback)} fallback-vision"
             )
 
-            hints = kwargs.get("hints", "")
-            combined_merge: dict = {"updated": [], "kept_existing": 0, "null_fields": 0, "skipped": 0}
+            hints = "\n".join(h for h in (page_role_note(page_role), kwargs.get("hints", "")) if h)
+            combined_merge: dict = {
+                "updated": [], "kept_existing": 0, "null_fields": 0, "skipped": 0, "rejected": {},
+            }
             any_success = False
 
             def _accumulate(merge_r: dict) -> None:
@@ -470,6 +505,7 @@ def make_extract(ctx: ToolContext):
                 combined_merge["null_fields"] += (
                     _null_raw if isinstance(_null_raw, int) else len(_null_raw)
                 )
+                combined_merge["rejected"].update(merge_r.get("rejected") or {})
 
             # ── Step 1: OCR-direct fields (no vision needed) ──────────────────
             if ocr_direct:
@@ -477,10 +513,12 @@ def make_extract(ctx: ToolContext):
                 for fname, (val, conf) in ocr_direct.items():
                     direct_extraction[fname] = val
                     direct_extraction[f"{fname}_confidence"] = conf
+                    if ctx.trace_enabled:
+                        direct_extraction[f"{fname}_evidence"] = lines_in_box(ocr, ocr_direct_boxes[fname])
                 direct_schema = {k: schema[k] for k in ocr_direct}
                 _accumulate(merge_extracted_fields(
                     state, direct_extraction, direct_schema,
-                    source_page=page_num, source_region="ocr_direct",
+                    source_page=page_num, source_region="ocr_direct", **merge_opts,
                 ))
                 any_success = True
 
@@ -500,12 +538,21 @@ def make_extract(ctx: ToolContext):
                     )
                     sub_schema = {fname: schema[fname] for fname, _ in fields_in_region}
                     cx1, cy1, cx2, cy2 = crop_bbox
-                    crop_ocr_lines = [
-                        l for l in ocr.lines
+                    crop_line_idx = [
+                        i for i, l in enumerate(ocr.lines)
                         if l.bbox[0] < cx2 and l.bbox[2] > cx1
                         and l.bbox[1] < cy2 and l.bbox[3] > cy1
                     ]
-                    crop_text = "\n".join(l.text for l in crop_ocr_lines if l.text.strip())
+                    crop_shown: set = set()
+                    if ctx.trace_enabled:
+                        # Page-level line IDs stay valid in the crop: its lines are a subset.
+                        crop_text, crop_shown = lines_with_ids(
+                            ocr, crop_line_idx, max_chars=ctx.ocr_prompt_max_chars,
+                        )
+                    else:
+                        crop_text = ctx.cap_ocr_prompt_text(
+                            "\n".join(ocr.lines[i].text for i in crop_line_idx if ocr.lines[i].text.strip())
+                        )
                     crop_result = extract_fields_vision(
                         state,
                         image_path=crop_path,
@@ -513,14 +560,17 @@ def make_extract(ctx: ToolContext):
                         hints=hints,
                         ollama_url=ctx.ollama_url,
                         model=ctx.vision_model,
-                        text_context=ctx.cap_ocr_prompt_text(crop_text),
+                        text_context=crop_text,
                         provider=ctx.provider,
                         timeout_s=ctx.timeouts["generate_timeout_s"],
+                        cite_lines=ctx.trace_enabled,
                     )
                     if crop_result["success"]:
+                        if ctx.trace_enabled:
+                            restrict_citations(crop_result["extracted"], crop_shown)
                         _accumulate(merge_extracted_fields(
                             state, crop_result["extracted"], sub_schema,
-                            source_page=page_num, source_region=f"ocr_crop_{region}",
+                            source_page=page_num, source_region=f"ocr_crop_{region}", **merge_opts,
                         ))
                         any_success = True
 
@@ -528,6 +578,11 @@ def make_extract(ctx: ToolContext):
             last_result: dict = {"success": False, "error": "no fields to extract"}
             if fallback:
                 fallback_schema = {k: schema[k] for k in fallback}
+                page_text, page_shown = (
+                    lines_with_ids(ocr, max_chars=ctx.ocr_prompt_max_chars)
+                    if ctx.trace_enabled
+                    else (ctx.cap_ocr_prompt_text(ocr.full_text or ""), set())
+                )
                 last_result = extract_fields_vision(
                     state,
                     image_path=img_path,
@@ -535,14 +590,17 @@ def make_extract(ctx: ToolContext):
                     hints=hints,
                     ollama_url=ctx.ollama_url,
                     model=ctx.vision_model,
-                    text_context=ctx.cap_ocr_prompt_text(ocr.full_text or ""),
+                    text_context=page_text,
                     provider=ctx.provider,
                     timeout_s=ctx.timeouts["generate_timeout_s"],
+                    cite_lines=ctx.trace_enabled,
                 )
                 if last_result["success"]:
+                    if ctx.trace_enabled:
+                        restrict_citations(last_result["extracted"], page_shown)
                     _accumulate(merge_extracted_fields(
                         state, last_result["extracted"], fallback_schema,
-                        source_page=page_num, source_region=kwargs.get("region", "unknown"),
+                        source_page=page_num, source_region=kwargs.get("region", "unknown"), **merge_opts,
                     ))
                     any_success = True
             elif not any_success:
@@ -586,16 +644,54 @@ def make_extract(ctx: ToolContext):
     return _extract
 
 
+def _extract_uncovered_role_pages(state: AgentState, extract, agent_cfg: dict, store: ConfigStore) -> list[int]:
+    """
+    Run extract_fields_vision once on every inventoried page whose document_role is listed in
+    agent.auto_extract_page_roles and that no extraction has covered yet, so the role ranking in
+    merge_extracted_fields can choose between the pages that matter (the agent often skips the
+    funds request). Returns the pages extracted here.
+    """
+    roles = set(agent_cfg.get("auto_extract_page_roles") or [])
+    if not roles or not state.page_image_paths or not state.invoice_type_id:
+        return []
+    # Ask only for the fields whose source page is ranked by role; the others keep the agent's choice.
+    ranked = set(agent_cfg.get("document_role_priority") or {})
+    fields = [f for f in store.build_extraction_schema(state.invoice_type_id) if f in ranked]
+    if not fields:
+        return []
+    covered: set[int] = set()
+    for action in state.action_history:
+        out = action.tool_output if isinstance(action.tool_output, dict) else {}
+        if action.tool_name == "extract_fields_vision" and out.get("success"):
+            covered.add(_coerce_page_num(action.tool_input.get("page_num")))
+        covered.update(out.get("auto_extracted_pages") or [])
+    done: list[int] = []
+    for entry in sorted(state.page_inventory or [], key=lambda e: int(e.get("page", 0) or 0)):
+        page = int(entry.get("page", 0) or 0)
+        if page < 1 or page in covered or entry.get("document_role") not in roles:
+            continue
+        logger.info("  check_compliance: extracting uncovered %s page %d first", entry.get("document_role"), page)
+        res = extract(state, page_num=page, region="body", field_subset=fields)
+        if isinstance(res, dict) and res.get("success"):
+            done.append(page)
+    return done
+
+
 def make_check(ctx: ToolContext):
     """Return the check_compliance tool callable.
 
     Includes a redundancy guard: if the result is identical to the previous
     call and occurred within 3 turns, warns the agent not to repeat the call.
     """
+    extract = make_extract(ctx)
+
     def _check(state: AgentState, **kwargs):
         import hashlib
+        auto_pages = _extract_uncovered_role_pages(state, extract, ctx.agent_cfg, ctx.store)
         rules = ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
         result = check_compliance(state, rules, store=ctx.store)
+        if auto_pages:
+            result["auto_extracted_pages"] = auto_pages
 
         result_hash = hashlib.md5(
             json.dumps(result, sort_keys=True, default=str).encode()
@@ -761,7 +857,12 @@ def make_check_visual(ctx: ToolContext):
                     "Visual stamp/signature checks require full-quality images."
                 ),
             }
-        rules = ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
+        # Rules whose {section.key} config value is unset are reported by check_compliance as
+        # not configured; they never go to the vision model.
+        rules = [
+            r for r in ctx.store.get_rules(state.invoice_type_id, ctx.active_rule_groups)
+            if not unresolved_rule_params(r)
+        ]
         return check_compliance_visual(
             state,
             image_path,
@@ -774,8 +875,23 @@ def make_check_visual(ctx: ToolContext):
             timeout_s=ctx.timeouts["generate_timeout_s"],
             hybrid_visual=bool(ctx.agent_cfg.get("hybrid_extraction", True)),
             store=ctx.store,
+            trace_ocr=_trace_ocr_for(ctx, state),
+            trace_ocr_max_chars_per_page=ctx.trace_visual_ocr_max_chars_per_page,
         )
     return _check_visual
+
+
+def _trace_ocr_for(ctx: ToolContext, state: AgentState):
+    """Page → cached OCR of its full-res image, or None when traceability is off."""
+    if not ctx.trace_enabled:
+        return None
+
+    def _ocr(page: int):
+        if not (1 <= page <= len(state.page_image_paths)):
+            return None
+        return page_ocr(state, page, state.page_image_paths[page - 1], ctx.surya_models, silent=ctx.ocr_silent)
+
+    return _ocr
 
 
 def make_install_package(ctx: ToolContext):
@@ -835,17 +951,26 @@ def make_finish(ctx: ToolContext):
         state.finish_reason = kwargs.get("reason", "done")
         has_flags = any(f.flagged_for_review for f in state.extracted_fields.values())
 
+        # Visual rules the vision call could not judge are neither passed nor failed:
+        # they route the run to human review instead of blocking or failing it.
+        visual_unevaluated = visual_not_evaluated_ids(state)
+        visual_error_unevaluated = sorted(
+            rr.rule_id for rr in state.rule_results
+            if rr.rule_id in visual_unevaluated and rr.severity == "error"
+        )
         error_failed = any(
             (rr.status == "failed" and rr.severity == "error") for rr in state.rule_results
         )
         error_skipped = any(
-            (rr.status == "skipped" and rr.severity == "error") for rr in state.rule_results
+            (rr.status == "skipped" and rr.severity == "error" and not is_non_blocking_skip(rr)
+             and rr.rule_id not in visual_unevaluated)
+            for rr in state.rule_results
         )
         unresolved_error_evidence = False
         for rr in state.rule_results:
-            if rr.severity != "error":
+            if rr.severity != "error" or is_non_blocking_skip(rr):
                 continue
-            if rr.status == "passed":
+            if rr.status == "passed" or rr.rule_id in visual_unevaluated:
                 continue
             ev = state.rule_evidence.get(rr.rule_id, {})
             missing = ev.get("missing_slots", [])
@@ -857,7 +982,8 @@ def make_finish(ctx: ToolContext):
         all_errors_resolved = not error_failed and not error_skipped and not unresolved_error_evidence
 
         if all_errors_resolved:
-            state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.PASSED
+            needs_review = has_flags or bool(visual_error_unevaluated)
+            state.status = AgentStatus.NEEDS_REVIEW if needs_review else AgentStatus.PASSED
         else:
             state.status = AgentStatus.NEEDS_REVIEW if has_flags else AgentStatus.FAILED
 
@@ -867,6 +993,11 @@ def make_finish(ctx: ToolContext):
         if not all_errors_resolved:
             status_explanation = (
                 "Run status reflects blocking error-severity rule failures or incomplete error evidence."
+            )
+        elif visual_error_unevaluated:
+            status_explanation = (
+                "No blocking error-severity failures, but error-severity visual rules were not "
+                f"evaluated ({', '.join(visual_error_unevaluated)}); a human has to check them."
             )
         elif warning_failures:
             status_explanation = (
@@ -888,6 +1019,7 @@ def make_finish(ctx: ToolContext):
                 "unresolved_error_evidence": unresolved_error_evidence,
                 "error_failed": error_failed,
                 "error_skipped": error_skipped,
+                "visual_not_evaluated": sorted(visual_unevaluated),
             },
         }
     return _finish

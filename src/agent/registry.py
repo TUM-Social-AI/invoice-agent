@@ -86,6 +86,7 @@ def build_tool_registry(
         ``(state: AgentState, **kwargs) -> dict``.
     """
     agent_cfg = config.get("agent", {})
+    trace_cfg = config.get("traceability", {}) or {}
     _plim = prompt_limits_for_config(config)
 
     ctx = ToolContext(
@@ -104,6 +105,9 @@ def build_tool_registry(
         surya_models=surya_models,
         inventory_batch_size=int(agent_cfg.get("inventory_batch_size", 1)),
         ocr_silent=ocr_silent,
+        trace_enabled=bool(trace_cfg.get("enabled", False)),
+        trace_visual_ocr_max_chars_per_page=int(trace_cfg.get("visual_ocr_max_chars_per_page", 3000) or 0),
+        trace_auto_rotate=bool(trace_cfg.get("auto_rotate", False)),
     )
 
     return {

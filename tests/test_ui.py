@@ -244,3 +244,112 @@ def test_index_page_is_served(tmp_path):
     res = client.get("/")
     assert res.status_code == 200
     assert "Invoice Compliance Agent" in res.text
+    # The browser must revalidate the UI files so an updated app.js is picked up.
+    assert res.headers["cache-control"] == "no-cache"
+    assert client.get("/static/app.js").headers["cache-control"] == "no-cache"
+
+
+# --- Results view (flagged PDF) ----------------------------------------------------
+
+
+def _flagged_outputs(out_dir: str) -> dict[str, str]:
+    """What write_results returns for a traced run: a flagged PDF plus a trace with its layout."""
+    from pathlib import Path
+
+    from src.trace.pdf_writer import render_flagged_pdf
+    from tests.test_trace_flagged_layout import sample_trace, write_source_pdf
+
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    trace = sample_trace()
+    pdf = out / "flagged_inv.pdf"
+    trace["flagged_pdf"] = render_flagged_pdf(trace, write_source_pdf(out / "src.pdf"), str(pdf))
+    (out / "trace_inv.json").write_text(json.dumps(trace), encoding="utf-8")
+    return {"trace_json": str(out / "trace_inv.json"), "flagged_pdf": str(pdf)}
+
+
+def test_result_view_scales_boxes_to_the_page_image():
+    from src.trace.pdf_writer import MARGIN
+    from src.ui.result_view import build_result_view
+    from tests.test_trace_flagged_layout import sample_trace
+
+    trace = sample_trace()
+    trace["flagged_pdf"] = {"summary_pages": 1, "pages": [
+        {"page": 1, "pdf_index": 1, "scan_w": 595.0, "scan_h": 842.0, "margin": MARGIN,
+         "comments": [{"ref": "F1", "rule_id": "R_F1", "status": "failed", "text": "t", "rect": [601, 100, 617, 116]}]},
+        {"page": 2, "pdf_index": 2, "scan_w": 595.0, "scan_h": 842.0, "margin": 0.0, "comments": []},
+    ]}
+    # An entry the visual check wrote under its own name is not a field of the type: hidden.
+    trace["fields"].append({**trace["fields"][-1], "field_name": "AEXCID_stamp", "in_schema": False})
+    view = build_result_view(trace, "r1")
+    frac = 595.0 / (595.0 + MARGIN)
+    assert [f["field_name"] for f in view["fields"]] == ["vendor_name", "total_amount", "vat_amount"]
+
+    p1, p2 = view["pages"]
+    assert p1["image_url"] == "/api/runs/r1/pages/1.jpg"
+    assert p1["aspect"] == pytest.approx(842.0 / (595.0 + MARGIN))
+    assert p2["aspect"] == pytest.approx(842.0 / 595.0)
+    assert p1["comments"][0]["box"] == pytest.approx([601 / 745, 100 / 842, 617 / 745, 116 / 842])
+
+    fields = {f["field_name"]: f for f in view["fields"]}
+    assert fields["vendor_name"]["target"] == {"page": 1, "box": pytest.approx([0.1 * frac, 0.1, 0.4 * frac, 0.15])}
+    assert fields["total_amount"]["target"] == {"page": 1, "box": None}  # value read, no box: page only
+    assert fields["total_amount"]["display"] == "425 000"
+    assert fields["vat_amount"]["target"] is None and fields["vat_amount"]["display"] == "not found"
+
+    # Failed before warnings, passed left out; a missing item points at its expected spot.
+    assert [f["ref"] for f in view["findings"]] == ["F1", "F2"]
+    f1, f2 = view["findings"]
+    assert f1["target"]["box"] == pytest.approx([0.5 * frac, 0.5, 0.7 * frac, 0.55])
+    assert f2["target"]["box"] == pytest.approx([0.2 * frac, 0.8, 0.4 * frac, 0.85])
+    assert f1["title"] == "F1 is wrong"
+    assert f1["comment"].startswith("F1 [FAILED] R_F1")
+
+
+def test_finished_run_serves_results_pages_and_pdf(tmp_path):
+    presenter = WebPresenter()
+    manager = RunManager(
+        StubAgent(presenter), presenter, tmp_path,
+        materialize=lambda path: [SimpleNamespace(local_pdf_path=path, provenance=None, run_identity=None)],
+        write_results=lambda state, out_dir: _flagged_outputs(out_dir),
+        page_render_scale=0.5,
+    )
+    client = TestClient(create_app(manager))
+    run_id = client.post("/api/runs", files={"file": ("a.pdf", PDF_BYTES, "application/pdf")}).json()["run_id"]
+    complete = _read_sse(client, run_id)[-1]
+    assert complete["type"] == "run_complete" and complete["has_result"] is True
+
+    view = client.get(f"/api/runs/{run_id}/result").json()
+    assert [p["page"] for p in view["pages"]] == [1, 2]  # summary pages are not shown
+    img = client.get(view["pages"][0]["image_url"])
+    assert img.status_code == 200 and img.headers["content-type"] == "image/jpeg"
+    assert img.content[:2] == b"\xff\xd8"
+    assert client.get(f"/api/runs/{run_id}/pages/3.jpg").status_code == 404
+    assert client.get(f"/api/runs/{run_id}/pages/x.jpg").status_code == 422
+
+    pdf = client.get(view["pdf_url"])
+    assert pdf.status_code == 200 and pdf.content.startswith(b"%PDF")
+    assert pdf.headers["content-disposition"].startswith("inline")
+
+
+def test_run_without_trace_has_no_results(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path)))
+    run_id = client.post("/api/runs", files={"file": ("a.pdf", PDF_BYTES, "application/pdf")}).json()["run_id"]
+    assert _read_sse(client, run_id)[-1]["has_result"] is False
+    assert client.get(f"/api/runs/{run_id}/result").status_code == 404
+    assert client.get(f"/api/runs/{run_id}/pages/1.jpg").status_code == 404
+    assert client.get(f"/api/runs/{run_id}/flagged.pdf").status_code == 404
+
+
+def test_broken_results_view_does_not_fail_the_run(tmp_path):
+    presenter = WebPresenter()
+    manager = RunManager(
+        StubAgent(presenter), presenter, tmp_path,
+        materialize=lambda path: [SimpleNamespace(local_pdf_path=path, provenance=None, run_identity=None)],
+        write_results=lambda state, out_dir: {"trace_json": f"{out_dir}/missing.json", "flagged_pdf": "x.pdf"},
+    )
+    client = TestClient(create_app(manager))
+    run_id = client.post("/api/runs", files={"file": ("a.pdf", PDF_BYTES, "application/pdf")}).json()["run_id"]
+    complete = _read_sse(client, run_id)[-1]
+    assert complete["type"] == "run_complete" and complete["has_result"] is False
+    assert client.get(f"/api/runs/{run_id}").json()["state"] == "done"

@@ -8,6 +8,7 @@ from src.prompts.llm_prompts import (
     build_planning_user_prompt,
     build_reflection_learning_prompt,
     classify_document_type_prompt,
+    classify_from_inventory_prompt,
     format_extraction_accuracy_block,
     page_inventory_prompt,
 )
@@ -20,6 +21,7 @@ __all__ = [
     "build_planning_user_prompt",
     "build_reflection_learning_prompt",
     "classify_document_type_prompt",
+    "classify_from_inventory_prompt",
     "format_extraction_accuracy_block",
     "page_inventory_prompt",
 ]

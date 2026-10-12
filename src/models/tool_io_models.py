@@ -13,6 +13,26 @@ class ClassificationResultModel(BaseModel):
     reasoning: str = ""
 
 
+# Who issued a page and what it proves, independent of its layout category. Lets extraction
+# rank pages per field (e.g. vendor fields from the supplier's invoice, never from the payer's
+# own funds request). "" = unknown (no role given).
+DOCUMENT_ROLES = (
+    "funds_request",
+    "internal_other",
+    "supplier_invoice",
+    "supplier_other",
+    "payment_proof",
+    "other",
+)
+
+
+def inventory_label(entry: dict) -> str:
+    """Category plus document role for prompts and summaries, e.g. "INVOICE_HEADER, funds_request"."""
+    category = str(entry.get("category") or "UNKNOWN")
+    role = str(entry.get("document_role") or "")
+    return f"{category}, {role}" if role else category
+
+
 class InventoryItemModel(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
@@ -26,12 +46,19 @@ class InventoryItemModel(BaseModel):
         "BLANK",
         "UNKNOWN",
     ] = "UNKNOWN"
+    document_role: str = ""
     description: str = ""
 
     @field_validator("category", mode="before")
     @classmethod
     def normalize_category(cls, value: Any) -> str:
         return str(value or "UNKNOWN").strip().upper()
+
+    @field_validator("document_role", mode="before")
+    @classmethod
+    def normalize_document_role(cls, value: Any) -> str:
+        role = str(value or "").strip().lower()
+        return role if role in DOCUMENT_ROLES else ""
 
 
 class VisualVerdictModel(BaseModel):
@@ -42,6 +69,22 @@ class VisualVerdictModel(BaseModel):
     observation: str = "No observation"
     # Optional: extraction field names → values the vision model is confident about for this rule.
     field_updates: dict[str, str] = Field(default_factory=dict)
+    # Traceability: OCR line IDs the verdict is based on (p<page>_L<n>) and what kind of evidence it is.
+    evidence_line_ids: list[str] = Field(default_factory=list)
+    evidence_kind: str = ""
+
+    @field_validator("evidence_line_ids", mode="before")
+    @classmethod
+    def _coerce_line_ids(cls, value: Any) -> list[str]:
+        from src.trace.evidence import coerce_line_ids
+
+        return coerce_line_ids(value)
+
+    @field_validator("evidence_kind", mode="before")
+    @classmethod
+    def _coerce_kind(cls, value: Any) -> str:
+        v = str(value or "").strip().lower()
+        return v if v in ("text", "anchor", "absent", "none") else ""
 
     @model_validator(mode="before")
     @classmethod

@@ -18,6 +18,7 @@ from src.config.loader import ConfigStore
 from src.llm.base import LLMProvider
 from src.llm.config_resolve import active_rule_groups_from_config
 from src.agent.phases import current_phase as _current_phase, next_required_step as _next_required_step
+from src.prompts.llm_prompts import OUTPUT_LANGUAGE_RULE
 from src.agent.tool_policy import (
     parse_tool_description_blocks,
     load_tool_description_overrides,
@@ -38,7 +39,8 @@ compress_pages(dpi=48, quality=30, max_width=1400)
     Low-res copies are remembered separately so convert_pdf_to_images can still render
     full quality for extraction without losing the thumbnails.
 classify_document_type()
-  → vision model identifies invoice type from first page; call after pages are rendered
+  → identifies the invoice type from the page inventory of all pages (page 1 image when no
+    inventory exists); call after inventory_pages
 convert_pdf_to_images(dpi=150)
   → render all pages at full quality into output/pages/
 crop_region(image_path, region, page_num, custom_bbox=null)
@@ -92,6 +94,11 @@ delete_learning(learning_id)
 inventory_pages()
   → classifies each page into a fixed category + short description
   → categories: INVOICE_HEADER | LINE_ITEMS | TOTALS | SIGNATURE_STAMP | SUPPORTING_DOC | COVER_PAGE | BLANK
+  → each page also gets a document_role (who issued it): funds_request (the payer's internal funds/payment
+    request) | internal_other (the payer's other forms: requisition, goods received note, timesheet) |
+    supplier_invoice | supplier_other (pro forma, quote, delivery note) | payment_proof | other
+  → extract every page whose role is supplier_invoice, funds_request or payment_proof; when several pages show
+    the same field, extraction keeps the value from the page role configured for it (not just the most confident)
   → automatically uses low-res compressed thumbnails if compress_pages was called (much faster)
   → result visible in state summary; use categories to decide which pages to target
   → MUST call compress_pages(dpi=48, quality=30) before this, then convert_pdf_to_images for extraction
@@ -146,7 +153,9 @@ Working style:
     automatically, even after convert_pdf_to_images is called later.
     inventory_pages() returns a fixed category (INVOICE_HEADER, LINE_ITEMS, TOTALS,
     SIGNATURE_STAMP, SUPPORTING_DOC, COVER_PAGE, BLANK) for every page plus a short
-    description. Use this map to target extraction — don't guess which page has what.
+    description, plus a document_role (shown after the category, e.g. "INVOICE_HEADER, funds_request").
+    Use this map to target extraction — don't guess which page has what. An internal funds_request on the
+    payer's letterhead is not the supplier's invoice: read vendor, client and amounts on the supplier_invoice page.
   Phase 2 (extraction): convert_pdf_to_images(dpi={_page_dpi}) → targeted extraction on the right pages
     Extract all fields expected on the same page in a SINGLE extract_fields_vision call.
     Do NOT call extract_fields_vision once per field — pass the full field_subset for
@@ -248,6 +257,7 @@ Hard rules:
 - When all error-level rules pass AND visual_checks_pending is empty, finish with all_errors_resolved=true
   (warning-level rule failures alone do not block PASSED — read error_failures vs warning_failures on finish)
 - Always use page_num=N (an integer like 1, 2, 3) — NEVER construct or guess image file paths
+- {OUTPUT_LANGUAGE_RULE}
 - When retrying extract_fields_vision or check_compliance_visual, change parameters (page_num, region, hints, or field_subset) — do not repeat identical params
 - Respond ONLY with valid JSON."""
 

@@ -33,7 +33,7 @@ Categories per section:
 
 ### compliance_edge_cases
 - Rules that require **Xunta de Galicia stamps**, **PR811A**, or **2023-only** execution are tied to a **specific EU grant** profile. **NGO field documents** (Africa, XAF, local suppliers, no European seal) may **fail those visual checks** even when field extraction is correct — treat as **jurisdiction / rule-pack mismatch**, not as “bad OCR,” until rule packs are split by program.
-- [2026-04-12] With **`active_rule_groups: [general]`** (e.g. Chad field office), **Xunta-only rules are disabled**; remaining payroll visuals are often **R_PL_014** (payment method stated) and **R_PL_015** (proof of payment). Ground truth may still encode **“Paid by …”** as `payment_method` when there is **no IBAN** — treat a **payer line**, **discharge signature**, or **named payer on the request** as a valid payment-method narrative when bank details are absent.
+- [2026-04-12] With **`active_rule_groups: [general]`** (e.g. Chad field office), **Xunta-only rules are disabled**; remaining payroll visuals are often **R_PL_014** (payment method stated) and **R_PL_015** (proof of payment). Ground truth may still encode **“Paid by …”** as `payment_method` when there is **no IBAN** — treat a **payer line**, **discharge signature**, or **named payer on the request** as satisfying those *payment method stated* rules when bank details are absent. This is about the rule only: the `payment_method` field still comes from the payment evidence (cheque copy, transfer slip, cash receipt), not from the request's "Payé par" line. [edited 2026-10-09]
 
 ### common_failures
 - [2026-04-12] **`finish(compliance_passed)`** can return **`status=failed`** in the tool result while the CLI prints **FAILED**, even when the model believed all errors were resolved — usually because **warning-level rule results** (e.g. R_PL_014, R_PL_015) still count as **failed rules** in aggregate state. Do not assume “compliance_passed” means a green overall status until **`finish`** output and **`state.status`** agree.
@@ -55,7 +55,7 @@ Categories per section:
 - Taxi/transport receipts may only have a total and date, no vendor name — flag for review
 - "Factura simplificada" (simplified invoice) may lack NIF and buyer details
 - **Reference PDF** (repo root): `A.6.- Viajes, alojamientos y dietas-A3693-25.pdf` — **image-only** scan; **French**; **XAF**; line items may be **carburant / gasoil** from a local supplier (**ETS …**). **Client** may be a **bureau / JRS office**, not a named individual traveler — map to beneficiary or flag for review per schema.
-- **Payment method** may read like **“Bank-JRS / …”** or mixed French shorthand — extract **verbatim** into `payment_method`.
+- **Payment method**: the funds request's **“Payé par: Bank-JRS / …”** line names the payer, not how the supplier was paid; take `payment_method` from the cheque copy or transfer slip when one is attached, mapped to the allowed values. [edited 2026-10-09]
 
 ### common_failures
 - (none recorded yet)

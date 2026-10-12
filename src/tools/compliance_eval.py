@@ -15,12 +15,71 @@ from typing import Any, Optional
 import requests
 from PIL import Image
 
+from src.tools.value_parsing import parse_amount
 from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
-from src.config.loader import ConfigStore, ComplianceRule
+from src.config.loader import ConfigStore, ComplianceRule, unresolved_rule_params
 from src.llm.base import LLMProvider
 
 logger = logging.getLogger(__name__)
+
+# agent_notes markers for skips that never block finish():
+# - not_configured: a {section.key} config value the rule references is unset.
+# - not_applicable: a conditional_check whose condition does not hold for this document.
+NOT_CONFIGURED_NOTE = "not_configured"
+NOT_APPLICABLE_NOTE = "not_applicable"
+
+# "<lo>,<hi> EUR": range bounds, optionally in a currency the value is converted to first.
+_RANGE_RE = re.compile(r"^\s*([^,]+?)\s*,\s*([^,\s]+)\s*(?:([A-Za-z]{3,4}))?\s*$")
+# "total_amount<2500 EUR": numeric consequence of a conditional_check.
+_COMPARE_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*(<=|>=|<|>)\s*([0-9.]+)\s*(?:([A-Za-z]{3,4}))?$")
+
+
+def is_not_configured(result: RuleResult) -> bool:
+    return result.status == "skipped" and result.agent_notes == NOT_CONFIGURED_NOTE
+
+
+def is_non_blocking_skip(result: RuleResult) -> bool:
+    return result.status == "skipped" and result.agent_notes in (NOT_CONFIGURED_NOTE, NOT_APPLICABLE_NOTE)
+
+
+def _convert_currency(
+    amount: float, from_cur: Any, to_cur: str, store: Optional[ConfigStore]
+) -> tuple[Optional[float], str]:
+    """
+    Convert amount between currencies using compliance.currency_per_eur (units of currency per 1 EUR).
+    Returns (converted, "") or (None, reason).
+    """
+    src = str(from_cur or "").strip().upper()
+    dst = str(to_cur or "").strip().upper()
+    if not src:
+        return None, "document currency not extracted"
+    if src == dst:
+        return amount, ""
+    rates_raw = ((store.rule_params if store else {}).get("compliance") or {}).get("currency_per_eur") or {}
+    rates = {str(k).strip().upper(): v for k, v in rates_raw.items()}
+    try:
+        src_rate = float(rates[src])
+        dst_rate = float(rates[dst])
+    except (KeyError, TypeError, ValueError):
+        return None, f"no rate for {src} or {dst} in compliance.currency_per_eur"
+    if src_rate <= 0:
+        return None, f"invalid rate for {src} in compliance.currency_per_eur"
+    return amount / src_rate * dst_rate, ""
+
+
+# rule_evidence key set by check_compliance_visual when it could not judge a rule
+# (no verdict, or the pages it needs were not sent). The rule result is then "skipped".
+VISUAL_SKIP_KEY = "visual_skip_reason"
+
+
+def visual_not_evaluated_ids(state: AgentState) -> set[str]:
+    """Rule ids that check_compliance_visual ran but left unevaluated (terminal, needs a human)."""
+    return {
+        r.rule_id
+        for r in state.rule_results
+        if r.status == "skipped" and state.rule_evidence.get(r.rule_id, {}).get(VISUAL_SKIP_KEY)
+    }
 
 
 def _extract_entities_from_text(text: str) -> dict:
@@ -117,68 +176,8 @@ def _policy_refs_for_rule(state: AgentState, rule: ComplianceRule) -> list[dict]
     return refs
 
 def _normalize_numeric(value: Any) -> Optional[float]:
-    """
-    Parse numbers from common OCR formats:
-    - thousands separators: "1.190,00" -> 1190.00
-    - decimal separators: "1,90" -> 1.90
-    - currency symbols: "€ 1.190,00" -> 1190.00
-    - percent suffix: "19%" -> 19.0
-    """
-    if value is None:
-        return None
-
-    s = str(value).strip()
-    if not s or s.lower() in ("null", "none"):
-        return None
-
-    # Strip HTML/XML fragments (OCR / PDF text sometimes embeds tags).
-    s = re.sub(r"<[^>]+>", "", s)
-    s = s.replace("&nbsp;", " ").replace("&#160;", " ").replace("\xa0", " ")
-    s = s.strip()
-    if not s or s.lower() in ("null", "none"):
-        return None
-
-    negative = False
-    if s.startswith("(") and s.endswith(")"):
-        negative = True
-        s = s[1:-1].strip()
-
-    # Remove currency symbols and whitespace, then try to extract the first numeric token.
-    # OCR strings are often like: "Total: 1.190,00 EUR" or "€ 1 190,00".
-    s = re.sub(r"[€$£]", "", s)
-    s = s.replace(" ", "")
-    s = s.rstrip("%")
-
-    m = re.search(r"[+-]?\d[\d\.,]*", s)
-    if not m:
-        return None
-    s = m.group(0)
-
-    # If both separators are present, assume "." is thousands and "," is decimal.
-    if "," in s and "." in s:
-        s = s.replace(".", "")
-        s = s.replace(",", ".")
-    elif "," in s:
-        # Heuristic: single comma is treated as decimal separator.
-        # If multiple commas exist, treat them as thousands separators.
-        if s.count(",") == 1:
-            s = s.replace(",", ".")
-        else:
-            s = s.replace(",", "")
-    elif s.count(".") > 1:
-        # Multiple dots but no comma: assume dots are thousands separators.
-        parts = s.split(".")
-        s = "".join(parts[:-1]) + "." + parts[-1]
-
-    if s in ("", "-", "+"):
-        return None
-
-    try:
-        v = float(s)
-    except (ValueError, TypeError):
-        return None
-
-    return -v if negative else v
+    """Parse a printed amount ("1.190,00 EUR", "425 000 FCFA", "19%"); see value_parsing.parse_amount."""
+    return parse_amount(value)
 
 def _safe_eval_numeric(expr: str) -> float:
     """
@@ -281,6 +280,20 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
             message="OK",
         )
 
+    missing_params = unresolved_rule_params(rule)
+    if missing_params:
+        return RuleResult(
+            rule_id=rule.rule_id,
+            rule_name=rule.rule_name,
+            field_id=rule.field_id,
+            status="skipped",
+            severity=rule.severity,
+            message=(
+                f"Not configured: set {', '.join(missing_params)} in config.yaml to run this check"
+            ),
+            agent_notes=NOT_CONFIGURED_NOTE,
+        )
+
     if rule.check_type == "visual_check":
         # Visual rules require a page image — skip here, handled by check_compliance_visual()
         return RuleResult(
@@ -323,8 +336,22 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
                 message="Value missing/null — skipping range check",
             )
         try:
-            lo, hi = map(float, rule.check_value.split(","))
+            m = _RANGE_RE.match(rule.check_value or "")
+            if not m:
+                raise ValueError(f"Bad range check_value {rule.check_value!r}")
+            lo, hi, unit = float(m.group(1)), float(m.group(2)), m.group(3)
             v = _normalize_numeric(value)
+            if v is not None and unit:
+                v, why = _convert_currency(v, _get_field_value(state, "currency"), unit, store)
+                if v is None:
+                    return RuleResult(
+                        rule_id=rule.rule_id,
+                        rule_name=rule.rule_name,
+                        field_id=rule.field_id,
+                        status="skipped",
+                        severity=rule.severity,
+                        message=f"Range check in {unit} skipped: {why}",
+                    )
             if v is None:
                 if not _field_is_required():
                     return RuleResult(
@@ -446,6 +473,33 @@ def _evaluate_rule(rule: ComplianceRule, state: AgentState, store: Optional[Conf
                     rule_id=rule.rule_id, rule_name=rule.rule_name,
                     field_id=rule.field_id, status="skipped", severity=rule.severity,
                     message="Condition not met, rule skipped",
+                    agent_notes=NOT_APPLICABLE_NOTE,
+                )
+
+            cmp = _COMPARE_RE.match(consequence_part)
+            if cmp:
+                cons_field, op, limit_s, unit = cmp.groups()
+                actual_num = _normalize_numeric(_get_field_value(state, cons_field))
+                if actual_num is None:
+                    raise ValueError(f"no numeric value for {cons_field}")
+                if unit:
+                    actual_num, why = _convert_currency(
+                        actual_num, _get_field_value(state, "currency"), unit, store
+                    )
+                    if actual_num is None:
+                        raise ValueError(why)
+                limit = float(limit_s)
+                ok = {
+                    "<": actual_num < limit,
+                    "<=": actual_num <= limit,
+                    ">": actual_num > limit,
+                    ">=": actual_num >= limit,
+                }[op]
+                if ok:
+                    return passed()
+                return fail(
+                    f"{rule.error_message} ({cons_field} = {actual_num:,.2f}"
+                    f"{' ' + unit.upper() if unit else ''}, limit {op} {limit:,.2f})"
                 )
 
             cons_field, cons_val = consequence_part.split("=")
@@ -504,19 +558,18 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     failed = []
     passed = []
 
-    # Build a lookup of results already committed by check_compliance_visual so we
-    # don't re-evaluate visual rules and re-add them to visual_checks_pending.
-    already_evaluated: dict[str, RuleResult] = {
-        r.rule_id: r
-        for r in state.rule_results
-        if r.status in ("passed", "failed") and r.rule_id not in (
-            r2.rule_id for r2 in state.rule_results if r2.status == "skipped"
-        )
-    }
-    # Simpler: build a set of rule IDs that already have a definitive verdict
+    # Visual verdicts committed by check_compliance_visual are reused so we don't
+    # re-add them to visual_checks_pending. Field-based rules are always re-evaluated:
+    # a field extracted after an earlier failed check must be able to flip the verdict.
+    # A visual rule the visual tool could not evaluate is also final: re-queuing it would
+    # send the agent back to the same vision call in a loop.
+    visual_rule_ids = {r.rule_id for r in rules if r.check_type == "visual_check"}
+    visual_unevaluated = visual_not_evaluated_ids(state) & visual_rule_ids
     definitive_rule_ids: set[str] = {
-        r.rule_id for r in state.rule_results if r.status in ("passed", "failed")
-    }
+        r.rule_id
+        for r in state.rule_results
+        if r.status in ("passed", "failed") and r.rule_id in visual_rule_ids
+    } | visual_unevaluated
 
     for rule in rules:
         # If check_compliance_visual has already evaluated this rule (passed/failed),
@@ -583,10 +636,13 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
     # Non-visual skips mean a check couldn't run because a required field value was missing.
     # These are NOT safe to ignore — the math/format check simply didn't execute.
     # Surfaced separately so the agent knows it needs to extract the missing fields first.
+    not_configured = [r for r in results if is_not_configured(r)]
     field_missing_skips = [
         r for r in results
-        if r.status == "skipped" and "visual" not in r.message.lower()
+        if r.status == "skipped" and "visual" not in r.message.lower() and not is_non_blocking_skip(r)
+        and r.rule_id not in visual_unevaluated
     ]
+    visual_skips = [r for r in results if r.rule_id in visual_unevaluated]
     state.skipped_checks = [
         {"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
         for r in field_missing_skips
@@ -605,5 +661,12 @@ def check_compliance(state: AgentState, rules: list[ComplianceRule], store: Opti
         "skipped_checks": [{"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
                            for r in field_missing_skips],
         "visual_checks_pending": [r.rule_id for r in visual_pending],
-        "all_errors_resolved": len(errors) == 0 and len(visual_pending) == 0 and len(error_skips) == 0,
+        "not_configured_checks": [{"rule_id": r.rule_id, "reason": r.message} for r in not_configured],
+        # Final: the visual check ran but could not judge these; they need human review.
+        "visual_not_evaluated": [{"rule_id": r.rule_id, "severity": r.severity, "reason": r.message}
+                                 for r in visual_skips],
+        "all_errors_resolved": (
+            len(errors) == 0 and len(visual_pending) == 0 and len(error_skips) == 0
+            and not any(r.severity == "error" for r in visual_skips)
+        ),
     }

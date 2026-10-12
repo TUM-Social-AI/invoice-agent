@@ -1,6 +1,7 @@
 """Moved implementations for vision_llm.py."""
 
 import base64
+import io
 import ast
 import json
 import logging
@@ -20,14 +21,17 @@ from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
 from src.llm.response_format import provider_json_mode
-from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel
+from src.models.tool_io_models import ClassificationResultModel, ExtractionPayloadModel, inventory_label
+from src.trace.evidence import Evidence, coerce_line_ids
 from src.prompts.llm_prompts import (
     build_extract_fields_vision_prompt,
     classify_document_type_prompt,
+    classify_from_inventory_prompt,
     format_extraction_accuracy_block,
     ocr_transcript_section,
 )
 from src.tools.pdf_pages import _image_to_base64
+from src.tools.value_parsing import parse_amount, parse_full_date
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +56,71 @@ def _sanitize_extracted_string_value(value: Any, ftype: str) -> Any:
     return s
 
 
+# Page 1 resolution for image-based classification (fallback when there is no page inventory).
+CLASSIFY_PAGE_DPI = 150
+
+
+def _inventory_block(state: AgentState) -> str:
+    """One line per inventoried page; empty when there is no usable inventory."""
+    lines = []
+    for e in sorted(state.page_inventory or [], key=lambda x: int(x.get("page", 0) or 0)):
+        desc = str(e.get("description", "") or "").strip()
+        if not desc or desc.startswith("(no response") or desc.startswith("(error"):
+            continue
+        lines.append(f"- page {e.get('page')}: {inventory_label(e)} — {desc}")
+    return "\n".join(lines)
+
+
+def _name_slug(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(text).lower()).strip("-")
+
+
+def budget_line_hint(state: AgentState, store: "ConfigStore") -> str:
+    """
+    Classification prior from the file name: filers often prefix the file with its budget line
+    ("A.7. Serv técn y prof-U0256-25.pdf"), matched against invoice_types.budget_line.
+    Names are compared as slugs so "a-7-serv-t-cn-..." (a Drive download) matches too, and the
+    longest configured code wins ("A.5.d" over "A.5"). Empty when nothing matches.
+    """
+    name = ""
+    if state.source_provenance is not None:
+        name = state.source_provenance.display_name or ""
+    name = name or Path(state.pdf_path).name
+    stem = _name_slug(Path(name).stem)
+    best = None
+    best_len = 0
+    for t in store.invoice_types.values():
+        code = _name_slug(t.budget_line)
+        if code and (stem == code or stem.startswith(code + "-")) and len(code) > best_len:
+            best, best_len = t, len(code)
+    if best is None:
+        return ""
+    return (
+        f'The file name "{name}" starts with budget line {best.budget_line}, '
+        f'which maps to "{best.invoice_type_id}". Use it as a prior, not a rule: '
+        "files are sometimes filed under the wrong budget line, so choose another type "
+        "when the pages clearly show one."
+    )
+
+
+def _first_page_b64(state: AgentState) -> str:
+    """Page 1 rendered at CLASSIFY_PAGE_DPI from the PDF; the first page image when rendering fails."""
+    try:
+        import pypdfium2 as pdfium
+
+        pdf = pdfium.PdfDocument(state.pdf_path)
+        try:
+            img = pdf[0].render(scale=CLASSIFY_PAGE_DPI / 72.0).to_pil().convert("RGB")
+        finally:
+            pdf.close()
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=80)
+        return base64.b64encode(buf.getvalue()).decode("ascii")
+    except Exception as e:
+        logger.warning("classify_document_type: could not render page 1 (%s); using %s", e, state.page_image_paths[0])
+        return _image_to_base64(state.page_image_paths[0])
+
+
 def classify_document_type(
     state: AgentState,
     store: "ConfigStore",
@@ -61,26 +130,38 @@ def classify_document_type(
     timeout_s: int = 240,
 ) -> dict:
     """
-    Look at the first rendered page and determine which invoice type this document is.
-    Sets state.invoice_type_id. Must be called after convert_pdf_to_images or compress_pages.
+    Determine which invoice type this document is. Sets state.invoice_type_id.
+
+    With a page inventory (inventory_pages ran), classify from the descriptions of all
+    pages, text only: page 1 is often a generic fund-request form that looks the same for
+    every expense type, and what is being paid for shows on the later pages. Without an
+    inventory, classify from page 1 rendered at CLASSIFY_PAGE_DPI; the 48 DPI thumbnails
+    from compress_pages are too small to read and led to guessed types.
+    Must be called after convert_pdf_to_images or compress_pages.
     """
     if not state.page_image_paths:
         return {"success": False, "error": "No pages rendered yet. Call convert_pdf_to_images or compress_pages first."}
-
-    first_page = state.page_image_paths[0]
 
     type_descriptions = "\n".join(
         f'- "{t.invoice_type_id}": {t.display_name} — {t.description}'
         for t in store.invoice_types.values()
     )
 
-    prompt = classify_document_type_prompt(type_descriptions)
+    filename_hint = budget_line_hint(state, store)
+    inventory_block = _inventory_block(state)
+    if inventory_block:
+        basis = "page_inventory"
+        prompt = classify_from_inventory_prompt(type_descriptions, inventory_block, filename_hint)
+        images: list[str] = []
+    else:
+        basis = "first_page_image"
+        prompt = classify_document_type_prompt(type_descriptions, filename_hint)
+        images = [_first_page_b64(state)]
 
-    img_b64 = _image_to_base64(first_page)
     payload = {
         "model": vision_model,
         "prompt": prompt,
-        "images": [img_b64],
+        "images": images,
         "stream": False,
         "options": {"temperature": 0.1},
     }
@@ -91,7 +172,7 @@ def classify_document_type(
             llm_result = provider.generate_json(
                 model=vision_model,
                 prompt=prompt,
-                images_b64=[img_b64],
+                images_b64=images or None,
                 temperature=0.1,
                 timeout_s=timeout_s,
                 response_format=provider_json_mode(pname),
@@ -117,12 +198,13 @@ def classify_document_type(
             }
 
         state.invoice_type_id = detected
-        logger.info(f"Document classified as: {detected} (confidence={confidence}) — {reasoning}")
+        logger.info(f"Document classified as: {detected} (confidence={confidence}, from {basis}) — {reasoning}")
         return {
             "success": True,
             "invoice_type_id": detected,
             "confidence": confidence,
             "reasoning": reasoning,
+            "basis": basis,
         }
 
     except json.JSONDecodeError as e:
@@ -130,7 +212,9 @@ def classify_document_type(
     except requests.RequestException as e:
         return {"success": False, "error": f"Ollama request failed: {e}"}
 
-def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict | None:
+def _build_extraction_response_schema(
+    schema: dict, provider_name: str, cite_lines: bool = False
+) -> dict | None:
     """Build a provider-specific JSON Schema to constrain the vision model's output.
 
     Reads ``enum`` from each field's schema meta (populated from allowed_values.csv)
@@ -143,7 +227,10 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
             ftype = (meta.get("type") or "string").strip().lower()
             allowed = meta.get("enum")
             if ftype == "decimal":
-                prop: dict = {"anyOf": [{"type": "number"}, {"type": "null"}]}
+                # Amounts come back as the printed text ("425 000", "50.000 R") and are parsed
+                # by parse_amount in merge_extracted_fields: a JSON number makes the model
+                # resolve thousands separators itself, and it reads "50.000" as 50.
+                prop: dict = {"anyOf": [{"type": "string"}, {"type": "null"}]}
             elif ftype == "boolean":
                 prop = {"anyOf": [{"type": "boolean"}, {"type": "null"}]}
             elif allowed:
@@ -152,6 +239,8 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
                 prop = {"anyOf": [{"type": "string"}, {"type": "null"}]}
             props[field_name] = prop
             props[f"{field_name}_confidence"] = {"type": "number", "minimum": 0.0, "maximum": 1.0}
+            if cite_lines:
+                props[f"{field_name}_evidence"] = {"type": "array", "items": {"type": "string"}}
         return {"type": "object", "properties": props}
 
     if provider_name == "gemini":
@@ -160,7 +249,7 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
             ftype = (meta.get("type") or "string").strip().lower()
             allowed = meta.get("enum")
             if ftype == "decimal":
-                prop = {"type": "NUMBER", "nullable": True}
+                prop = {"type": "STRING", "nullable": True}
             elif ftype == "boolean":
                 prop = {"type": "BOOLEAN", "nullable": True}
             elif allowed:
@@ -169,6 +258,8 @@ def _build_extraction_response_schema(schema: dict, provider_name: str) -> dict 
                 prop = {"type": "STRING", "nullable": True}
             props[field_name] = prop
             props[f"{field_name}_confidence"] = {"type": "NUMBER", "nullable": False}
+            if cite_lines:
+                props[f"{field_name}_evidence"] = {"type": "ARRAY", "items": {"type": "STRING"}}
         return {"type": "OBJECT", "properties": props}
 
     return None
@@ -184,6 +275,7 @@ def extract_fields_vision(
     text_context: str = "",
     provider: "LLMProvider | None" = None,
     timeout_s: int = 240,
+    cite_lines: bool = False,
 ) -> dict:
     """
     Send image + schema to Qwen2-VL via Ollama.
@@ -212,6 +304,7 @@ def extract_fields_vision(
         hints=hints,
         accuracy_block=acc,
         fields_text=fields_text,
+        cite_lines=cite_lines,
     )
 
     img_b64 = _image_to_base64(image_path)
@@ -232,7 +325,7 @@ def extract_fields_vision(
             # fall back to plain JSON mode so _build_extraction_response_schema returning
             # None still produces valid output.
             extraction_response_format: Any = (
-                _build_extraction_response_schema(schema, pname)
+                _build_extraction_response_schema(schema, pname, cite_lines=cite_lines)
                 or (
                     "json"
                     if pname == "ollama"
@@ -286,41 +379,82 @@ def extract_fields_vision(
     except requests.RequestException as e:
         return {"success": False, "error": f"Ollama request failed: {e}"}
 
+def normalize_extracted_value(value: Any, meta: dict, date_order: str = "DMY") -> tuple[Any, str | None]:
+    """
+    Clean one extracted value for its field type. Returns (value, reject_reason):
+    amounts are parsed from the printed text, dates must be complete and come back as
+    YYYY-MM-DD, enum fields snap to an allowed value. A rejected value is (None, reason).
+    """
+    if value is None:
+        return None, None
+    ftype = (meta.get("type") or meta.get("data_type") or "").strip().lower()
+    if ftype == "decimal":
+        n = parse_amount(value)
+        if n is None:
+            return None, f"not a readable amount: {str(value)[:40]!r}"
+        return n, None
+    value = _sanitize_extracted_string_value(value, ftype)
+    if value is None:
+        return None, None
+    if ftype == "date":
+        iso = parse_full_date(value, order=date_order)
+        if iso is None:
+            return None, f"not a complete date (day, month and year): {str(value)[:40]!r}"
+        return iso, None
+    allowed_enum = meta.get("enum")
+    if allowed_enum and isinstance(value, str):
+        _norm = lambda s: re.sub(r"[\s\-]+", "_", s.strip().lower())
+        snapped = next((v for v in allowed_enum if _norm(v) == _norm(value)), None)
+        if snapped is None:
+            return None, f"not an allowed value: {value[:40]!r}"
+        return snapped, None
+    return value, None
+
+
+def _role_rank(role_priority: dict | None, field_name: str, role: str) -> int | None:
+    """Position of a page's document role in the field's priority list (0 = best); None when the
+    field has no list. Roles missing from the list rank after every listed role."""
+    order = (role_priority or {}).get(field_name)
+    if not order:
+        return None
+    return order.index(role) if role in order else len(order)
+
+
 def merge_extracted_fields(
     state: AgentState,
     new_extraction: dict,
     schema: dict,
     source_page: int,
     source_region: str,
+    *,
+    role_priority: dict | None = None,
+    date_order: str = "DMY",
 ) -> dict:
     """
     Merge new extraction results into state.extracted_fields.
-    Only updates a field if the new confidence is higher than existing.
+
+    A field is updated when the new confidence is higher than the stored one, except for fields
+    listed in role_priority (field -> document roles, best first): there a value read on a page
+    whose inventory document_role ranks higher replaces a lower-ranked one, and a lower-ranked one
+    never replaces a higher-ranked one, as long as the better-ranked value clears
+    state.confidence_threshold. Amounts are parsed from their printed text and partial dates
+    are rejected (see normalize_extracted_value); rejections count as null attempts.
     """
-    from src.tools.compliance_eval import _normalize_numeric as _coerce_numeric
+    from src.tools.page_inventory import page_document_role
 
     updated = []
     skipped = []
     null_fields = []
+    rejected: dict[str, str] = {}
+    new_role = page_document_role(state, source_page)
 
     for field_name, meta in schema.items():
-        value = new_extraction.get(field_name)
+        raw_value = new_extraction.get(field_name)
         confidence = float(new_extraction.get(f"{field_name}_confidence", 0.5))
-
-        if value is not None:
-            ftype = (meta.get("type") or meta.get("data_type") or "").strip().lower()
-            if ftype == "decimal" and isinstance(value, str):
-                n = _coerce_numeric(value)
-                if n is not None:
-                    value = n
-            else:
-                value = _sanitize_extracted_string_value(value, ftype)
-
-            # Enforce enum constraint: snap to canonical allowed value or reject.
-            allowed_enum = meta.get("enum")
-            if allowed_enum and isinstance(value, str):
-                _norm = lambda s: re.sub(r"[\s\-]+", "_", s.strip().lower())
-                value = next((v for v in allowed_enum if _norm(v) == _norm(value)), None)
+        value, reject_reason = normalize_extracted_value(raw_value, meta, date_order)
+        if reject_reason:
+            rejected[field_name] = reject_reason
+            logger.info("  merge: rejected %s from page %s (%s)", field_name, source_page, reject_reason)
 
         if value is None:
             # The model explicitly returned null for this field.
@@ -342,12 +476,21 @@ def merge_extracted_fields(
                     source_region=source_region,
                     extraction_attempts=state.get_field_retry_count(field_name),
                     flagged_for_review=False,
-                    review_reason=None,
+                    review_reason=f"Rejected on page {source_page}: {reject_reason}" if reject_reason else None,
                 )
             continue
 
         existing = state.extracted_fields.get(field_name)
-        if existing and existing.confidence >= confidence:
+        keep_existing = bool(existing and existing.confidence >= confidence)
+        new_rank = _role_rank(role_priority, field_name, new_role)
+        if existing is not None and existing.extracted_value is not None and new_rank is not None:
+            old_rank = _role_rank(role_priority, field_name, page_document_role(state, existing.source_page))
+            threshold = state.confidence_threshold
+            if new_rank < old_rank and confidence >= threshold:
+                keep_existing = False
+            elif new_rank > old_rank and existing.confidence >= threshold:
+                keep_existing = True
+        if keep_existing:
             # Still count as an attempt even though confidence didn't improve,
             # so the agent knows when to stop retrying and flag for review
             state.increment_field_retry(field_name)
@@ -364,6 +507,16 @@ def merge_extracted_fields(
         is_batch_review = (
             state.confidence_threshold <= confidence < state.batch_review_threshold
         )
+        cited = coerce_line_ids(new_extraction.get(f"{field_name}_evidence"))
+        evidence = (
+            [Evidence(
+                page=source_page,
+                line_ids=cited,
+                source="ocr_direct" if source_region == "ocr_direct" else "model_cited",
+            )]
+            if cited
+            else []
+        )
         state.extracted_fields[field_name] = FieldResult(
             field_id=field_id,
             field_name=field_name,
@@ -373,10 +526,17 @@ def merge_extracted_fields(
             source_region=source_region,
             extraction_attempts=state.get_field_retry_count(field_name),
             batch_review=is_batch_review,
+            evidence=evidence,
         )
         updated.append(field_name)
 
     # "already_have_better" = fields where we already had a higher-confidence value stored;
     # the new extraction was NOT an improvement — existing values are fine, do NOT retry.
     # "null_fields" = fields the model returned null for (could not extract from this image).
-    return {"updated": updated, "already_have_better": skipped, "null_fields": null_fields}
+    # "rejected" = values dropped as unreadable amounts, partial dates or values outside the enum.
+    return {
+        "updated": updated,
+        "already_have_better": skipped,
+        "null_fields": null_fields,
+        "rejected": rejected,
+    }

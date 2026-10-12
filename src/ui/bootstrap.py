@@ -9,7 +9,7 @@ from src.ui.runner import RunManager
 from src.ui.web_presenter import WebPresenter
 
 
-def build_manager(config_path: str, output_root: str = "output/ui") -> RunManager:
+def build_manager(config_path: str, output_root: str = "output/ui", *, local_config: bool = False) -> RunManager:
     # Reuse the CLI's own startup recipe so the UI behaves exactly like `python main.py`.
     from main import _load_dotenv_files, apply_configured_log_level, load_app_config, load_config_store
     from src.agent.agent import InvoiceAgent
@@ -19,7 +19,7 @@ def build_manager(config_path: str, output_root: str = "output/ui") -> RunManage
     apply_configured_log_level(app_config, presentation=True)
 
     presenter = WebPresenter()
-    store, config_summary = load_config_store(app_config)
+    store, config_summary = load_config_store(app_config, force_local=local_config)
     agent = InvoiceAgent(config=app_config, store=store, presenter=presenter)
     presenter.set_rule_catalog(RuleCatalog.from_store(store))
     presenter.startup_context(
@@ -27,7 +27,8 @@ def build_manager(config_path: str, output_root: str = "output/ui") -> RunManage
         app_config,
         ocr_enabled=getattr(agent, "surya_models", None) is not None,
     )
-    return RunManager(agent, presenter, output_root)
+    scale = float((app_config.get("ui") or {}).get("page_render_scale", 2.0))
+    return RunManager(agent, presenter, output_root, page_render_scale=scale)
 
 
 def default_config_path() -> str:

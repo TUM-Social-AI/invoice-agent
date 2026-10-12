@@ -10,7 +10,9 @@ from typing import Any, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from src.models.tool_io_models import inventory_label
 from src.sources.models import RunIdentity, SourceProvenance
+from src.trace.evidence import Evidence
 
 
 class AgentStatus(Enum):
@@ -34,6 +36,8 @@ class FieldResult(BaseModel):
     flagged_for_review: bool = False
     review_reason: Optional[str] = None
     batch_review: bool = False  # True when confidence is medium (threshold–0.85); non-blocking
+    # Where the value was read (OCR line citations); grounded to boxes after the run.
+    evidence: list[Evidence] = Field(default_factory=list)
 
 
 class RuleResult(BaseModel):
@@ -121,6 +125,16 @@ class AgentState(BaseModel):
     rule_policy_refs: dict[str, list[dict]] = Field(default_factory=dict)
     # rule_state[rule_id] = unseen|candidate|supported|contradicted|finalized_pass|finalized_fail|needs_review
     rule_state: dict[str, str] = Field(default_factory=dict)
+
+    # --- Traceability ---
+    # Clockwise rotation fix per page (degrees), applied when rendering and in the flagged PDF.
+    page_rotation: dict[int, int] = Field(default_factory=dict)
+    # Pages that looked sideways but whose upright direction could not be decided.
+    orientation_uncertain: list[int] = Field(default_factory=list)
+    # Pages whose orientation was already checked (skip on re-render).
+    orientation_checked: list[int] = Field(default_factory=list)
+    # Paths written by src.trace.finalize (trace_json, flagged_pdf).
+    trace_paths: dict[str, str] = Field(default_factory=dict)
 
     # --- Compliance loop detection ---
     last_compliance_hash: str = ""   # MD5 of last check_compliance result (detects redundant calls)
@@ -295,7 +309,7 @@ class AgentState(BaseModel):
                     f"pages 1..{len(inv)}) ...\n"
                 )
             inv_lines = "\n".join(
-                f"  p{e['page']} [{e.get('category', '?')}]: "
+                f"  p{e['page']} [{inventory_label(e)}]: "
                 f"{_truncate_desc(str(e.get('description', '')), inventory_desc_chars)}"
                 for e in slice_inv
             )

@@ -69,6 +69,36 @@ agent:
   max_field_retries: 5
   confidence_threshold: 0.65 # below this → blocking human-review flag
   batch_review_threshold: 0.85 # between confidence_threshold and this → non-blocking batch review
+  # Day/month order for numeric dates read during extraction (DMY or MDY) when both are <= 12.
+  extraction_date_order: DMY
+  # Which page wins when several documents in one bundle show the same field (an internal funds
+  # request and the supplier's invoice both carry a number, a date, a party and an amount).
+  # Per field: document roles from the page inventory, best first. A value read on a higher-ranked
+  # page replaces one from a lower-ranked page whatever the confidences, once it reaches
+  # confidence_threshold; roles not listed rank last. Fields not listed keep the most confident value.
+  # Roles: funds_request, internal_other, supplier_invoice, supplier_other, payment_proof, other.
+  document_role_priority:
+    # Reference and date of the expense: the internal funds request number (reviewer convention).
+    invoice_number: &request_first [funds_request, supplier_invoice, supplier_other, payment_proof]
+    invoice_date: *request_first
+    # Parties and amounts: the supplier's own invoice; the payer's internal forms last.
+    vendor_name: &supplier_first [supplier_invoice, supplier_other, payment_proof, other, internal_other, funds_request]
+    vendor_tax_id: *supplier_first
+    beneficiary: *supplier_first
+    employee_name: *supplier_first
+    total_amount: *supplier_first
+    net_amount: *supplier_first
+    vat_amount: *supplier_first
+    currency: *supplier_first
+    # How it was paid: the payment evidence first, a "Payé par" line on the request last.
+    payment_method: [payment_proof, supplier_invoice, supplier_other, other, internal_other, funds_request]
+  # Before check_compliance, extract the fields above from every page with one of these roles that
+  # no extraction covered yet (the agent often skips the funds request). [] disables.
+  auto_extract_page_roles: [funds_request, supplier_invoice, payment_proof]
+  # true: OCR label matching fills fields directly (label + adjacent text) or crops around them
+  # before the vision call. false: OCR only goes into the vision prompt as context and the vision
+  # model reads every field from the full page (label matching took line totals and stamp text).
+  ocr_direct_extraction: false
   planning_enabled: true # generate an execution plan before the main loop
   fallback_reasoning_model: null # e.g. "qwen2.5:7b" — used after 2+ consecutive failures
   # Processing orchestration:
@@ -114,10 +144,14 @@ agent:
   visual_max_evidence_pages: 8
 
   # Compliance rule groups (see rule_group column in config/csv/compliance_rules.csv).
-  # Chad / non-Galicia field projects: general only (no Xunta stamp, 2023 window, PR811A, etc.).
-  # For Galicia grant paperwork, add: - xunta_galicia
+  #   general:       any funder (invoice arithmetic, document consistency, non-eligible costs, three quotes)
+  #   aexcid:        AEXCID / Junta de Extremadura (Decree 5/2019): stamp, payment proof, invoice contents, travel caps
+  #   xunta_galicia: Galicia grant paperwork (Xunta stamp, PR811A, audit/evaluation caps)
+  #   spain:         Spanish VAT rates (4/10/21 %); only for invoices issued in Spain
+  # Chad (AEXCID-funded): general + aexcid.
   active_rule_groups:
     - general
+    - aexcid
 
   # Ground truth CSV: compared after every run when a row matches the PDF (or use <stem>_truth.json).
   # Prefer ISO dates (YYYY-MM-DD) in the CSV; slash dates use ground_truth_date_parse for ambiguous days/months.
@@ -131,20 +165,36 @@ agent:
   #   VIAJES: "config/csv/ground_truth_viajes.csv"
   ground_truth_csv_by_invoice_type: {}
   ground_truth_source_column: "Source file"
+  ground_truth_id_column: "Id"
+  # Expected invoice_type_id per row (scored as type_correct).
+  ground_truth_invoice_type_column: "Invoice Type"
   # CSV column header -> extraction field_name (see config/csv/extraction_fields.csv).
+  # A list gives candidate field_names in priority order; the first one the detected
+  # invoice type defines is scored.
+  # Several rows with the same Source file (two invoices in one PDF) skip field scoring.
   ground_truth_column_map:
     "Invoice Number": "invoice_number"
     "Date": "invoice_date"
     "Supplier/Issuer": "vendor_name"
     "Items/Services": "item_description"
-    "Description": "travel_purpose"
+    "Description": ["travel_purpose"]
     "Total Amount": "total_amount"
     "Currency": "currency"
     "Payment Method": "payment_method"
     "Expense Category": "expense_category"
-    "Client Name": "beneficiary"
+    "Client Name": ["beneficiary"]
     "Employee": "employee_name"
     "Pay period": "pay_period"
+  # Values treated as equal during comparison: {field_name: {canonical: [aliases]}}.
+  ground_truth_value_aliases:
+    currency:
+      XAF: ["CFA", "FCFA", "F CFA", "F.CFA", "Franc CFA"]
+  # Reviewer findings, one row per (PDF, issue_code). Matched to PDFs like ground_truth_csv_path.
+  # Scored via compliance_rules.csv issue_code: recall on fail/verify issues, false alarms,
+  # overall verdict agreement.
+  compliance_ground_truth_csv_path: "config/csv/compliance_ground_truth.csv"
+  # Issue codes recorded but never scored (need documents the agent never sees).
+  compliance_unscored_issue_codes: ["external_documents"]
   # Slash-delimited dates when day and month are both ≤12: DMY (EU) or MDY (US).
   ground_truth_date_parse: "DMY"
 
@@ -175,6 +225,59 @@ agent:
   max_consecutive_failures: 3 # hard-stop a tool after this many back-to-back failures
   max_same_action_warn: 2 # warn after this many identical consecutive tool calls
   max_same_action_stop: 5 # hard-stop the loop after this many identical calls
+
+# Project and funder values referenced by compliance rules as {project.<key>} / {compliance.<key>}
+# placeholders in config/csv/compliance_rules.csv (check_value). A rule whose placeholder is unset
+# is reported as "Not configured" and skipped; it does not fail the invoice or block finish.
+project:
+  # AEXCID project file number (expediente) printed on the funding stamp. Empty: any number accepted.
+  file_number: ""
+  # Implementation period, YYYY-MM-DD (grant award decision / actual start date notified to AEXCID;
+  # also in Section C of the financial report). The project_execution_within_period rules are
+  # disabled in compliance_rules.csv until these are known: set both dates and enable those rules.
+  start_date: ""
+  end_date: ""
+  # Full legal names accepted as the invoice client/payer: beneficiary organisation, consortium
+  # partners, local partner. Empty: the client rule only requires a full legal name, not a match.
+  payer_legal_names: []
+
+compliance:
+  # Units of each currency per 1 EUR. Used to convert amounts for EUR limits (cash limit, per-diem caps)
+  # and shown to the vision model next to EUR thresholds. XAF/XOF are pegged at 655.957 per EUR.
+  currency_per_eur:
+    EUR: 1
+    XAF: 655.957
+    XOF: 655.957
+    CFA: 655.957
+    FCFA: 655.957
+  # AEXCID Decree 5/2019 limits (Normas de seguimiento y justificación).
+  cash_limit_eur: 2500                       # cash payments must be below this (4.2.3, PDF p.16)
+  three_quotes_supplies_eur: 15000           # supplies, equipment, services: three quotes above this (PDF p.23, p.29)
+  three_quotes_works_eur: 40000              # construction works: three quotes above this (PDF p.21)
+  accommodation_abroad_max_eur_per_day: 143  # A.6, VAT included
+  subsistence_abroad_max_eur_per_day: 95     # A.6, VAT included
+  fuel_max_eur_per_km: 0.21                  # A.6, when fuel is claimed per km
+
+traceability:
+  # Flagged PDF + trace.json per invoice: every extracted value and compliance finding
+  # boxed where it was found. Turns on OCR line IDs in vision prompts (the model cites the
+  # lines it read) and caches one surya OCR per page under <output>/tmp/ocr/.
+  enabled: true
+  # OCR characters per page added to the visual compliance prompt so the model can cite lines.
+  visual_ocr_max_chars_per_page: 3000
+  # After the run, OCR pages that have no cached OCR yet so values recorded on the wrong page
+  # can still be located (about 10-15 s per page on CPU). 0 disables.
+  export_ocr_max_pages: 12
+  # Turn pages scanned sideways upright before extraction (OCR line shapes + confidence).
+  # OCRs every page once when images are rendered; that OCR is reused by later steps.
+  auto_rotate: true
+  # Overview pages (status, field table, findings with links) at the front of the flagged PDF.
+  # The browser UI hides them either way and shows clickable lists instead.
+  summary_pages: true
+
+ui:
+  # Zoom used to render flagged PDF pages for the browser UI (2.0 = about 1190 px wide for A4).
+  page_render_scale: 2.0
 
 ocr:
   # Languages passed to surya OCR pre-pass (runs before every vision extraction call).

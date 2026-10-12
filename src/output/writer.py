@@ -165,11 +165,14 @@ def write_results(state: AgentState, output_dir: str | Path) -> dict[str, str]:
         },
     )
 
-    return {
+    paths = {
         "fields_csv": str(fields_path),
         "compliance_csv": str(compliance_path),
         "summary_csv": str(summary_path),
     }
+    # Flagged PDF + trace.json written at the end of the run (src/trace/finalize.py).
+    paths.update(getattr(state, "trace_paths", None) or {})
+    return paths
 
 
 def write_canonical_results(states: Any, output_dir: str | Path) -> dict[str, str]:

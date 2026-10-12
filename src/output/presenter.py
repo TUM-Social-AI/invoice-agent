@@ -23,6 +23,25 @@ from src.llm.config_resolve import (
 )
 
 
+def ground_truth_review_lines(score: dict) -> list[str]:
+    """Reviewer issue recall per level and the overall verdict match, as plain text lines."""
+    lines = []
+    for level in ("fail", "verify"):
+        if score.get(f"issue_{level}_recall") is not None:
+            lines.append(
+                f"Reviewer {level} issues caught: "
+                f"{score[f'issues_{level}_caught']}/{score[f'issues_{level}_total']} "
+                f"({score[f'issue_{level}_recall']:.0%})"
+            )
+    if score.get("overall_compliant_match") is not None:
+        lines.append(
+            "Overall verdict vs reviewer: "
+            f"{'agree' if score['overall_compliant_match'] else 'disagree'}"
+            f" · issue codes raised but not in review: {score.get('issue_false_alarms', 0)}"
+        )
+    return lines
+
+
 @dataclass(frozen=True)
 class ConfigLoadSummary:
     source: str
@@ -464,6 +483,7 @@ class RunPresenter:
                         f" · strict [cyan]{(exa if exa is not None else 0):.0%}[/]"
                     )
                 lines.append(gt_line)
+            lines.extend(ground_truth_review_lines(s))
             if s.get("rule_accuracy") is not None:
                 rt = s.get("rules_total") or 0
                 lines.append(

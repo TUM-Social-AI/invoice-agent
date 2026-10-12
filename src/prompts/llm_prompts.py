@@ -15,23 +15,64 @@ from src.learnings.vision_hints import vision_model_extraction_bullets
 # --- Document classification (first page) ---
 
 
-def classify_document_type_prompt(type_descriptions_block: str) -> str:
+def _filename_hint_section(filename_hint: str) -> str:
+    return f"\nFile name hint:\n{filename_hint}\n" if filename_hint else ""
+
+
+def classify_document_type_prompt(type_descriptions_block: str, filename_hint: str = "") -> str:
     """
     type_descriptions_block: newline-separated "- \"TYPE_ID\": ..." lines from config.
+    filename_hint: optional budget-line prior derived from the file name.
     """
     return f"""You are an invoice classification expert. Examine the first page image and choose the single best matching type from the list below.
 
-Use layout, language, headings, logos, and line-item structure — not filename or assumptions.
+Use layout, language, headings, logos, and line-item structure. A file name hint, if given, is only a prior; the page decides.
 
 Available types:
 {type_descriptions_block}
-
+{_filename_hint_section(filename_hint)}
 Respond with ONLY valid JSON, no markdown fences:
 {{"invoice_type_id": "<one id from the list>", "confidence": 0.0-1.0, "reasoning": "one concise sentence citing visible cues"}}
 
 Rules:
 - Pick exactly one invoice_type_id from the list; never invent new ids.
 - Lower confidence when the page is ambiguous, blank, or unlike any listed type."""
+
+
+def classify_from_inventory_prompt(
+    type_descriptions_block: str, inventory_block: str, filename_hint: str = ""
+) -> str:
+    """
+    Text-only classification from the page inventory (category + description per page).
+    type_descriptions_block: newline-separated "- \"TYPE_ID\": ..." lines from config.
+    inventory_block: one "- page N: CATEGORY — description" line per page.
+    filename_hint: optional budget-line prior derived from the file name.
+    """
+    return f"""You are an invoice classification expert. Below is an inventory of every page of one expense document
+(page category + a short description of what is visible). The first page is often a generic internal fund-request
+form; decide from what is actually being paid for across all pages (the supplier invoice, line items, receipts).
+
+Available types:
+{type_descriptions_block}
+
+Page inventory:
+{inventory_block}
+{_filename_hint_section(filename_hint)}
+Respond with ONLY valid JSON, no markdown fences:
+{{"invoice_type_id": "<one id from the list>", "confidence": 0.0-1.0, "reasoning": "one concise sentence citing the pages that decided it"}}
+
+Rules:
+- Pick exactly one invoice_type_id from the list; never invent new ids.
+- Lower confidence when the pages describe nothing that clearly fits a listed type."""
+
+
+# Free text the models write (observations, reasons, explanations) is shown to reviewers in the UI,
+# the flagged PDF and the CSVs; documents and rule texts are often French or Spanish.
+OUTPUT_LANGUAGE_RULE = (
+    "Write all free text (observations, reasons, explanations, review notes) in English, even when the "
+    "document or the rule text is in French or Spanish. Copy document values (names, numbers, dates, "
+    "quoted text) exactly as printed; do not translate them."
+)
 
 
 # --- Field extraction (per page / crop) ---
@@ -47,7 +88,8 @@ _EXTRACTION_INTRO = """You are a structured document extraction specialist. Your
 Priorities:
 - Use only information visible on this image (and OCR text if provided). Do not guess from world knowledge.
 - When printed text and handwriting disagree for the same field, prefer the clearest authoritative source (often printed totals or table cells).
-- Amounts: preserve decimal separators as in the document; strip thousand separators only when unambiguous.
+- Amounts: copy the amount exactly as printed, with its thousands separators, decimal mark and currency mark
+  (e.g. "425 000", "50.000 F", "$3,758.00"); do not convert or reformat it.
 - If a field is not present on this page, use null — do not copy values from unrelated lines (e.g. a date into payment_method)."""
 
 
@@ -57,12 +99,14 @@ def build_extract_fields_vision_prompt(
     hints: str,
     accuracy_block: str,
     fields_text: str,
+    cite_lines: bool = False,
 ) -> str:
     """
     text_section: OCR block including labels, or empty string.
     hints: optional agent hints for this call.
     accuracy_block: output of format_extraction_accuracy_block(state).
     fields_text: bullet list of fields from schema.
+    cite_lines: OCR lines carry [L<n>] IDs; ask for a <field>_evidence list per field.
     """
     parts = [
         _EXTRACTION_INTRO,
@@ -81,19 +125,43 @@ def build_extract_fields_vision_prompt(
             "",
             fields_text,
             "",
-            "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence key.",
-            "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
-            "Example:",
-            "{{",
-            '  "vendor_name": "Acme GmbH",',
-            '  "vendor_name_confidence": 0.95,',
-            '  "invoice_number": null,',
-            '  "invoice_number_confidence": 0.0',
-            "}}",
-            "",
-            "Do not include any text outside the JSON object.",
         ]
     )
+    if cite_lines:
+        parts.extend(
+            [
+                "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence and *_evidence keys.",
+                "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
+                "Evidence keys use the pattern <field_name>_evidence: the IDs of the OCR transcript lines (e.g. [\"L12\"]) "
+                "on which you read that value. Cite only lines that contain the value itself (not just its label); "
+                "cite several IDs when the value spans lines. Use [] when the value is null or not in the OCR transcript "
+                "(e.g. handwriting the OCR missed). Never invent IDs.",
+                "Example:",
+                "{{",
+                '  "vendor_name": "Acme GmbH",',
+                '  "vendor_name_confidence": 0.95,',
+                '  "vendor_name_evidence": ["L3"],',
+                '  "invoice_number": null,',
+                '  "invoice_number_confidence": 0.0,',
+                '  "invoice_number_evidence": []',
+                "}}",
+            ]
+        )
+    else:
+        parts.extend(
+            [
+                "Return ONLY a valid JSON object whose keys are exactly the field names above plus each field's *_confidence key.",
+                "Confidence keys use the pattern <field_name>_confidence with values from 0.0 to 1.0.",
+                "Example:",
+                "{{",
+                '  "vendor_name": "Acme GmbH",',
+                '  "vendor_name_confidence": 0.95,',
+                '  "invoice_number": null,',
+                '  "invoice_number_confidence": 0.0',
+                "}}",
+            ]
+        )
+    parts.extend(["", "Do not include any text outside the JSON object."])
     return "\n".join(parts)
 
 
@@ -107,7 +175,45 @@ _EXTRACTION_ACCURACY_BASE: tuple[str, ...] = (
     "- Never use a bare date token (e.g. DD/MM) or a tiny numeric fragment as payment_method; use payer/channel wording or null.",
     "- Do not use only a budget code (NN.NN) for expense_category if a descriptive label appears nearby; prefer the label.",
     "- For pay_period use MM/YYYY or month name + year as text—not a lone month number 1–12 as the whole field.",
+    "- Date fields need a complete date (day, month and year). If the page shows only a day, or only a month and year, use null.",
+    "- Total amounts: take the grand total of the document (TOTAL GENERAL, Total TTC, Net à payer, Montant total, "
+    "or the amount in words after 'Arrêté la présente facture à la somme de'), never a single line total.",
+    "- Funding or project stamps (a box naming the project, 'Financé par', 'Pourcentage d'imputation', a project code) "
+    "are approval marks, not document content: never use their text as a description, purpose, item, vendor or name.",
+    "- payment_method: use the payment evidence shown (a cheque, a transfer order or slip, a receipt stating cash). "
+    "A 'Payé par' line on an internal request names the payer, not how the payment was made; use it only when no such evidence is on the page.",
 )
+
+# Notes added to an extraction call according to the page's inventory document_role.
+_PAGE_ROLE_NOTES: dict[str, str] = {
+    "funds_request": (
+        "This page is an internal funds or payment request issued by the paying organisation itself, not the "
+        "supplier's invoice. The organisation in its letterhead is the payer (the client), never the vendor. "
+        "'Bénéficiaire' is the party being paid (the supplier or the person receiving the money). People next to "
+        "'Autorisé par', 'Payé par', 'Demandeur', 'Visa' or 'Approuvé par' are the payer's own staff: never use them "
+        "as the vendor or as the employee or volunteer being paid. The form's own N° and date are the request's "
+        "number and date."
+    ),
+    "internal_other": (
+        "This page is an internal form of the paying organisation (requisition, goods received note, timesheet, "
+        "memo), not the supplier's invoice. Its letterhead organisation is the payer, never the vendor; its own "
+        "numbers and dates are internal references, not an invoice number or invoice date. Staff names on it "
+        "(requester, logistics, approvers) are not the vendor."
+    ),
+    "supplier_other": (
+        "This page is a supplier document that is not the final invoice (pro forma, quote or delivery note): its "
+        "number and date are not the invoice's, and a pro forma total may differ from the amount invoiced."
+    ),
+    "payment_proof": (
+        "This page is proof of payment (cheque, transfer, bank statement). Use it for how the payment was made and "
+        "the amount paid; the issuing bank is not the vendor."
+    ),
+}
+
+
+def page_role_note(document_role: str) -> str:
+    """Extraction hint for a page's inventory document_role; empty for supplier invoices and unknown roles."""
+    return _PAGE_ROLE_NOTES.get((document_role or "").strip().lower(), "")
 
 
 def format_extraction_accuracy_block(state: Optional["AgentState"]) -> str:
@@ -137,27 +243,62 @@ def ocr_transcript_section(text_context: str) -> str:
 # --- Visual compliance (multi-page) ---
 
 
-def build_compliance_visual_prompt(evidence_lines_block: str, rule_lines: str) -> str:
+def build_compliance_visual_prompt(
+    evidence_lines_block: str,
+    rule_lines: str,
+    ocr_block: str = "",
+    cite_lines: bool = False,
+) -> str:
     """
     evidence_lines_block: joined lines describing each image index and page_num.
     rule_lines: newline-separated rule descriptions from config.
+    ocr_block: OCR lines of the pages sent, each prefixed with a [p<page>_L<n>] ID.
+    cite_lines: ask for evidence_line_ids / evidence_kind per rule.
     """
+    base = _compliance_visual_prompt_base(evidence_lines_block, rule_lines)
+    if not cite_lines:
+        return base
+    return (
+        base
+        + f"""
+
+OCR transcript of the pages above (may contain OCR errors; each line starts with its ID):
+{ocr_block}
+
+Also add to every rule object:
+  "evidence_line_ids": IDs of the OCR lines that show what you based the verdict on, e.g. ["p2_L39", "p2_L40"]
+     (the stamp text, the date, the signature label next to the signature). [] if none apply.
+  "evidence_kind": one of
+     "text"   — the evidence is printed or stamped text in the cited lines,
+     "anchor" — the evidence is not text (signature, seal graphic); cite the nearest label or stamp text lines,
+     "absent" — you looked and the required item is not in the document (cite nothing),
+     "none"   — you could not judge.
+Only cite IDs listed in the OCR transcript. Never invent IDs."""
+    )
+
+
+def _compliance_visual_prompt_base(evidence_lines_block: str, rule_lines: str) -> str:
     return f"""You are a document compliance inspector. You receive one or more page images in order.
 
 Evidence (image order → document page):
 {evidence_lines_block}
 
 For each requirement below, decide pass or fail using evidence across all images. Reference page_num=N when you cite where something appears.
+"passes": true means the requirement is satisfied; false means it is not. Write the observation first, then set
+"passes" so it agrees with it: an observation saying the requirement is met must have "passes": true.
+Judge only what is visible. Do not assume or infer that a required document or mark exists.
 
 Requirements:
 {rule_lines}
 
+{OUTPUT_LANGUAGE_RULE}
+
 Respond with ONLY valid JSON — one top-level key per rule_id, no markdown fences. Shape per rule:
 {{
   "RULE_ID": {{
+    "observation": "one or two short sentences: what you saw, where (page_num), and why pass/fail",
     "passes": true,
     "confidence": 0.0-1.0,
-    "observation": "one or two short sentences: what you saw, where (page_num), and why pass/fail",
     "field_updates": {{}}
   }}
 }}
@@ -168,37 +309,61 @@ Optional "field_updates": only when this rule directly supports a value — a fl
 # --- Page inventory (per page, category + description) ---
 
 
+_INVENTORY_CATEGORIES = (
+    "   INVOICE_HEADER   — vendor/client block, invoice number, dates, references, letterhead\n"
+    "   LINE_ITEMS       — tables of services/products, quantities, unit prices, mileage lines\n"
+    "   TOTALS           — subtotals, taxes, grand total, bank/IBAN, payment summary\n"
+    "   SIGNATURE_STAMP  — signatures, stamps, seals, approvals, discharge blocks\n"
+    "   SUPPORTING_DOC   — receipts, quotes, contracts, tickets, boarding passes, photos, timesheets\n"
+    "   COVER_PAGE       — title page, transmittal, cover letter, project summary without invoice body\n"
+    "   BLANK            — empty or nearly empty\n"
+)
+
+# Who issued the page. Expense bundles mix the paying organisation's own forms with the
+# supplier's documents; extraction ranks pages by this role (see agent.document_role_priority).
+_INVENTORY_DOCUMENT_ROLES = (
+    "   funds_request    — internal funds or payment request issued by the paying organisation itself, on its\n"
+    "                      own letterhead (\"Demande de fonds\", \"Demande de paiement\", \"Solicitud de fondos\",\n"
+    "                      payment voucher, \"Bon de caisse\", \"Ordre de paiement\"); usually has \"Bénéficiaire\",\n"
+    "                      \"Autorisé par\", \"Payé par\" lines\n"
+    "   internal_other   — any other form issued by the paying organisation: requisition (\"Fiche de réquisition\"),\n"
+    "                      goods received note (\"Bon de réception\"), timesheet (\"Fiche de pointage\"), mission order,\n"
+    "                      internal memo, letter or list\n"
+    "   supplier_invoice — the final invoice, receipt or ticket issued by the supplier or service provider\n"
+    "                      (\"Facture\", \"Facture définitive\", \"Reçu\", airline or hotel invoice), or a payment\n"
+    "                      acknowledgement signed by the person being paid (\"Décharge\")\n"
+    "   supplier_other   — other supplier documents that are not the final invoice: pro forma or quote\n"
+    "                      (\"Facture proforma\", \"Devis\"), delivery note (\"Bon/Bordereau de livraison\")\n"
+    "   payment_proof    — proof the payment was made: cheque copy, bank transfer order or advice, bank statement\n"
+    "   other            — anything else: photos, identity documents, a page with only stamps, cover or blank page\n"
+)
+
+
 def page_inventory_prompt() -> str:
     return (
-        "Examine this single page image. Do two things:\n\n"
+        "Examine this single page image. Do three things:\n\n"
         "1. Choose EXACTLY one category from the fixed list:\n"
-        "   INVOICE_HEADER   — vendor/client block, invoice number, dates, references, letterhead\n"
-        "   LINE_ITEMS       — tables of services/products, quantities, unit prices, mileage lines\n"
-        "   TOTALS           — subtotals, taxes, grand total, bank/IBAN, payment summary\n"
-        "   SIGNATURE_STAMP  — signatures, stamps, seals, approvals, discharge blocks\n"
-        "   SUPPORTING_DOC   — receipts, quotes, contracts, tickets, boarding passes, photos, timesheets\n"
-        "   COVER_PAGE       — title page, transmittal, cover letter, project summary without invoice body\n"
-        "   BLANK            — empty or nearly empty\n\n"
-        "2. Write a specific description (max 15 words) of what is literally visible on THIS page.\n"
-        "   Name organisations, document titles, amounts, languages, or notable stamps — avoid generic filler.\n\n"
-        'Respond with ONLY valid JSON: {"category": "<one of the above>", "description": "..."}'
+        + _INVENTORY_CATEGORIES
+        + "\n2. Choose EXACTLY one document_role (who issued this page and what it is):\n"
+        + _INVENTORY_DOCUMENT_ROLES
+        + "\n3. Write a specific description (max 15 words) of what is literally visible on THIS page.\n"
+        "   Name the document title, the issuing organisation, amounts, languages, or notable stamps — avoid generic filler.\n\n"
+        'Respond with ONLY valid JSON: {"category": "<one of the categories>", '
+        '"document_role": "<one of the roles>", "description": "..."}'
     )
 
 
 def page_inventory_batch_prompt(page_count: int) -> str:
     return (
         f"You are given {page_count} page images in order (page 1 first). "
-        "For EACH page classify it and write a short description.\n\n"
+        "For EACH page choose a category and a document_role, and write a short description.\n\n"
         "Categories (pick exactly one per page):\n"
-        "   INVOICE_HEADER   — vendor/client block, invoice number, dates, references, letterhead\n"
-        "   LINE_ITEMS       — tables of services/products, quantities, unit prices, mileage lines\n"
-        "   TOTALS           — subtotals, taxes, grand total, bank/IBAN, payment summary\n"
-        "   SIGNATURE_STAMP  — signatures, stamps, seals, approvals, discharge blocks\n"
-        "   SUPPORTING_DOC   — receipts, quotes, contracts, tickets, boarding passes, photos, timesheets\n"
-        "   COVER_PAGE       — title page, transmittal, cover letter, project summary without invoice body\n"
-        "   BLANK            — empty or nearly empty\n\n"
-        "Description: max 15 words, name organisations/amounts/stamps visible on that specific page.\n\n"
-        'Respond with ONLY valid JSON: {"pages": [{"category": "...", "description": "..."}, ...]}'
+        + _INVENTORY_CATEGORIES
+        + "\nDocument roles (pick exactly one per page: who issued it and what it is):\n"
+        + _INVENTORY_DOCUMENT_ROLES
+        + "\nDescription: max 15 words, name the document title, issuing organisation, amounts and stamps "
+        "visible on that specific page.\n\n"
+        'Respond with ONLY valid JSON: {"pages": [{"category": "...", "document_role": "...", "description": "..."}, ...]}'
     )
 
 

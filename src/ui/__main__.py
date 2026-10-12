@@ -1,4 +1,4 @@
-"""Launch the browser UI:  python -m src.ui [--port 8000] [--no-browser]"""
+"""Launch the browser UI:  python -m src.ui [--port 8000] [--no-browser] [--local-config]"""
 
 from __future__ import annotations
 
@@ -18,10 +18,17 @@ def main() -> None:
     parser.add_argument("--output", default="output/ui", help="Where uploads and results are stored")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--no-browser", action="store_true", help="Don't open a browser tab")
+    parser.add_argument(
+        "--local-config",
+        "--no-drive-config",
+        dest="local_config",
+        action="store_true",
+        help="Load config CSVs from local config_dir even when the Google Drive config_folder is enabled",
+    )
     args = parser.parse_args()
 
     print("Loading agent and models (this can take a few seconds)...", flush=True)
-    manager = build_manager(args.config, args.output)
+    manager = build_manager(args.config, args.output, local_config=args.local_config)
     app = create_app(manager)
 
     # Local only: the UI can run an LLM on uploaded files, so never bind a public interface.

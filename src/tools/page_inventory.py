@@ -19,7 +19,7 @@ from src.agent.state import AgentState, FieldResult, RuleResult
 from src.compliance.evidence import required_slots_for_rule, link_pages
 from src.config.loader import ConfigStore, ComplianceRule
 from src.llm.base import LLMProvider
-from src.models.tool_io_models import InventoryItemModel
+from src.models.tool_io_models import DOCUMENT_ROLES, InventoryItemModel
 from src.prompts.llm_prompts import page_inventory_prompt, page_inventory_batch_prompt
 
 _CATEGORY_ENUM = [
@@ -31,9 +31,10 @@ _INVENTORY_ITEM_SCHEMA: dict = {
     "type": "object",
     "properties": {
         "category": {"type": "string", "enum": _CATEGORY_ENUM},
+        "document_role": {"type": "string", "enum": list(DOCUMENT_ROLES)},
         "description": {"type": "string"},
     },
-    "required": ["category", "description"],
+    "required": ["category", "document_role", "description"],
     "additionalProperties": False,
 }
 
@@ -53,6 +54,21 @@ from src.tools.pdf_pages import _image_to_base64
 from src.tools.compliance_eval import _normalize_numeric
 
 logger = logging.getLogger(__name__)
+
+
+def page_document_role(state: AgentState, page_num: Any) -> str:
+    """The inventory document_role of a page ("" when unknown or not inventoried)."""
+    try:
+        page = int(page_num)
+    except (TypeError, ValueError):
+        return ""
+    for entry in state.page_inventory or []:
+        try:
+            if int(entry.get("page", 0)) == page:
+                return str(entry.get("document_role") or "")
+        except (TypeError, ValueError):
+            continue
+    return ""
 
 
 def _extract_entities_from_text(text: str) -> dict:
@@ -204,18 +220,23 @@ def inventory_pages(
             try:
                 inv_item = InventoryItemModel.model_validate(item)
                 category = inv_item.category
+                role = inv_item.document_role
                 description = inv_item.description.strip()
             except Exception:
                 category = str(item.get("category", "UNKNOWN"))
+                role = ""
                 description = str(item.get("description", ""))
-            inventory.append({"page": page_num, "path": path, "category": category, "description": description})
-            logger.debug("  inventory p%d [%s]: %s", page_num, category, description)
+            inventory.append(
+                {"page": page_num, "path": path, "category": category, "document_role": role, "description": description}
+            )
+            logger.debug("  inventory p%d [%s/%s]: %s", page_num, category, role, description)
     else:
         # Per-page mode: one vision call per page (safe for Ollama and small models)
         prompt = page_inventory_prompt()
         for i, path in enumerate(inventory_paths):
             page_num = i + 1
             category = "UNKNOWN"
+            role = ""
             description = ""
             try:
                 img_b64 = _image_to_base64(path)
@@ -246,13 +267,16 @@ def inventory_pages(
                     parsed = json.loads(raw)
                 inv_item = InventoryItemModel.model_validate(parsed)
                 category = inv_item.category
+                role = inv_item.document_role
                 description = inv_item.description.strip()
             except json.JSONDecodeError:
                 description = "(json parse error)"
             except Exception as e:
                 description = f"(error: {e})"
-            inventory.append({"page": page_num, "path": path, "category": category, "description": description})
-            logger.debug("  inventory p%d [%s]: %s", page_num, category, description)
+            inventory.append(
+                {"page": page_num, "path": path, "category": category, "document_role": role, "description": description}
+            )
+            logger.debug("  inventory p%d [%s/%s]: %s", page_num, category, role, description)
 
     state.page_inventory = inventory
     # Build normalized page facts for evidence-grounded rule evaluation.
@@ -274,6 +298,7 @@ def inventory_pages(
         page_facts[page_num] = {
             "category": category,
             "doc_subtype": doc_subtype,
+            "document_role": entry.get("document_role", ""),
             "entities": _extract_entities_from_text(description),
             "confidence": 0.6,
         }
