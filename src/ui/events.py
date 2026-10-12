@@ -52,6 +52,8 @@ class RunHub:
         self.paths: dict[str, str] = {}
         self.reevaluated_from = ""
         self.reevaluated_to = ""
+        # Reviewer corrections of extracted values: field_name -> {value, at, by}.
+        self.field_edits: dict[str, dict[str, Any]] = {}
         # Set by the runner when the run produced a flagged PDF (results view in the browser).
         self.result: dict[str, Any] | None = None
         self.flagged_pdf: str = ""
@@ -109,6 +111,15 @@ class RunHub:
         self.status = status
         self.history.append({"status": status, "at": at or time.time(), "by": by, "note": note})
 
+    def set_field_edit(self, field_name: str, value: str | None, *, by: str) -> None:
+        """Save a reviewer's value for a field; `None` drops the edit (back to the AI's value)."""
+        with self._lock:
+            if value is None:
+                self.field_edits.pop(field_name, None)
+            else:
+                self.field_edits[field_name] = {"value": value, "at": time.time(), "by": by}
+        self.save()
+
     def update(self, **fields: Any) -> None:
         """Set record fields (verdict, summary, paths, …) and save them."""
         with self._lock:
@@ -134,6 +145,7 @@ class RunHub:
                 "paths": dict(self.paths),
                 "reevaluated_from": self.reevaluated_from,
                 "reevaluated_to": self.reevaluated_to,
+                "field_edits": {k: dict(v) for k, v in self.field_edits.items()},
             }
 
     def save(self) -> None:

@@ -9,8 +9,10 @@ from types import SimpleNamespace
 from src.agent.state import AgentState, RuleResult
 from src.ui.events import RunHub
 from src.ui.rule_summary import (
+    FIELD_LABELS,
     RULE_LABELS,
     RuleCatalog,
+    field_label,
     humanize,
     summarize_compliance,
     summarize_run,
@@ -18,7 +20,19 @@ from src.ui.rule_summary import (
 )
 from src.ui.web_presenter import WebPresenter
 
-RULES_CSV = Path(__file__).resolve().parent.parent / "config" / "csv" / "compliance_rules.csv"
+CONFIG = Path(__file__).resolve().parent.parent / "config"
+RULES_CSV = CONFIG / "csv" / "compliance_rules.csv"
+
+
+def test_every_field_name_in_the_configs_has_an_english_label():
+    # The configs' own field_label column is Spanish; a new field must get a label here too.
+    names = set()
+    for path in (CONFIG / "csv" / "extraction_fields.csv", CONFIG / "csv_demo" / "extraction_fields.csv"):
+        with path.open(encoding="utf-8", newline="") as f:
+            names |= {row["field_name"] for row in csv.DictReader(f)}
+    assert names - set(FIELD_LABELS) == set()
+    assert field_label("vendor_name") == "Supplier"
+    assert field_label("brand_new_field") == "Brand new field"
 
 
 def _rule(rule_id, rule_name, check_type="required", severity="warning"):

@@ -236,6 +236,8 @@ function setStatus(id) {
 function renderRunMeta(run) {
   view.run = run;
   setStatus(run.status);
+  // Edit buttons only where the status allows corrections (the server checks this too).
+  $("field-list").classList.toggle("locked", !statusInfo(run.status).editable);
 
   const actions = $("run-actions");
   actions.replaceChildren();
@@ -546,9 +548,6 @@ function showView(name) {
   $("run-bar").hidden = false;
   $("run-card").hidden = name !== "run";
   $("result-card").hidden = name !== "result";
-  const main = document.querySelector("main");
-  main.classList.remove("dash");
-  main.classList.toggle("wide", name === "result");
 }
 
 async function loadResult(runId) {
@@ -582,7 +581,7 @@ function renderResult(data) {
     p.comments.forEach((c) => {
       const pin = el("button", `pin ${c.status}`, c.ref);
       pin.type = "button";
-      pin.title = `${c.ref} ${c.rule_id}`;
+      pin.title = c.title || `${c.ref} ${c.rule_id}`;
       placeAt(pin, c.box);
       pin.addEventListener("click", (e) => {
         e.stopPropagation();
@@ -612,10 +611,13 @@ function renderResult(data) {
 function issueRow(f) {
   const li = el("li", `item issue ${f.status}`);
   li.dataset.ref = f.ref;
+  li.title = f.rule_id;
   const head = el("div", "item-head");
-  head.append(el("span", `badge ${f.status}`, STATUS_LABEL[f.status] || f.status), el("span", "item-ref", `${f.ref} ${f.rule_id}`));
+  head.append(el("span", `badge ${f.status}`, STATUS_LABEL[f.status] || humanize(f.status)), el("span", "item-ref", `${f.ref} · ${f.title}`));
   if (f.target) head.append(el("span", "page-chip", `p${f.target.page}`));
-  li.append(head, el("div", "item-title", f.title), el("div", "item-comment", f.comment));
+  li.append(head);
+  if (f.reason) li.append(el("div", "item-title", f.reason));
+  li.append(el("div", "item-comment", f.comment));
   makeClickable(li, f.target, f.status);
   return li;
 }
@@ -623,19 +625,94 @@ function issueRow(f) {
 function fieldRow(f) {
   const found = f.value !== null && f.value !== "";
   const kind = !found ? "missing" : f.needs_review ? "review" : QUALITY_KIND[f.quality] || "unlocated";
-  const li = el("li", `item field ${kind}`);
+  const li = el("li", `item field ${f.edit ? "edited" : kind}`);
+  li.dataset.field = f.field_name;
   const head = el("div", "item-head");
   head.append(el("span", "dot"), el("span", "item-label", f.label));
+  if (f.edit) head.append(el("span", "badge edited", "Edited"));
   if (f.target) head.append(el("span", "page-chip", `p${f.target.page}`));
+  const edit = el("button", "edit-btn", "Edit");
+  edit.type = "button";
+  edit.setAttribute("aria-label", `Edit ${f.label}`);
+  edit.addEventListener("click", (e) => { e.stopPropagation(); openFieldEditor(li, f); });
+  head.append(edit);
   li.append(head, el("div", "item-value", f.display));
+
   const meta = [];
-  if (found && typeof f.confidence === "number") meta.push(`confidence ${f.confidence.toFixed(2)}`);
-  if (found && !f.target) meta.push("location not found on the page");
-  else if (found && !f.target.box) meta.push("page only");
-  if (f.review_reason) meta.push(f.review_reason);
+  if (f.edit) {
+    meta.push(`AI read: ${f.edit.original}`, `edited ${fmtWhen(f.edit.at)}`);
+  } else {
+    if (found && typeof f.confidence === "number") meta.push(`confidence ${f.confidence.toFixed(2)}`);
+    if (found && !f.target) meta.push("location not found on the page");
+    else if (found && !f.target.box) meta.push("page only");
+    if (f.review_reason) meta.push(f.review_reason);
+  }
   if (meta.length) li.append(el("div", "item-meta", meta.join(" · ")));
   makeClickable(li, f.target, kind);
   return li;
+}
+
+// Inline editor for one field. Saved values are kept with the run; the checks are not re-run.
+function openFieldEditor(li, f) {
+  if (li.querySelector(".field-editor")) return;
+  const found = f.value !== null && f.value !== "";
+  const form = el("form", "field-editor");
+  const input = el("input");
+  input.type = "text";
+  input.value = found ? f.display : "";
+  input.setAttribute("aria-label", `New value for ${f.label}`);
+  input.maxLength = 2000;
+  const save = el("button", "btn", "Save");
+  save.type = "submit";
+  const cancel = el("button", "btn secondary", "Cancel");
+  cancel.type = "button";
+  const buttons = el("div", "editor-buttons");
+  buttons.append(save, cancel);
+  if (f.edit) {
+    const undo = el("button", "btn secondary", "Undo edit");
+    undo.type = "button";
+    undo.title = `Go back to what the AI read: ${f.edit.original}`;
+    undo.addEventListener("click", () => saveField(li, f, null, form));
+    buttons.append(undo);
+  }
+  const error = el("p", "error-text editor-error");
+  error.hidden = true;
+  form.append(input, buttons, error);
+
+  const value = li.querySelector(".item-value");
+  value.hidden = true;
+  const close = () => { form.remove(); value.hidden = false; };
+  cancel.addEventListener("click", close);
+  form.addEventListener("submit", (e) => { e.preventDefault(); saveField(li, f, input.value, form); });
+  // Keys and clicks stay in the editor: the row itself jumps to the field on the page.
+  form.addEventListener("click", (e) => e.stopPropagation());
+  form.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Escape") close();
+  });
+  value.after(form);
+  input.focus();
+  input.select();
+}
+
+async function saveField(li, f, value, form) {
+  const url = `/api/runs/${encodeURIComponent(view.runId)}/fields/${encodeURIComponent(f.field_name)}`;
+  const opts = value === null
+    ? { method: "DELETE" }
+    : { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ value }) };
+  form.querySelectorAll("button").forEach((b) => (b.disabled = true));
+  const res = await fetch(url, opts).catch(() => null);
+  if (!res || !res.ok) {
+    const err = res ? await res.json().catch(() => ({})) : {};
+    const box = form.querySelector(".editor-error");
+    box.textContent = typeof err.detail === "string" ? err.detail : "Could not save. Is the server still running?";
+    box.hidden = false;
+    form.querySelectorAll("button").forEach((b) => (b.disabled = false));
+    return;
+  }
+  const row = fieldRow(await res.json());
+  if (result.activeRow === li) clearSelection();
+  li.replaceWith(row);
 }
 
 function makeClickable(li, target, kind) {
@@ -695,7 +772,7 @@ function openPopover(wrap, comment, pin) {
   closePopover();
   const pop = el("div", `popover ${comment.status}`);
   pop.setAttribute("role", "dialog");
-  pop.append(el("div", "popover-title", `${comment.ref} ${comment.rule_id}`), el("div", "popover-body", comment.text));
+  pop.append(el("div", "popover-title", comment.title || `${comment.ref} ${comment.rule_id}`), el("div", "popover-body", comment.text));
   // Pins sit in the right margin, so the popover opens to their left, below the pin.
   pop.style.right = `${(1 - comment.box[0]) * 100}%`;
   pop.style.top = `${comment.box[3] * 100}%`;
@@ -752,9 +829,6 @@ function showDashboard() {
   $("run-card").hidden = true;
   $("result-card").hidden = true;
   $("dashboard").hidden = false;
-  const main = document.querySelector("main");
-  main.classList.remove("wide");
-  main.classList.add("dash");
   document.title = "Invoice Compliance Agent";
   loadRuns();
 }

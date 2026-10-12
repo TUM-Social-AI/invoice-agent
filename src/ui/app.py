@@ -10,12 +10,18 @@ from typing import AsyncIterator
 from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from src.ui import statuses
 from src.ui.events import RunHub
 from src.ui.runner import MAX_UPLOAD_BYTES, ActionError, RunManager, UploadError
 
 STATIC_DIR = Path(__file__).parent / "static"
+MAX_FIELD_VALUE_CHARS = 2000
+
+
+class FieldEdit(BaseModel):
+    value: str = Field(max_length=MAX_FIELD_VALUE_CHARS)
 POLL_INTERVAL_S = 0.15
 HEARTBEAT_EVERY_S = 15.0
 
@@ -131,7 +137,26 @@ def create_app(manager: RunManager) -> FastAPI:
 
     @app.get("/api/runs/{run_id}/result")
     def run_result(run_id: str) -> dict:
-        return _finished_hub(run_id).result
+        from src.ui.result_view import apply_field_edits
+
+        hub = _finished_hub(run_id)
+        return apply_field_edits(hub.result, hub.field_edits)
+
+    def _edit_field(run_id: str, field_name: str, value: str | None) -> dict:
+        try:
+            return manager.edit_field(run_id, field_name, value)
+        except KeyError as exc:
+            raise HTTPException(status_code=404, detail="Unknown run or field") from exc
+        except ActionError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    @app.put("/api/runs/{run_id}/fields/{field_name}")
+    def save_field(run_id: str, field_name: str, edit: FieldEdit) -> dict:
+        return _edit_field(run_id, field_name, edit.value.strip())
+
+    @app.delete("/api/runs/{run_id}/fields/{field_name}")
+    def undo_field_edit(run_id: str, field_name: str) -> dict:
+        return _edit_field(run_id, field_name, None)
 
     @app.get("/api/runs/{run_id}/pages/{page}.jpg")
     def run_page(run_id: str, page: int) -> FileResponse:

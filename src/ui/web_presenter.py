@@ -25,6 +25,7 @@ from src.output.presenter import (
 from src.ui.events import RunHub
 from src.ui.rule_summary import (
     RuleCatalog,
+    field_label,
     finish_rows,
     friendly_finish_explanation,
     friendly_finish_reason,
@@ -208,7 +209,7 @@ class WebPresenter:
             turns=state.turn,
             fields_extracted=len(state.extracted_fields),
             rules=summarize_run(state.rule_results, self._catalog),
-            flagged_fields=[k for k, v in state.extracted_fields.items() if v.flagged_for_review],
+            flagged_fields=[field_label(k) for k, v in state.extracted_fields.items() if v.flagged_for_review],
             outputs=dict(paths),
             has_result=bool(self._hub is not None and self._hub.result),
         )

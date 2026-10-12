@@ -306,8 +306,45 @@ def test_result_view_scales_boxes_to_the_page_image():
     f1, f2 = view["findings"]
     assert f1["target"]["box"] == pytest.approx([0.5 * frac, 0.5, 0.7 * frac, 0.55])
     assert f2["target"]["box"] == pytest.approx([0.2 * frac, 0.8, 0.4 * frac, 0.85])
-    assert f1["title"] == "F1 is wrong"
-    assert f1["comment"].startswith("F1 [FAILED] R_F1")
+    assert f1["title"] == "Rule"  # English name from rule_summary (unknown names are humanized)
+    assert f1["comment"].endswith("Rule R_F1")
+
+
+def test_issues_are_shown_in_english_not_the_configs_spanish_message():
+    from src.trace.pdf_writer import MARGIN
+    from src.ui.result_view import build_result_view
+    from tests.test_trace_flagged_layout import sample_trace
+
+    trace = sample_trace()
+    visual, field_rule = trace["findings"][0], trace["findings"][1]
+    visual.update(
+        rule_name="sanctions_fines_not_subsidized", check_type="visual_check",
+        message="The document includes parking tickets, which are fines.",
+        error_message="El documento parece ser una sanción o recargo, no subvencionable.",
+        requirement="This document does not represent fines", visual={"confidence": 0.95},
+    )
+    field_rule.update(
+        rule_name="fecha_requerida", check_type="required", field_names=["vendor_name"],
+        message="Falta la fecha del documento de viaje. Campo obligatorio.",
+        error_message="Falta la fecha del documento de viaje. Campo obligatorio.",
+    )
+    trace["flagged_pdf"] = {"summary_pages": 0, "pages": [
+        {"page": 1, "pdf_index": 0, "scan_w": 595.0, "scan_h": 842.0, "margin": MARGIN,
+         "comments": [{"ref": "F1", "rule_id": "R_F1", "status": "failed", "rect": [601, 100, 617, 116],
+                       "text": "F1 [FAILED] El documento parece ser una sanción"}]},
+    ]}
+    view = build_result_view(trace, "r1")
+    f1, f2 = view["findings"]
+    assert (f1["title"], f1["reason"]) == ("No sanctions or fines", "The document includes parking tickets, which are fines.")
+    assert "Requirement: This document does not represent fines" in f1["comment"]
+    assert "Model confidence: 0.95" in f1["comment"]
+    assert (f2["title"], f2["reason"]) == ("Document date present", "Not found in the document")
+    assert "Fields: Supplier" in f2["comment"]
+
+    pin = view["pages"][0]["comments"][0]
+    assert pin["title"] == "F1 · No sanctions or fines"
+    shown = " ".join([f1["title"], f1["reason"], f1["comment"], f2["title"], f2["reason"], f2["comment"], pin["text"]])
+    assert "El documento" not in shown and "Falta" not in shown
 
 
 def test_finished_run_serves_results_pages_and_pdf(tmp_path):
@@ -536,3 +573,72 @@ def test_reloaded_run_serves_its_results_view(tmp_path):
     assert [p["page"] for p in view["pages"]] == [1, 2]
     assert reloaded.get(view["pages"][0]["image_url"]).status_code == 200
     assert reloaded.get(view["pdf_url"]).content.startswith(b"%PDF")
+
+
+# --- Reviewer corrections of extracted fields ---------------------------------------
+
+
+def _traced_manager(tmp_path) -> RunManager:
+    presenter = WebPresenter()
+    return RunManager(
+        StubAgent(presenter), presenter, tmp_path,
+        materialize=lambda path: [SimpleNamespace(local_pdf_path=path, provenance=None, run_identity=None)],
+        write_results=lambda state, out_dir: _flagged_outputs(out_dir),
+        page_render_scale=0.5,
+    )
+
+
+def _fields(client: TestClient, run_id: str) -> dict[str, dict]:
+    return {f["field_name"]: f for f in client.get(f"/api/runs/{run_id}/result").json()["fields"]}
+
+
+def test_reviewer_edits_a_field_and_it_is_kept_after_a_restart(tmp_path):
+    client = TestClient(create_app(_traced_manager(tmp_path)))
+    run_id = _upload(client)
+
+    res = client.put(f"/api/runs/{run_id}/fields/vendor_name", json={"value": "  ACME Logistics S.L. "})
+    assert res.status_code == 200
+    field = res.json()
+    assert field["display"] == "ACME Logistics S.L."
+    assert field["edit"]["original"] == "ACME" and field["edit"]["by"] == "reviewer"
+    assert field["target"] is not None  # still points where the AI read it
+
+    # A field the AI did not find can be filled in too.
+    client.put(f"/api/runs/{run_id}/fields/vat_amount", json={"value": "89 250"})
+
+    reloaded = TestClient(create_app(_traced_manager(tmp_path)))
+    fields = _fields(reloaded, run_id)
+    assert fields["vendor_name"]["display"] == "ACME Logistics S.L."
+    assert fields["vat_amount"]["display"] == "89 250" and fields["vat_amount"]["edit"]["original"] == "not found"
+    assert "edit" not in fields["total_amount"]
+
+    undo = reloaded.delete(f"/api/runs/{run_id}/fields/vendor_name")
+    assert undo.status_code == 200 and undo.json()["display"] == "ACME" and "edit" not in undo.json()
+    assert "edit" not in _fields(reloaded, run_id)["vendor_name"]
+
+
+def test_fields_are_locked_once_the_run_is_finalized(tmp_path):
+    client = TestClient(create_app(_traced_manager(tmp_path)))
+    run_id = _upload(client)
+    client.post(f"/api/runs/{run_id}/actions/confirm")
+    res = client.put(f"/api/runs/{run_id}/fields/vendor_name", json={"value": "X"})
+    assert res.status_code == 409 and "Finalized" in res.json()["detail"]
+    assert "edit" not in _fields(client, run_id)["vendor_name"]
+
+
+def test_field_edit_rejects_unknown_fields_runs_and_bad_bodies(tmp_path):
+    client = TestClient(create_app(_traced_manager(tmp_path)))
+    run_id = _upload(client)
+    assert client.put(f"/api/runs/{run_id}/fields/not_a_field", json={"value": "X"}).status_code == 404
+    assert client.put("/api/runs/nope/fields/vendor_name", json={"value": "X"}).status_code == 404
+    assert client.put(f"/api/runs/{run_id}/fields/vendor_name", json={}).status_code == 422
+    assert client.put(f"/api/runs/{run_id}/fields/vendor_name", json={"value": "x" * 2001}).status_code == 422
+
+    no_results = TestClient(create_app(_manager(tmp_path / "other")))
+    plain = _upload(no_results)
+    assert no_results.put(f"/api/runs/{plain}/fields/vendor_name", json={"value": "X"}).status_code == 404
+
+
+def test_status_catalog_says_which_statuses_allow_edits(tmp_path):
+    statuses = TestClient(create_app(_manager(tmp_path))).get("/api/statuses").json()["statuses"]
+    assert [s["id"] for s in statuses if s["editable"]] == ["needs_review", "returned"]

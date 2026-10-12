@@ -86,6 +86,7 @@ def _from_record(run_dir: Path, rec: dict[str, Any]) -> RunHub:
     hub.paths = dict(rec.get("paths") or {})
     hub.reevaluated_from = rec.get("reevaluated_from") or ""
     hub.reevaluated_to = rec.get("reevaluated_to") or ""
+    hub.field_edits = dict(rec.get("field_edits") or {})
 
     events_path = run_dir / EVENTS_FILE
     if events_path.is_file():

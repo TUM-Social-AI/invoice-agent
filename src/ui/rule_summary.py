@@ -61,6 +61,70 @@ RULE_LABELS: dict[str, str] = {
     "audit_cost_limit": "Audit cost within the 2,500 € limit",
     "evaluation_cost_limit": "Evaluation cost within the 5,000 € limit",
     "amortization_not_subsidized": "No amortization / depreciation charges",
+    # Volunteer allowance fields (Spanish names in the config)
+    "voluntario_requerido": "Volunteer name present",
+    "concepto_requerido": "Payment concept present",
+    "funcion_recomendada": "Volunteer role or activity stated",
+    "importe_requerido": "Allowance amount present",
+    "tareas_requeridas": "Tasks or services described",
+    # AEXCID checks
+    "aexcid_stamp_complete": "AEXCID stamp present and complete",
+    "air_travel_boarding_pass_economy": "Boarding pass attached, economy class",
+    "budget_line_fit": "Expense fits the budget line",
+    "cash_payment_below_limit": "Cash payment below the legal limit",
+    "client_identification_complete": "Invoice made out to the beneficiary",
+    "employer_identification_complete": "Employer identified on the payslip",
+    "invoice_arithmetic_correct": "Invoice arithmetic is correct",
+    "non_eligible_expense": "No non-eligible costs",
+    "project_execution_within_period": "Document dated within the project period",
+    "rental_contract_present": "Rental contract attached",
+    "service_contract_present": "Service contract or work order attached",
+    "single_expense_documents": "All pages belong to the same expense",
+    "supplier_identification_complete": "Supplier fully identified",
+    "tax_treatment_stated": "Tax treatment stated",
+    "three_quotes_required": "Three quotes provided above the threshold",
+    "travel_allowance_limits": "Travel allowances within the limits",
+    "volunteer_agreement_present": "Volunteer agreement attached",
+    "volunteer_allowance_basis_documented": "Basis for the volunteer allowance documented",
+    "volunteer_receipt_complete": "Volunteer receipt complete and signed",
+}
+
+# English labels keyed by `field_name` in config/csv/extraction_fields.csv, whose own
+# `field_label` column is in Spanish. Unknown names fall back to `humanize`.
+FIELD_LABELS: dict[str, str] = {
+    "asset_reference": "Vehicle / equipment serviced",
+    "beneficiary": "Beneficiary",
+    "currency": "Currency",
+    "destination": "Destination",
+    "employee_name": "Employee name",
+    "expense_category": "Expense category",
+    "gross_salary": "Gross salary",
+    "invoice_date": "Invoice date",
+    "invoice_number": "Invoice number",
+    "irpf_retention": "Income tax withheld (IRPF)",
+    "item_description": "Item description",
+    "net_amount": "Net amount (tax base)",
+    "net_salary": "Net salary",
+    "paid_by": "Paid / authorised by",
+    "pay_period": "Pay period",
+    "payment_method": "Payment method",
+    "per_diem_days": "Number of days (per diem)",
+    "per_diem_rate": "Daily rate (per diem)",
+    "project_allocation_pct": "Share charged to the project (%)",
+    "quantity": "Quantity",
+    "role": "Role / category",
+    "service_duration": "Service duration",
+    "service_period": "Period invoiced",
+    "social_security_employee": "Social security (employee)",
+    "social_security_employer": "Social security (employer)",
+    "ticket_class": "Ticket class",
+    "total_amount": "Total amount",
+    "travel_purpose": "Purpose of the trip",
+    "unit_price": "Unit price",
+    "vat_amount": "VAT amount",
+    "vat_rate": "VAT rate (%)",
+    "vendor_name": "Supplier",
+    "vendor_tax_id": "Supplier tax ID (NIF/CIF)",
 }
 
 # Why a rule failed, for non-visual rules whose config message is in Spanish.
@@ -121,14 +185,35 @@ class RuleCatalog:
         rule = self._by_id.get(rule_id)
         if rule is None:
             return rule_id
-        return RULE_LABELS.get(rule.rule_name) or humanize(rule.rule_name)
+        return rule_label(rule.rule_name)
 
     def check_type(self, rule_id: str) -> str:
         rule = self._by_id.get(rule_id)
         return getattr(rule, "check_type", "") if rule is not None else ""
 
 
-def _skip_reason(message: str) -> str:
+def field_label(field_name: str) -> str:
+    """English name of an extracted field, from its config `field_name`."""
+    return FIELD_LABELS.get(field_name) or humanize(field_name)
+
+
+def rule_label(rule_name: str) -> str:
+    """English name of a rule, from its config `rule_name`."""
+    return RULE_LABELS.get(rule_name) or humanize(rule_name)
+
+
+def failed_reason(check_type: str, message: str) -> str:
+    """
+    Why a rule did not pass, in English. Visual checks carry the vision model's own (English)
+    observation; other rules only have the config's error_message, which is in Spanish, so
+    they get a generic sentence for their check type instead.
+    """
+    if check_type == "visual_check":
+        return (message or "").strip()
+    return _FAILED_TEXT_BY_CHECK.get(check_type, "Requirement not met")
+
+
+def skip_reason(message: str) -> str:
     """Turn the evaluator's technical skip message into something a reader can act on."""
     msg = (message or "").strip()
     if msg.startswith("Value missing/null"):
@@ -156,13 +241,11 @@ def rule_row(
     The rule id is kept in `rule_id` for a tooltip only — the label is what people read.
     """
     if outcome == "not_checked":
-        text = _skip_reason(message)
+        text = skip_reason(message)
         impact = "Blocks approval until checked" if severity == "error" else "Does not block approval"
         text = f"{text}. {impact}." if text else f"{impact}."
-    elif catalog.check_type(rule_id) == "visual_check":
-        text = (message or "").strip()  # the vision model's own (English) observation
     else:
-        text = _FAILED_TEXT_BY_CHECK.get(catalog.check_type(rule_id), "Requirement not met")
+        text = failed_reason(catalog.check_type(rule_id), message)
     return {
         "rule_id": rule_id,
         "label": catalog.label(rule_id),

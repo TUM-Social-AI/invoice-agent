@@ -156,6 +156,25 @@ class RunManager:
             raise ActionError(f"{action['label']} is not possible while the run is {statuses.label(hub.status)}.")
         return hub
 
+    def edit_field(self, run_id: str, field_name: str, value: str | None) -> dict[str, Any]:
+        """
+        Save (or with `None`, undo) a reviewer's correction of an extracted field and return the
+        field as the page now shows it. Raises KeyError for an unknown run, a run without
+        results, or an unknown field; ActionError when the run's status does not allow edits.
+        """
+        from src.ui.result_view import edited_field
+
+        hub = self.result_hub(run_id)
+        if hub is None or hub.result is None:
+            raise KeyError(run_id)
+        field = next((f for f in hub.result["fields"] if f["field_name"] == field_name), None)
+        if field is None:
+            raise KeyError(field_name)
+        if not statuses.is_editable(hub.status):
+            raise ActionError(f"Fields cannot be edited while the run is {statuses.label(hub.status)}.")
+        hub.set_field_edit(field_name, value, by="reviewer")
+        return edited_field(field, hub.field_edits.get(field_name))
+
     # --- worker ----------------------------------------------------------------------
 
     def _busy(self) -> int:

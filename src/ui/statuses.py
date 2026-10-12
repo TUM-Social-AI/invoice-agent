@@ -11,19 +11,20 @@ from __future__ import annotations
 from typing import Any
 
 # Order is the order of the dashboard filter chips. `tone` picks the pill colour in style.css;
-# `active` runs are still moving on their own (the dashboard refreshes while any exist).
+# `active` runs are still moving on their own (the dashboard refreshes while any exist);
+# `editable` runs let a reviewer correct the extracted field values.
 STATUSES: list[dict[str, Any]] = [
-    {"id": "new", "label": "New", "tone": "neutral", "active": True,
+    {"id": "new", "label": "New", "tone": "neutral", "active": True, "editable": False,
      "description": "Uploaded and waiting for the agent."},
-    {"id": "processing", "label": "Processing", "tone": "running", "active": True,
+    {"id": "processing", "label": "Processing", "tone": "running", "active": True, "editable": False,
      "description": "The agent is checking the invoice."},
-    {"id": "needs_review", "label": "Needs review", "tone": "warn", "active": False,
+    {"id": "needs_review", "label": "Needs review", "tone": "warn", "active": False, "editable": True,
      "description": "The agent found no blocking problem; a person needs to confirm it."},
-    {"id": "returned", "label": "Returned", "tone": "bad", "active": False,
+    {"id": "returned", "label": "Returned", "tone": "bad", "active": False, "editable": True,
      "description": "Not compliant: returned for revision with the issues the agent found."},
-    {"id": "finalized", "label": "Finalized", "tone": "ok", "active": False,
+    {"id": "finalized", "label": "Finalized", "tone": "ok", "active": False, "editable": False,
      "description": "Compliant and confirmed by a reviewer."},
-    {"id": "error", "label": "Error", "tone": "error", "active": False,
+    {"id": "error", "label": "Error", "tone": "error", "active": False, "editable": False,
      "description": "A technical problem stopped the check. Look at the run and re-evaluate it."},
 ]
 STATUS_IDS = {s["id"] for s in STATUSES}
@@ -79,6 +80,10 @@ def verdict_label(verdict: str) -> str:
 
 def is_active(status: str) -> bool:
     return any(s["id"] == status and s["active"] for s in STATUSES)
+
+
+def is_editable(status: str) -> bool:
+    return any(s["id"] == status and s.get("editable") for s in STATUSES)
 
 
 def catalog() -> dict[str, Any]:
