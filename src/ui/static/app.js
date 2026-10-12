@@ -142,7 +142,20 @@ function openRun(runId, filename) {
     run_error: onError,
   };
   Object.entries(handlers).forEach(([type, fn]) =>
-    source.addEventListener(type, (e) => fn(JSON.parse(e.data))));
+    source.addEventListener(type, (e) => {
+      const ev = JSON.parse(e.data);
+      try {
+        fn(ev);
+      } catch (err) {
+        console.error(`Showing the ${type} event failed`, err);
+        // A run that has ended must still stop the clock and open its results, even when its
+        // summary cannot be drawn (e.g. the server and this page come from different versions).
+        if (type === "run_complete" || type === "run_error") {
+          finishStream(ev);
+          if (type === "run_complete" && ev.has_result) loadResult(view.runId);
+        }
+      }
+    }));
 
   // EventSource retries on its own; just tell the user when the server has gone away.
   source.onerror = () => {
