@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from src.ui.rule_summary import RuleCatalog
 from src.ui.runner import RunManager
 from src.ui.web_presenter import WebPresenter
 
@@ -20,6 +21,7 @@ def build_manager(config_path: str, output_root: str = "output/ui") -> RunManage
     presenter = WebPresenter()
     store, config_summary = load_config_store(app_config)
     agent = InvoiceAgent(config=app_config, store=store, presenter=presenter)
+    presenter.set_rule_catalog(RuleCatalog.from_store(store))
     presenter.startup_context(
         config_summary,
         app_config,

@@ -218,11 +218,30 @@ function onToolResult(ev) {
   step.el.querySelector(".step-icon").textContent = ev.success ? "✓" : "✗";
   step.timeEl.textContent = fmtMs(ev.elapsed_ms);
   step.body.append(el("div", "step-result", ev.primary));
+  if (ev.rules && ev.rules.length) step.body.append(ruleList(ev.rules));
   if (ev.details && ev.details.length) {
     const list = el("ul", "details");
     ev.details.forEach((d) => list.append(el("li", d.level, d.text)));
     step.body.append(list);
   }
+}
+
+// A rule is shown by its English name; the id is only a hover tooltip.
+const OUTCOME_ICON = { blocking: "✗", warning: "!", not_checked: "–" };
+
+function ruleList(rules) {
+  const list = el("ul", "rules");
+  rules.forEach((r) => {
+    const li = el("li", `rule ${r.outcome}`);
+    li.title = r.rule_id;
+    li.append(el("span", "rule-icon", OUTCOME_ICON[r.outcome] || "•"));
+    const body = el("span", "rule-body");
+    body.append(el("span", "rule-label", r.label));
+    if (r.text) body.append(el("span", "rule-text", r.text));
+    li.append(body);
+    list.append(li);
+  });
+  return list;
 }
 
 function onComplete(ev) {
@@ -235,15 +254,31 @@ function onComplete(ev) {
   const banner = $("banner");
   banner.className = `banner ${status}`;
   $("banner-title").textContent = `Decision: ${status.replace("_", " ").toUpperCase()}`;
-  const lines = [
-    `${ev.fields_extracted} fields extracted · ${ev.turns} turns · ${ev.rules_passed} rules passed · ` +
-      `${ev.blocking_errors.length} blocking error(s) · ${ev.warnings.length} warning(s)`,
+  // Same buckets as every step headline: passed / blocking errors / warnings / couldn't be checked.
+  const r = ev.rules;
+  const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+  const parts = [
+    `${r.passed} passed`,
+    count(r.blocking.length, "blocking error", "blocking errors"),
+    count(r.warnings.length, "warning", "warnings"),
   ];
-  if (ev.blocking_errors.length) lines.push(`Blocking errors: ${ev.blocking_errors.join(", ")}`);
-  if (ev.warnings.length) lines.push(`Warnings: ${ev.warnings.join(", ")}`);
-  if (ev.flagged_fields.length) lines.push(`Flagged for review: ${ev.flagged_fields.join(", ")}`);
+  if (r.not_checked.length) parts.push(`${r.not_checked.length} couldn't be checked`);
+  const lines = [
+    `${ev.fields_extracted} fields extracted · ${ev.turns} turns`,
+    `Rules: ${parts.join(" · ")}`,
+  ];
+  if (ev.flagged_fields.length) lines.push(`Fields flagged for review: ${ev.flagged_fields.join(", ")}`);
   if (ev.finish_reason) lines.push(`Reason: ${ev.finish_reason}`);
   $("banner-body").textContent = lines.join("\n");
+
+  const rulesBox = $("banner-rules");
+  rulesBox.replaceChildren();
+  [["Blocking errors", r.blocking], ["Warnings", r.warnings], ["Couldn't be checked", r.not_checked]]
+    .filter(([, rows]) => rows.length)
+    .forEach(([title, rows]) => {
+      rulesBox.append(el("p", "banner-section", title));
+      rulesBox.append(ruleList(rows));
+    });
   banner.hidden = false;
   finishStream(ev);
 }
@@ -258,6 +293,7 @@ function onError(ev) {
   banner.className = "banner error";
   $("banner-title").textContent = "The run could not be completed";
   $("banner-body").textContent = ev.message;
+  $("banner-rules").replaceChildren();
   banner.hidden = false;
   finishStream(ev);
 }

@@ -80,7 +80,7 @@ def test_presenter_forces_validate_phase_and_counts_retries():
     assert starts[0]["id"] != starts[1]["id"]
 
 
-def test_presenter_finish_summary_has_decision_and_levelled_details():
+def test_presenter_finish_summary_has_decision_and_named_rules():
     hub = RunHub("r1", "a.pdf")
     p = WebPresenter()
     p.attach(hub)
@@ -91,26 +91,33 @@ def test_presenter_finish_summary_has_decision_and_levelled_details():
             "status": "needs_review",
             "error_failures": ["R1"],
             "warning_failures": ["R2"],
-            "status_explanation": "One rule failed.",
+            "status_explanation": "No blocking error-severity failures; warning-level rules may still be non-pass "
+            "(listed in warning_failures).",
         },
         5,
     )
     result = hub.events_after(0)[-1]
-    assert result["primary"] == "Decision: NEEDS_REVIEW"
-    levels = {d["level"] for d in result["details"]}
-    assert levels == {"error", "warn", "info"}
+    assert result["primary"] == "Decision: NEEDS REVIEW"
+    assert [(r["rule_id"], r["outcome"]) for r in result["rules"]] == [("R1", "blocking"), ("R2", "warning")]
+    # Internal jargon from the finish tool is rewritten for readers.
+    assert "warning_failures" not in result["details"][0]["text"]
 
 
 def test_presenter_run_complete_reports_verdict():
     hub = RunHub("r1", "a.pdf")
     p = WebPresenter()
     p.attach(hub)
-    state = AgentState(pdf_path="a.pdf", output_dir="out", status=AgentStatus.PASSED, turn=7)
+    state = AgentState(
+        pdf_path="a.pdf", output_dir="out", status=AgentStatus.PASSED, turn=7,
+        finish_reason="compliance_passed",
+    )
     p.run_complete(state, paths={"fields_csv": "out/fields.csv"})
     ev = hub.events_after(0)[-1]
     assert ev["type"] == "run_complete"
     assert ev["status"] == "passed"
     assert ev["turns"] == 7
+    assert ev["finish_reason"] == "Compliance passed"  # no snake_case identifiers on screen
+    assert ev["rules"] == {"passed": 0, "blocking": [], "warnings": [], "not_checked": []}
     assert ev["outputs"] == {"fields_csv": "out/fields.csv"}
 
 

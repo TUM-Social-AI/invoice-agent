@@ -43,3 +43,7 @@ google-drive-token*.json
 
 # Local GSD planning artifacts
 .planning/
+
+# Node dependencies (tools/spreadsheet_filter/node_modules is a symlink into a local Codex cache;
+# git on Windows with core.symlinks=false would otherwise treat its ~8.5k files as untracked)
+node_modules/

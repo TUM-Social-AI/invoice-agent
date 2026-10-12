@@ -185,6 +185,22 @@ body {
 .details li.error { color: var(--bad); }
 .details li.warn { color: var(--warn); }
 
+/* Rule rows (named in plain English; the id is only a tooltip) */
+.rules { list-style: none; margin: 8px 0 0; padding: 0; display: grid; gap: 6px; }
+.rule { display: grid; grid-template-columns: 20px 1fr; column-gap: 8px; align-items: start; font-size: 13px; }
+.rule-icon {
+  width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center;
+  font-size: 11px; font-weight: 700; margin-top: 1px;
+}
+.rule.blocking .rule-icon { background: var(--bad-soft); color: var(--bad); }
+.rule.warning .rule-icon { background: var(--warn-soft); color: var(--warn); }
+.rule.not_checked .rule-icon { background: var(--surface-2); color: var(--muted); border: 1px solid var(--border); }
+.rule-label { font-weight: 600; color: var(--text); }
+.rule-text { display: block; color: var(--muted); }
+.rule.blocking .rule-label { color: var(--bad); }
+.rule.warning .rule-label { color: var(--warn); }
+.banner-section { margin: 14px 0 0; font-size: 12px; font-weight: 650; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); }
+
 /* Result banner */
 .banner { margin-top: 24px; padding: 16px 18px; border-radius: 12px; border: 1px solid var(--border); background: var(--surface-2); }
 .banner.passed { background: var(--ok-soft); border-color: var(--ok); }

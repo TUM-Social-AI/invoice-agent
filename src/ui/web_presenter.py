@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from src.agent.loop_utils import summarize_tool_result
-from src.agent.state import AgentState, rule_verdict_summary
+from src.agent.state import AgentState
 from src.llm.config_resolve import (
     active_rule_groups_from_config,
     llm_provider_name,
@@ -18,12 +18,20 @@ from src.output.presenter import (
     _VALIDATE_TOOLS,
     _VISION_TOOLS,
     ConfigLoadSummary,
-    _remaining_gaps_from_compliance,
     _tool_intent,
     _tool_key,
     _tool_label,
 )
 from src.ui.events import RunHub
+from src.ui.rule_summary import (
+    RuleCatalog,
+    finish_rows,
+    friendly_finish_explanation,
+    friendly_finish_reason,
+    summarize_compliance,
+    summarize_run,
+    summarize_visual,
+)
 
 
 def _detail(text: str) -> dict[str, str]:
@@ -53,6 +61,11 @@ class WebPresenter:
         self._tool_counts: dict[tuple[Any, ...], int] = {}
         self._tool_seq = 0
         self._current_tool_id = 0
+        self._catalog = RuleCatalog()
+
+    def set_rule_catalog(self, catalog: RuleCatalog) -> None:
+        """Lets the page show rule names instead of ids (built from the loaded config)."""
+        self._catalog = catalog
 
     # --- run binding -----------------------------------------------------------------
 
@@ -141,8 +154,14 @@ class WebPresenter:
         )
 
     def tool_result(self, tool: str, result: Any, elapsed_ms: int) -> None:
+        rules: list[dict[str, str]] = []
         if tool == "finish":
-            primary, details, success = self._finish_summary(result)
+            primary, details, rules, success = self._finish_summary(result)
+        elif tool in ("check_compliance", "check_compliance_visual") and isinstance(result, dict):
+            summarize = summarize_compliance if tool == "check_compliance" else summarize_visual
+            primary, rules, extra = summarize(result, self._catalog)
+            details = [_detail(d["text"]) if d["level"] == "info" else d for d in extra]
+            success = bool(result.get("success", True))
         else:
             summary = summarize_tool_result(tool, result, 0)
             primary = summary.primary
@@ -150,10 +169,6 @@ class WebPresenter:
             success = summary.success
             if tool == "classify_document_type" and success:
                 primary = f"Document type: {primary}"
-            if tool == "check_compliance":
-                gaps = _remaining_gaps_from_compliance(result)
-                if gaps:
-                    details.append(_detail(f"Remaining gaps: {', '.join(gaps)}"))
         self._emit(
             "tool_result",
             id=self._current_tool_id,
@@ -161,25 +176,19 @@ class WebPresenter:
             success=success,
             primary=primary,
             details=details,
+            rules=rules,
             elapsed_ms=elapsed_ms,
         )
 
-    @staticmethod
-    def _finish_summary(result: Any) -> tuple[str, list[dict[str, str]], bool]:
+    def _finish_summary(self, result: Any) -> tuple[str, list[dict[str, str]], list[dict[str, str]], bool]:
         if not isinstance(result, dict):
-            return str(result), [], True
-        status = str(result.get("status") or "unknown").upper()
+            return str(result), [], [], True
+        status = str(result.get("status") or "unknown").replace("_", " ").upper()
         details: list[dict[str, str]] = []
-        errors = result.get("error_failures", []) or []
-        warnings = result.get("warning_failures", []) or []
-        if errors:
-            details.append({"text": f"Blocking errors: {', '.join(str(e) for e in errors)}", "level": "error"})
-        if warnings:
-            details.append({"text": f"Warnings: {', '.join(str(w) for w in warnings)}", "level": "warn"})
         explanation = str(result.get("status_explanation") or "").strip()
         if explanation:
-            details.append(_detail(f"Reason: {explanation}"))
-        return f"Decision: {status}", details, True
+            details.append(_detail(friendly_finish_explanation(explanation)))
+        return f"Decision: {status}", details, finish_rows(self._catalog, result), True
 
     def run_complete(
         self,
@@ -192,16 +201,13 @@ class WebPresenter:
         no_ground_truth: bool = False,
         ground_truth_csv_only: bool = False,
     ) -> None:
-        rv = rule_verdict_summary(state.rule_results)
         self._emit(
             "run_complete",
             status=state.status.value,
-            finish_reason=state.finish_reason or "",
+            finish_reason=friendly_finish_reason(state.finish_reason or ""),
             turns=state.turn,
             fields_extracted=len(state.extracted_fields),
-            rules_passed=len(state.passed_rules),
-            blocking_errors=list(rv["error_failed_rule_ids"]),
-            warnings=list(rv["warning_failed_rule_ids"]),
+            rules=summarize_run(state.rule_results, self._catalog),
             flagged_fields=[k for k, v in state.extracted_fields.items() if v.flagged_for_review],
             outputs=dict(paths),
         )
