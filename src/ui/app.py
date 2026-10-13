@@ -56,7 +56,7 @@ async def _event_stream(hub: RunHub, request: Request, start_after: int) -> Asyn
 
 
 def create_app(manager: RunManager) -> FastAPI:
-    app = FastAPI(title="Invoice Agent UI")
+    app = FastAPI(title="Impendo")
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
     @app.middleware("http")

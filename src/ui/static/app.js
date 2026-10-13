@@ -98,8 +98,11 @@ async function uploadFile(file) {
       showUploadError(err.detail || `Upload failed (${res.status}).`);
       return;
     }
-    const run = await res.json();
-    location.hash = `#/runs/${encodeURIComponent(run.run_id)}`;
+    // Stay on the list: the invoice shows up at the top and its status follows the agent
+    // (the list refreshes itself while anything is new or processing).
+    await res.json();
+    dash.filter = "all";
+    loadRuns();
   } catch (e) {
     showUploadError(
       location.protocol === "file:"
@@ -222,7 +225,6 @@ function resetView() {
   $("run-actions").replaceChildren();
   $("run-history").replaceChildren();
   $("action-error").hidden = true;
-  $("action-note").hidden = true;
   setPhaseStates(null);
   setStatus("new");
 }
@@ -297,7 +299,6 @@ function draftReturnMessage() {
 }
 
 function openReturnDialog() {
-  $("action-note").hidden = true;
   $("return-invoice").textContent = view.run.filename;
   const list = $("return-issue-list");
   if (returnDraft.runId !== view.runId) {
@@ -328,12 +329,8 @@ function initReturnDialog() {
   // Ticking issues keeps the draft in step until the reviewer has written their own text.
   $("return-issue-list").addEventListener("change", () => { if (!returnDraft.edited) draftReturnMessage(); });
   $("return-redraft").addEventListener("click", draftReturnMessage);
-  $("return-form").addEventListener("submit", () => {
-    // method="dialog" closes it. Nothing is sent: there is no business layer for returns yet.
-    const note = $("action-note");
-    note.textContent = "Preview: the return was not sent and the invoice keeps its status. Returning is not connected yet.";
-    note.hidden = false;
-  });
+  // "Return invoice" submits the form, and method="dialog" just closes it. Click dummy: nothing
+  // is sent and the status does not change (there is no business layer for returns yet).
 }
 
 async function refreshRunMeta() {
@@ -900,7 +897,7 @@ function showDashboard() {
   $("run-card").hidden = true;
   $("result-card").hidden = true;
   $("dashboard").hidden = false;
-  document.title = "Invoice Compliance Agent";
+  document.title = "Impendo";
   loadRuns();
 }
 
@@ -913,7 +910,7 @@ async function showRunPage(runId) {
     return;
   }
   const run = await res.json();
-  document.title = `${run.filename} · Invoice Compliance Agent`;
+  document.title = `${run.filename} · Impendo`;
   openRun(run);
   window.scrollTo(0, 0);
 }

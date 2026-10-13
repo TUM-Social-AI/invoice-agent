@@ -13,7 +13,7 @@ from src.ui.bootstrap import build_manager, default_config_path
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Invoice Agent browser UI")
+    parser = argparse.ArgumentParser(description="Impendo: invoice compliance review in the browser")
     parser.add_argument("--config", default=default_config_path(), help="Config file path")
     parser.add_argument("--output", default="output/ui", help="Where uploads and results are stored")
     parser.add_argument("--port", type=int, default=8000)
@@ -36,7 +36,7 @@ def main() -> None:
     url = f"http://{host}:{args.port}"
     if not args.no_browser:
         threading.Timer(1.0, lambda: webbrowser.open(url)).start()
-    print(f"Invoice Agent UI running at {url}  (Ctrl+C to stop)", flush=True)
+    print(f"Impendo running at {url}  (Ctrl+C to stop)", flush=True)
     uvicorn.run(app, host=host, port=args.port, log_level="warning")
 
 

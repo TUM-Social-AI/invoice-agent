@@ -3,16 +3,28 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Invoice Compliance Agent</title>
+  <title>Impendo</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%23e30600'/%3E%3Ctext x='16' y='23' font-family='Segoe UI,Arial,sans-serif' font-size='20' font-weight='800' fill='white' text-anchor='middle'%3EI%3C/text%3E%3C/svg%3E">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark" aria-hidden="true">§</span>
-      <h1>Invoice Compliance Agent</h1>
+    <div class="brand-group">
+      <a class="brand" href="#/" aria-label="Impendo, all invoices">
+        <span class="brand-mark" aria-hidden="true">I</span>
+        <div class="brand-text">
+          <h1>Impendo</h1>
+          <span class="brand-tagline">Invoice compliance review</span>
+        </div>
+      </a>
+      <div class="client">
+        <span class="client-for">for</span>
+        <img class="client-logo" src="/static/entreculturas-logo.svg" alt="Entreculturas" width="174" height="30">
+      </div>
     </div>
-    <div id="models" class="chips" aria-label="Models in use"></div>
+    <div class="topbar-right">
+      <div id="models" class="chips" aria-label="Models in use"></div>
+    </div>
   </header>
 
   <main class="layout">
@@ -47,7 +59,7 @@
     </div>
 
     <div id="run-bar" class="run-bar" hidden>
-      <a class="back-link" href="#/">← All runs</a>
+      <a class="back-link" href="#/">← All invoices</a>
       <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views">
         <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
         <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"
@@ -55,7 +67,6 @@
       </nav>
       <div id="run-actions" class="run-actions"></div>
       <p id="action-error" class="error-text action-error" role="alert" hidden></p>
-      <p id="action-note" class="action-note" role="status" hidden></p>
       <p id="run-history" class="run-history"></p>
     </div>
 
@@ -135,11 +146,9 @@
         <button type="button" class="dialog-close" data-close aria-label="Close">×</button>
       </div>
 
-      <p class="preview-note">Preview: returning is not connected yet. Nothing will be sent and the invoice keeps its status.</p>
-
       <dl class="return-meta">
         <dt>Invoice</dt><dd id="return-invoice"></dd>
-        <dt>To</dt><dd>Local partner <span class="muted">(recipient comes from the project once returns are connected)</span></dd>
+        <dt>To</dt><dd>Local partner</dd>
       </dl>
 
       <fieldset class="return-issues">
