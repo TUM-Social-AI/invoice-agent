@@ -146,6 +146,8 @@ class RunManager:
         """
         hub = self._runs[run_id]
         action = statuses.ACTIONS[name]
+        if action.get("preview"):
+            raise ActionError(f"{action['label']} is a preview in the page only; it is not connected yet.")
         if name == "reevaluate":
             if hub.status not in action["from"]:
                 raise ActionError(f"{action['label']} is not possible while the run is {statuses.label(hub.status)}.")

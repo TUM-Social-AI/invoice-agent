@@ -639,6 +639,18 @@ def test_field_edit_rejects_unknown_fields_runs_and_bad_bodies(tmp_path):
     assert no_results.put(f"/api/runs/{plain}/fields/vendor_name", json={"value": "X"}).status_code == 404
 
 
+def test_return_is_a_page_preview_the_server_refuses(tmp_path):
+    client = TestClient(create_app(_manager(tmp_path)))
+    action = client.get("/api/statuses").json()["actions"]["return"]
+    assert (action["label"], action["from"], action["preview"]) == ("Return", ["needs_review"], True)
+
+    run_id = _upload(client)
+    res = client.post(f"/api/runs/{run_id}/actions/return")
+    assert res.status_code == 409 and "not connected" in res.json()["detail"]
+    run = client.get(f"/api/runs/{run_id}").json()
+    assert run["status"] == "needs_review" and len(run["history"]) == 3  # nothing changed
+
+
 def test_status_catalog_says_which_statuses_allow_edits(tmp_path):
     statuses = TestClient(create_app(_manager(tmp_path))).get("/api/statuses").json()["statuses"]
     assert [s["id"] for s in statuses if s["editable"]] == ["needs_review", "returned"]

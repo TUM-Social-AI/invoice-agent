@@ -54,9 +54,14 @@ _STATUS_FOR_VERDICT = {
 _FINISHED = [s["id"] for s in STATUSES if not s["active"]]
 
 # `to`: the status the action moves the run to. Re-evaluate has none: it starts a new run.
+# `preview`: shown in the page as a design preview only; the server refuses to carry it out.
 ACTIONS: dict[str, dict[str, Any]] = {
     "confirm": {"label": "Confirm compliant", "from": ["needs_review"], "to": "finalized",
                 "note": "Confirmed as compliant by a reviewer"},
+    # Sending the invoice back needs a business layer that does not exist yet: the page opens
+    # a message dialog, but nothing is sent and the status does not change.
+    "return": {"label": "Return", "from": ["needs_review"], "to": None, "preview": True,
+               "note": "Returned to the local partner"},
     "reevaluate": {"label": "Re-evaluate", "from": _FINISHED, "to": None,
                    "note": "Re-evaluated as a new run"},
 }

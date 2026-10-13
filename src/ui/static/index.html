@@ -55,6 +55,7 @@
       </nav>
       <div id="run-actions" class="run-actions"></div>
       <p id="action-error" class="error-text action-error" role="alert" hidden></p>
+      <p id="action-note" class="action-note" role="status" hidden></p>
       <p id="run-history" class="run-history"></p>
     </div>
 
@@ -122,6 +123,41 @@
       </div>
     </section>
   </main>
+
+  <!-- Return to the local partner: design preview only, nothing is sent (see statuses.ACTIONS). -->
+  <dialog id="return-dialog" class="dialog" aria-labelledby="return-title">
+    <form id="return-form" method="dialog" class="dialog-body">
+      <div class="dialog-head">
+        <div>
+          <p class="eyebrow">Return invoice</p>
+          <h2 id="return-title" class="dialog-title">Return to local partner</h2>
+        </div>
+        <button type="button" class="dialog-close" data-close aria-label="Close">×</button>
+      </div>
+
+      <p class="preview-note">Preview: returning is not connected yet. Nothing will be sent and the invoice keeps its status.</p>
+
+      <dl class="return-meta">
+        <dt>Invoice</dt><dd id="return-invoice"></dd>
+        <dt>To</dt><dd>Local partner <span class="muted">(recipient comes from the project once returns are connected)</span></dd>
+      </dl>
+
+      <fieldset class="return-issues">
+        <legend>Issues to mention</legend>
+        <div id="return-issue-list"></div>
+      </fieldset>
+
+      <label class="return-label" for="return-message">Message</label>
+      <textarea id="return-message" rows="9" maxlength="4000"></textarea>
+      <p class="hint">Drafted from the issues ticked above. Edit it freely.
+        <button type="button" id="return-redraft" class="link-btn">Redraft from the issues</button></p>
+
+      <div class="dialog-actions">
+        <button type="button" class="btn secondary" data-close>Cancel</button>
+        <button type="submit" class="btn danger">Return invoice</button>
+      </div>
+    </form>
+  </dialog>
 
   <script src="/static/app.js"></script>
 </body>

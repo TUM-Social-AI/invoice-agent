@@ -222,6 +222,7 @@ function resetView() {
   $("run-actions").replaceChildren();
   $("run-history").replaceChildren();
   $("action-error").hidden = true;
+  $("action-note").hidden = true;
   setPhaseStates(null);
   setStatus("new");
 }
@@ -244,9 +245,11 @@ function renderRunMeta(run) {
   Object.entries(catalog.actions)
     .filter(([, a]) => a.from.includes(run.status))
     .forEach(([name, a]) => {
-      const b = el("button", `btn${name === "reevaluate" ? " secondary" : ""}`, a.label);
+      const style = { reevaluate: " secondary", return: " danger" }[name] || "";
+      const b = el("button", `btn${style}`, a.label);
       b.type = "button";
-      b.addEventListener("click", () => runAction(name, b));
+      // Preview actions only open their dialog; the server would refuse them.
+      b.addEventListener("click", () => (name === "return" ? openReturnDialog() : runAction(name, b)));
       actions.append(b);
     });
 
@@ -266,6 +269,71 @@ function renderRunMeta(run) {
   };
   if (run.reevaluated_from) hist.append(link("Re-evaluation of an earlier run", run.reevaluated_from));
   if (run.reevaluated_to) hist.append(link("Re-evaluated: open the new run →", run.reevaluated_to));
+}
+
+/* ---------- return to the local partner (design preview: nothing is sent) ---------- */
+
+// The draft survives closing the dialog, so a reviewer can look something up and come back.
+const returnDraft = { runId: null, edited: false };
+
+function returnIssues() {
+  return (result.data && result.data.findings) || [];
+}
+
+function draftReturnMessage() {
+  const picked = [...document.querySelectorAll("#return-issue-list input:checked")]
+    .map((box) => returnIssues().find((f) => f.ref === box.value))
+    .filter(Boolean);
+  const lines = [`Hello,`, ``, `We reviewed the invoice ${view.run.filename} and cannot accept it yet.`];
+  if (picked.length) {
+    lines.push(`Please address the following:`, ``);
+    picked.forEach((f) => lines.push(`- ${f.title}${f.reason ? `: ${f.reason}` : ""}`));
+  } else {
+    lines.push(`[Explain what needs to change.]`);
+  }
+  lines.push(``, `Please send us a corrected invoice or the missing documents.`, ``, `Thank you,`);
+  $("return-message").value = lines.join("\n");
+  returnDraft.edited = false;
+}
+
+function openReturnDialog() {
+  $("action-note").hidden = true;
+  $("return-invoice").textContent = view.run.filename;
+  const list = $("return-issue-list");
+  if (returnDraft.runId !== view.runId) {
+    list.replaceChildren();
+    const issues = returnIssues();
+    issues.forEach((f) => {
+      const row = el("label", "return-issue");
+      const box = el("input");
+      box.type = "checkbox";
+      box.value = f.ref;
+      box.checked = true;
+      row.append(box, el("span", `badge ${f.status}`, STATUS_LABEL[f.status] || humanize(f.status)), el("span", "", `${f.ref} · ${f.title}`));
+      list.append(row);
+    });
+    if (!issues.length) list.append(el("p", "muted", "The agent listed no issues for this invoice."));
+    returnDraft.runId = view.runId;
+    draftReturnMessage();
+  }
+  $("return-dialog").showModal();
+  $("return-message").focus();
+}
+
+function initReturnDialog() {
+  const dialog = $("return-dialog");
+  dialog.querySelectorAll("[data-close]").forEach((b) => b.addEventListener("click", () => dialog.close()));
+  dialog.addEventListener("click", (e) => { if (e.target === dialog) dialog.close(); }); // backdrop
+  $("return-message").addEventListener("input", () => { returnDraft.edited = true; });
+  // Ticking issues keeps the draft in step until the reviewer has written their own text.
+  $("return-issue-list").addEventListener("change", () => { if (!returnDraft.edited) draftReturnMessage(); });
+  $("return-redraft").addEventListener("click", draftReturnMessage);
+  $("return-form").addEventListener("submit", () => {
+    // method="dialog" closes it. Nothing is sent: there is no business layer for returns yet.
+    const note = $("action-note");
+    note.textContent = "Preview: the return was not sent and the invoice keeps its status. Returning is not connected yet.";
+    note.hidden = false;
+  });
 }
 
 async function refreshRunMeta() {
@@ -522,10 +590,11 @@ function onError(ev) {
 const STATUS_LABEL = { failed: "Failed", warning: "Warning" };
 const QUALITY_KIND = { confirmed: "found", matched: "found", cited_unverified: "unsure", ambiguous: "unsure", anchor: "unsure" };
 
-const result = { pages: new Map(), highlight: null, popover: null, popoverPin: null, activeRow: null };
+const result = { data: null, pages: new Map(), highlight: null, popover: null, popoverPin: null, activeRow: null };
 
 function resetResult() {
   closePopover();
+  result.data = null;
   result.pages.clear();
   result.highlight = null;
   result.activeRow = null;
@@ -566,6 +635,8 @@ function placeAt(node, box) {
 
 function renderResult(data) {
   resetResult();
+  result.data = data;
+  returnDraft.runId = null; // the next Return dialog drafts from these issues
   $("open-pdf").href = data.pdf_url;
   $("result-file").textContent = data.file;
   if (view.run) setStatus(view.run.status);
@@ -862,6 +933,7 @@ function route() {
 async function boot() {
   initDropzone();
   initResult();
+  initReturnDialog();
   await loadCatalog();
   window.addEventListener("hashchange", route);
   route();
