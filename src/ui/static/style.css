@@ -190,6 +190,8 @@ html { scrollbar-gutter: stable; }
   transition: border-color .15s, background .15s;
 }
 .dropzone:hover, .dropzone:focus-visible, .dropzone.drag { border-color: var(--brand); background: #fbdcda; outline: none; }
+.dropzone.busy { pointer-events: none; opacity: .65; cursor: progress; }
+#upload-error { white-space: pre-line; }
 .drop-icon { font-size: 30px; color: var(--accent); line-height: 1; }
 .drop-title { margin: 10px 0 2px; font-weight: 700; font-size: 16px; }
 .drop-sub { margin: 0; color: var(--text-2); }

@@ -82,36 +82,61 @@ function showUploadError(message) {
   box.hidden = !message;
 }
 
-async function uploadFile(file) {
-  showUploadError("");
-  if (!file) return;
-  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") {
-    showUploadError("Please choose a PDF file.");
-    return;
-  }
+function serverUnreachableMessage() {
+  return location.protocol === "file:"
+    ? "This page was opened as a file. Start the UI with `python -m src.ui` and open the address it prints."
+    : "Could not reach the server. Is `python -m src.ui` still running in your terminal? Restart it and reload this page.";
+}
+
+// Returns an error message for the file, or "" when it was queued.
+async function uploadOne(file) {
+  if (!/\.pdf$/i.test(file.name) && file.type !== "application/pdf") return "Not a PDF file.";
   const body = new FormData();
   body.append("file", file);
-  try {
-    const res = await fetch("/api/runs", { method: "POST", body });
-    if (!res.ok) {
-      const err = await res.json().catch(() => ({}));
-      showUploadError(err.detail || `Upload failed (${res.status}).`);
-      return;
-    }
-    // Stay on the list: the invoice shows up at the top and its status follows the agent
-    // (the list refreshes itself while anything is new or processing).
+  const res = await fetch("/api/runs", { method: "POST", body });
+  if (res.ok) {
     await res.json();
-    dash.filter = "all";
-    // From the home page, go to the list so the new invoice is seen at the top.
-    if (location.hash.startsWith("#/invoices")) loadRuns();
-    else location.hash = "#/invoices";
-  } catch (e) {
-    showUploadError(
-      location.protocol === "file:"
-        ? "This page was opened as a file. Start the UI with `python -m src.ui` and open the address it prints."
-        : "Could not reach the server. Is `python -m src.ui` still running in your terminal? Restart it and reload this page."
-    );
+    return "";
   }
+  const err = await res.json().catch(() => ({}));
+  return err.detail || `Upload failed (${res.status}).`;
+}
+
+// Files are sent one after another, so the agent checks them in the order they were chosen.
+async function uploadFiles(fileList) {
+  showUploadError("");
+  const files = Array.from(fileList || []);
+  if (!files.length) return;
+  const zone = $("dropzone");
+  const title = zone.querySelector(".drop-title");
+  const idleTitle = title.textContent;
+  zone.classList.add("busy");
+  const failed = [];
+  let queued = 0;
+  try {
+    for (const [i, file] of files.entries()) {
+      if (files.length > 1) title.textContent = `Uploading ${i + 1} of ${files.length}…`;
+      const problem = await uploadOne(file);
+      if (problem) failed.push(files.length > 1 ? `${file.name}: ${problem}` : problem);
+      else queued += 1;
+    }
+  } catch (e) {
+    failed.push(serverUnreachableMessage());
+  } finally {
+    title.textContent = idleTitle;
+    zone.classList.remove("busy");
+  }
+  if (failed.length) {
+    const head = files.length > 1 ? `${failed.length} of ${files.length} files were not uploaded:\n` : "";
+    showUploadError(head + failed.join("\n"));
+  }
+  if (!queued) return;
+  // Stay on the list: new invoices show up at the top and their status follows the agent
+  // (the list refreshes itself while anything is new or processing).
+  dash.filter = "all";
+  // From the home page, go to the list so the new invoices are seen at the top.
+  if (location.hash.startsWith("#/invoices")) loadRuns();
+  else location.hash = "#/invoices";
 }
 
 function initDropzone() {
@@ -121,12 +146,12 @@ function initDropzone() {
   zone.addEventListener("keydown", (e) => {
     if (e.key === "Enter" || e.key === " ") { e.preventDefault(); input.click(); }
   });
-  input.addEventListener("change", () => { uploadFile(input.files[0]); input.value = ""; });
+  input.addEventListener("change", () => { const files = Array.from(input.files); input.value = ""; uploadFiles(files); });
   ["dragenter", "dragover"].forEach((t) =>
     zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.add("drag"); }));
   ["dragleave", "drop"].forEach((t) =>
     zone.addEventListener(t, (e) => { e.preventDefault(); zone.classList.remove("drag"); }));
-  zone.addEventListener("drop", (e) => uploadFile(e.dataTransfer.files[0]));
+  zone.addEventListener("drop", (e) => uploadFiles(e.dataTransfer.files));
 }
 
 /* ---------- dashboard: one row per invoice, shown by its latest run ---------- */
