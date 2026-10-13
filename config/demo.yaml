@@ -1,4 +1,4 @@
-# Short live demo: one invoice type (A.7 services), six fields and one rule (R_SRV_103, invoice
+# Short live demo: one invoice type (A.7 services), five fields and one rule (R_SRV_103, invoice
 # arithmetic incl. amount in words), with English labels and messages in config/csv_demo.
 # Otherwise identical to config/config.yaml. Run: python -m src.ui --config config/demo.yaml
 

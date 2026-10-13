@@ -450,10 +450,21 @@ def _first_box(ev: Optional[dict]) -> Optional[list[float]]:
     return None
 
 
+def _main_evidence(evidence: list[dict]) -> Optional[dict]:
+    """
+    The evidence entry a finding points at: the one built from the most cited lines. A verdict
+    often also cites a stray line (a column header, a label), which should not be the target.
+    """
+    located = [ev for ev in evidence if ev.get("page") and ev.get("boxes")]
+    if not located:
+        return None
+    return max(located, key=lambda ev: len(ev.get("line_ids") or []))  # first one wins a tie
+
+
 def _finding_target(f: dict) -> tuple[Optional[int], Optional[list[float]]]:
-    for ev in f.get("evidence") or []:
-        if ev.get("page") and ev.get("boxes"):
-            return ev["page"], ev["boxes"][0]
+    main = _main_evidence(f.get("evidence") or [])
+    if main:
+        return main["page"], main["boxes"][0]
     exp = f.get("expected")
     if exp and exp.get("page"):
         return exp["page"], _first_box(exp)
@@ -701,7 +712,8 @@ def render_flagged_pdf(
                 ov.add(Mark(grown, color, tag, width=FINDING_WIDTH, short=f["ref"], tag=f["ref"]))
             for b in exp_boxes:
                 ov.add(Mark(b, color, f"{tag} expected", dashed=True, width=FINDING_EXPECTED_WIDTH, short=f"{f['ref']} expected", tag=f["ref"]))
-            anchor = (boxes or exp_boxes or [None])[0]
+            main = _main_evidence([ev for ev in f.get("evidence") or [] if ev.get("page") == p])
+            anchor = main["boxes"][0] if main else (exp_boxes or [None])[0]
             dy = ov.icon_slot((anchor[1] * g.disp_h) if anchor else 24.0)
             dx = g.disp_w + 6
             if anchor:
