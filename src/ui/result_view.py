@@ -6,7 +6,8 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
-from src.trace.pdf_writer import _finding_comment_text, _finding_target, _value_str
+from src.trace.pdf_writer import _finding_target, _value_str
+from src.ui.rule_summary import failed_reason, field_label, rule_label, skip_reason
 
 # JPEG keeps scans ~5x smaller than PNG; at this quality the boxes and labels stay crisp.
 JPEG_QUALITY = 88
@@ -30,6 +31,23 @@ def _target(page: Any, box: Optional[list[float]], scan_fracs: dict[int, float])
     if p not in scan_fracs:
         return None
     return {"page": p, "box": _scale_box(box, scan_fracs[p])}
+
+
+def _issue_details(f: dict) -> str:
+    """
+    What the expanded issue and its pin on the page say, in English. The config's
+    error_message is left out on purpose: it is in Spanish (see rule_summary.failed_reason).
+    """
+    lines = []
+    if f.get("check_type") == "visual_check" and f.get("requirement"):
+        lines.append(f"Requirement: {f['requirement']}")  # visual requirements are English sentences
+    if f.get("field_names"):
+        lines.append("Fields: " + ", ".join(field_label(n) for n in f["field_names"]))
+    confidence = (f.get("visual") or {}).get("confidence")
+    if isinstance(confidence, (int, float)):
+        lines.append(f"Model confidence: {confidence:.2f}")
+    lines.append(f"Rule {f['rule_id']}")
+    return "\n".join(lines)
 
 
 def build_result_view(trace: dict, run_id: str) -> dict:
@@ -76,7 +94,7 @@ def build_result_view(trace: dict, run_id: str) -> dict:
             target = _target(ev.get("page") or f.get("source_page"), boxes[0] if boxes else None, scan_fracs)
         fields.append({
             "field_name": f["field_name"],
-            "label": f.get("label") or f["field_name"],
+            "label": field_label(f["field_name"]),  # the config's own labels are Spanish
             "value": f.get("value"),
             "display": _value_str(f.get("value")),  # same formatting as the labels in the PDF
             "confidence": f.get("confidence"),
@@ -97,11 +115,27 @@ def build_result_view(trace: dict, run_id: str) -> dict:
             "rule_id": f["rule_id"],
             "status": f["status"],
             "severity": f.get("severity") or "",
-            "title": f.get("error_message") or f.get("message") or f.get("rule_name") or f["rule_id"],
-            "comment": _finding_comment_text(f),
+            "title": rule_label(f.get("rule_name") or "") or f["rule_id"],
+            "reason": failed_reason(f.get("check_type") or "", f.get("message") or ""),
+            "comment": _issue_details(f),
             "target": _target(page, box, scan_fracs),
         })
     findings.sort(key=lambda x: order[x["status"]])
+
+    # The pins on the page carry the PDF's comment text; show the same English text as the list,
+    # also for rules that could not be checked (those are pinned but not listed).
+    by_ref = {f["ref"]: f for f in trace["findings"] if f.get("ref")}
+    for p in pages:
+        for c in p["comments"]:
+            f = by_ref.get(c["ref"])
+            if not f:
+                continue
+            if f.get("status") in order:
+                reason = failed_reason(f.get("check_type") or "", f.get("message") or "")
+            else:
+                reason = skip_reason(f.get("message") or "")
+            c["title"] = f"{f['ref']} · {rule_label(f.get('rule_name') or '') or f['rule_id']}"
+            c["text"] = "\n".join(t for t in (reason, _issue_details(f)) if t)
 
     doc, run = trace.get("document") or {}, trace.get("run") or {}
     return {
@@ -115,16 +149,43 @@ def build_result_view(trace: dict, run_id: str) -> dict:
     }
 
 
+def edited_field(field: dict, edit: Optional[dict]) -> dict:
+    """
+    A field as the page shows it once a reviewer corrected it. The AI's reading is kept in
+    `edit.original` so the page can show both. The location box stays where the AI read it.
+    """
+    if not edit:
+        return field
+    value = edit["value"] or None  # an emptied value reads as "not found"
+    return {
+        **field,
+        "value": value,
+        "display": _value_str(value),
+        "edit": {"at": edit["at"], "by": edit.get("by") or "reviewer", "original": field["display"]},
+    }
+
+
+def apply_field_edits(view: dict, edits: dict[str, dict]) -> dict:
+    if not edits:
+        return view
+    return {**view, "fields": [edited_field(f, edits.get(f["field_name"])) for f in view["fields"]]}
+
+
 def render_page_images(flagged_pdf: str, layout: dict, out_dir: str | Path, scale: float) -> dict[int, str]:
     """
     Render each source page of the flagged PDF to JPEG, skipping the summary pages.
     Annotations are not drawn: the UI shows the comment icons itself, so they stay clickable.
+    Images already in `out_dir` are kept: each run has its own folder, so they come from this
+    same flagged PDF (a saved run reopened after a restart).
     """
+    out = Path(out_dir)
+    images = {lp["page"]: str(out / f"p{lp['page']}.jpg") for lp in layout["pages"]}
+    if all(Path(p).is_file() for p in images.values()):
+        return images
+
     import pypdfium2 as pdfium
 
-    out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    images: dict[int, str] = {}
     doc = pdfium.PdfDocument(flagged_pdf)
     try:
         for lp in layout["pages"]:
@@ -134,7 +195,6 @@ def render_page_images(flagged_pdf: str, layout: dict, out_dir: str | Path, scal
                 page.render(scale=scale, draw_annots=False).to_pil().convert("RGB").save(path, quality=JPEG_QUALITY)
             finally:
                 page.close()
-            images[lp["page"]] = str(path)
     finally:
         doc.close()
     return images
