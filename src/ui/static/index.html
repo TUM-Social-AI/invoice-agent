@@ -10,7 +10,7 @@
 <body>
   <header class="topbar">
     <div class="brand-group">
-      <a class="brand" href="#/" aria-label="Impendo, all invoices">
+      <a class="brand" href="#/" aria-label="Impendo, home">
         <span class="brand-mark" aria-hidden="true">I</span>
         <div class="brand-text">
           <h1>Impendo</h1>
@@ -24,10 +24,43 @@
     </div>
     <div class="topbar-right">
       <div id="models" class="chips" aria-label="Models in use"></div>
+      <nav class="main-nav" aria-label="Main">
+        <a href="#/" data-nav="home">Home</a>
+        <a href="#/invoices" data-nav="invoices">Invoices</a>
+      </nav>
     </div>
   </header>
 
   <main class="layout">
+    <!-- Home: today's desk. The upload card is moved here from the invoices page while it shows. -->
+    <div id="home" class="home" hidden>
+      <section class="card hero" aria-labelledby="hero-title">
+        <p id="hero-greeting" class="hero-greeting"></p>
+        <h2 id="hero-title" class="hero-title">Welcome back to Impendo</h2>
+        <p id="hero-date" class="hero-date"></p>
+        <p id="hero-summary" class="hero-summary"></p>
+        <a id="hero-cta" class="btn hero-cta" href="#/invoices?status=needs_review">Review invoices</a>
+      </section>
+
+      <div id="home-tiles" class="tiles" role="list"></div>
+      <p id="home-alert" class="home-alert" role="status" hidden></p>
+
+      <div class="home-grid">
+        <div class="home-col">
+          <section id="resume-card" class="card resume-card" aria-labelledby="resume-title" hidden>
+            <h3 id="resume-title" class="section-title">Pick up where you left off</h3>
+            <a id="resume-link" class="resume-link"></a>
+          </section>
+          <div id="home-upload-slot"></div>
+        </div>
+        <section class="card activity-card" aria-labelledby="activity-title">
+          <h3 id="activity-title" class="section-title">Recent activity</h3>
+          <ol id="activity-list" class="activity-list"></ol>
+          <p id="activity-empty" class="muted" hidden>Nothing has happened yet. Upload an invoice to get started.</p>
+        </section>
+      </div>
+    </div>
+
     <div id="dashboard" class="dashboard" hidden>
       <section id="upload-card" class="card upload-card">
         <div id="dropzone" class="dropzone" tabindex="0" role="button"
@@ -59,7 +92,7 @@
     </div>
 
     <div id="run-bar" class="run-bar" hidden>
-      <a class="back-link" href="#/">← All invoices</a>
+      <a class="back-link" href="#/invoices">← All invoices</a>
       <nav id="view-tabs" class="view-tabs" role="tablist" aria-label="Run views">
         <button id="vtab-run" class="view-tab" type="button" role="tab" data-view="run">Run</button>
         <button id="vtab-result" class="view-tab" type="button" role="tab" data-view="result"

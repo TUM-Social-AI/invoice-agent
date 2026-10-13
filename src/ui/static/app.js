@@ -102,7 +102,9 @@ async function uploadFile(file) {
     // (the list refreshes itself while anything is new or processing).
     await res.json();
     dash.filter = "all";
-    loadRuns();
+    // From the home page, go to the list so the new invoice is seen at the top.
+    if (location.hash.startsWith("#/invoices")) loadRuns();
+    else location.hash = "#/invoices";
   } catch (e) {
     showUploadError(
       location.protocol === "file:"
@@ -891,18 +893,175 @@ function initResult() {
 
 /* ---------- pages: #/ is the dashboard, #/runs/<id> one run ---------- */
 
-function showDashboard() {
+/* ---------- home: today's desk ---------- */
+
+const home = { timer: null };
+const LAST_RUN_KEY = "impendo.lastRun";
+
+// Per-browser convenience only: losing it just hides the "pick up where you left off" card.
+function rememberLastRun(runId) {
+  try { localStorage.setItem(LAST_RUN_KEY, JSON.stringify({ id: runId, at: Date.now() })); } catch (e) { /* ignore */ }
+}
+
+function lastRun() {
+  try { return JSON.parse(localStorage.getItem(LAST_RUN_KEY) || "null"); } catch (e) { return null; }
+}
+
+function greeting() {
+  const h = new Date().getHours();
+  return h < 12 ? "Good morning" : h < 18 ? "Good afternoon" : "Good evening";
+}
+
+const plural = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+const runLink = (id) => `#/runs/${encodeURIComponent(id)}`;
+
+// The home tiles: each opens the invoice list filtered to its statuses.
+const HOME_TILES = [
+  { statuses: ["needs_review"], label: "Need your review", tone: "warn" },
+  { statuses: ["returned"], label: "Returned", tone: "bad" },
+  { statuses: ["new", "processing"], link: "processing", label: "Being checked", tone: "running" },
+  { statuses: ["finalized"], label: "Finalized", tone: "ok" },
+];
+
+function moveUploadCard(slot) {
+  const card = $("upload-card");
+  if (card.parentElement !== slot) slot.prepend(card);
+}
+
+function showHome() {
   resetView();
+  clearTimeout(dash.timer);
+  ["run-bar", "run-card", "result-card", "dashboard"].forEach((id) => ($(id).hidden = true));
+  $("home").hidden = false;
+  moveUploadCard($("home-upload-slot"));
+  document.title = "Impendo";
+  $("hero-greeting").textContent = greeting();
+  $("hero-date").textContent = new Date().toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  loadHome();
+}
+
+async function loadHome() {
+  clearTimeout(home.timer);
+  const res = await fetch("/api/invoices").catch(() => null);
+  if ($("home").hidden) return;
+  if (!res || !res.ok) {
+    $("hero-summary").textContent = "Could not load the invoices. Is `python -m src.ui` still running?";
+    return;
+  }
+  const invoices = await res.json();
+  renderHome(invoices);
+  if (invoices.some((r) => statusInfo(r.status).active)) home.timer = setTimeout(loadHome, DASH_REFRESH_MS);
+}
+
+function renderHome(invoices) {
+  const count = (...ids) => invoices.filter((r) => ids.includes(r.status)).length;
+  const review = count("needs_review");
+  const returned = count("returned");
+  const checking = count("new", "processing");
+  const errors = count("error");
+
+  // One sentence that says what needs attention today.
+  const summary = $("hero-summary");
+  summary.replaceChildren();
+  const parts = [];
+  if (review) parts.push(el("b", "", `${plural(review, "invoice needs", "invoices need")} your review`));
+  if (checking) parts.push(document.createTextNode(`${plural(checking, "invoice is", "invoices are")} being checked right now`));
+  if (returned) parts.push(document.createTextNode(`${plural(returned, "invoice was", "invoices were")} returned for revision`));
+  if (!invoices.length) parts.push(document.createTextNode("No invoices yet. Upload the first one below to get started."));
+  else if (!review && !checking && !errors) parts.unshift(el("b", "", "You're all caught up."));
+  parts.forEach((p, i) => { if (i) summary.append(" · "); summary.append(p); });
+  $("hero-cta").hidden = !review;
+
+  const tiles = $("home-tiles");
+  tiles.replaceChildren(...HOME_TILES.map((t) => {
+    const a = el("a", `tile tone-${t.tone}`);
+    a.href = `#/invoices?status=${t.link || t.statuses[0]}`;
+    a.setAttribute("role", "listitem");
+    a.append(el("span", "tile-n", String(count(...t.statuses))), el("span", "tile-label", t.label));
+    return a;
+  }));
+
+  const alert = $("home-alert");
+  alert.replaceChildren();
+  if (errors) {
+    const link = el("a", "", "Show them");
+    link.href = "#/invoices?status=error";
+    alert.append(`${plural(errors, "invoice", "invoices")} stopped with a technical error and should be re-evaluated. `, link);
+  }
+  alert.hidden = !errors;
+
+  renderResume(invoices);
+  renderActivity(invoices);
+}
+
+async function renderResume(invoices) {
+  const last = lastRun();
+  const card = $("resume-card");
+  let run = last && invoices.find((r) => r.run_id === last.id);
+  if (last && !run) {
+    // An older run of an invoice that was re-checked since: still worth offering.
+    const res = await fetch(`/api/runs/${encodeURIComponent(last.id)}`).catch(() => null);
+    run = res && res.ok ? await res.json() : null;
+  }
+  card.hidden = !run;
+  if (!run) return;
+  const link = $("resume-link");
+  link.href = runLink(run.run_id);
+  link.replaceChildren(
+    el("span", "resume-name", run.filename),
+    statusPill(run.status),
+    el("span", "resume-when", `opened ${fmtAgo(last.at / 1000)}`),
+  );
+}
+
+function renderActivity(invoices) {
+  // Decisions only (agent, reviewer, errors), not the queue's own New / Processing steps.
+  const events = invoices.flatMap((r) => (r.history || [])
+    .filter((h) => h.by !== "system" || h.status === "error")
+    .map((h) => ({ ...h, run: r })));
+  events.sort((a, b) => b.at - a.at);
+  const list = $("activity-list");
+  list.replaceChildren(...events.slice(0, 8).map((e) => {
+    const li = el("li", "activity");
+    const a = el("a", "activity-link");
+    a.href = runLink(e.run.run_id);
+    const body = el("span", "activity-body");
+    body.append(el("span", "activity-name", e.run.filename));
+    const who = e.by === "reviewer" ? "by a reviewer" : "";
+    body.append(el("span", "activity-note", [statusInfo(e.status).label, who].filter(Boolean).join(" ")));
+    const when = el("span", "activity-when", fmtAgo(e.at));
+    when.title = fmtWhen(e.at);
+    a.append(el("span", `activity-dot tone-${statusInfo(e.status).tone}`), body, when);
+    li.append(a);
+    return li;
+  }));
+  $("activity-empty").hidden = events.length > 0;
+}
+
+/* ---------- pages: #/ home, #/invoices the list, #/runs/<id> one run ---------- */
+
+function setNav(page) {
+  document.querySelectorAll(".main-nav a").forEach((a) => a.classList.toggle("on", a.dataset.nav === page));
+}
+
+function showDashboard(filter) {
+  resetView();
+  clearTimeout(home.timer);
   $("run-bar").hidden = true;
   $("run-card").hidden = true;
   $("result-card").hidden = true;
+  $("home").hidden = true;
   $("dashboard").hidden = false;
-  document.title = "Impendo";
+  moveUploadCard($("dashboard"));
+  if (filter) dash.filter = filter;
+  document.title = "Invoices · Impendo";
   loadRuns();
 }
 
 async function showRunPage(runId) {
   clearTimeout(dash.timer);
+  clearTimeout(home.timer);
+  $("home").hidden = true;
   const res = await fetch(`/api/runs/${encodeURIComponent(runId)}`).catch(() => null);
   if (currentRunId() !== runId) return; // the user navigated on meanwhile
   if (!res || !res.ok) {
@@ -911,6 +1070,7 @@ async function showRunPage(runId) {
   }
   const run = await res.json();
   document.title = `${run.filename} · Impendo`;
+  rememberLastRun(run.run_id);
   openRun(run);
   window.scrollTo(0, 0);
 }
@@ -923,8 +1083,17 @@ function currentRunId() {
 
 function route() {
   const runId = currentRunId();
-  if (runId) showRunPage(runId);
-  else showDashboard();
+  const list = location.hash.match(/^#\/invoices(?:\?status=([a-z_]+))?$/);
+  if (runId) {
+    setNav("invoices");
+    showRunPage(runId);
+  } else if (list) {
+    setNav("invoices");
+    showDashboard(list[1] || "all");
+  } else {
+    setNav("home");
+    showHome();
+  }
 }
 
 async function boot() {
