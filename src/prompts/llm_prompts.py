@@ -268,6 +268,8 @@ OCR transcript of the pages above (may contain OCR errors; each line starts with
 Also add to every rule object:
   "evidence_line_ids": IDs of the OCR lines that show what you based the verdict on, e.g. ["p2_L39", "p2_L40"]
      (the stamp text, the date, the signature label next to the signature). [] if none apply.
+     For a rule that fails, cite only the lines that show the problem (e.g. the two values that
+     disagree, or the incomplete stamp), not every line you checked to reach the verdict.
   "evidence_kind": one of
      "text"   — the evidence is printed or stamped text in the cited lines,
      "anchor" — the evidence is not text (signature, seal graphic); cite the nearest label or stamp text lines,

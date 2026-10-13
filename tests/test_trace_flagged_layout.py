@@ -132,3 +132,14 @@ def test_finalize_stores_the_layout_in_the_trace(tmp_path, monkeypatch, summary_
     assert layout["file"] == "flagged_inv.pdf"
     assert (layout["summary_pages"] > 0) is summary_pages
     assert len(PdfReader(paths["flagged_pdf"]).pages) == 2 + layout["summary_pages"]
+
+
+def test_finding_points_at_the_evidence_with_most_cited_lines():
+    from src.trace.pdf_writer import _finding_target
+
+    f = _finding("F1", "failed", 1)
+    f["evidence"] = [
+        {"page": 1, "boxes": [[0.7, 0.45, 0.77, 0.47]], "line_ids": ["p1_L21"]},  # stray column header
+        {"page": 1, "boxes": [[0.15, 0.55, 0.78, 0.61]], "line_ids": ["p1_L40", "p1_L42"]},
+    ]
+    assert _finding_target(f) == (1, [0.15, 0.55, 0.78, 0.61])
